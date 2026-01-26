@@ -17,6 +17,8 @@ pub enum FsError {
     NotADirectory(String),
     #[error("invalid path")]
     InvalidPath,
+    #[error("http error: {0}")]
+    Http(String),
     #[error("database error: {0}")]
     Surreal(#[from] surrealdb::Error),
 }
@@ -229,6 +231,22 @@ where
         self.write_file(&dest, content).await
     }
 
+    /// Change directory: resolve `target` relative to `current`, ensure it exists and is a directory.
+    /// Returns the normalized new path.
+    pub async fn cd(&self, current: &str, target: &str) -> Result<String> {
+        let resolved = resolve_relative(current, target)?;
+        match self.get_entry(&resolved).await? {
+            Some(e) if e.is_dir => Ok(resolved),
+            Some(_) => Err(FsError::NotADirectory(resolved)),
+            None => Err(FsError::NotFound(resolved)),
+        }
+    }
+
+    /// Return the normalized path for the current directory.
+    pub fn pwd(&self, current: &str) -> Result<String> {
+        normalize_path(current)
+    }
+
     async fn require_file(&self, path: &str) -> Result<Entry> {
         let path = normalize_path(path)?;
         match self.get_entry(&path).await? {
@@ -378,6 +396,22 @@ fn normalize_path(input: &str) -> Result<String> {
     Ok(normalized)
 }
 
+fn resolve_relative(base: &str, target: &str) -> Result<String> {
+    if target.is_empty() {
+        return Err(FsError::InvalidPath);
+    }
+    if target.starts_with('/') {
+        return normalize_path(target);
+    }
+
+    let mut combined = String::from(base);
+    if !combined.ends_with('/') {
+        combined.push('/');
+    }
+    combined.push_str(target);
+    normalize_path(&combined)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -448,5 +482,27 @@ mod tests {
 
         let content = fs.cat("/docs/copies/dest.txt").await.unwrap();
         assert_eq!(content, "copy me");
+    }
+
+    #[tokio::test]
+    async fn cd_and_pwd() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir_p("/home/user").await.unwrap();
+        let mut cwd = "/".to_string();
+
+        cwd = fs.cd(&cwd, "home").await.unwrap();
+        assert_eq!(cwd, "/home");
+
+        cwd = fs.cd(&cwd, "user").await.unwrap();
+        assert_eq!(cwd, "/home/user");
+
+        cwd = fs.cd(&cwd, "..").await.unwrap();
+        assert_eq!(cwd, "/home");
+
+        let pwd = fs.pwd(&cwd).unwrap();
+        assert_eq!(pwd, "/home");
+
+        let err = fs.cd(&cwd, "nope").await.unwrap_err();
+        matches!(err, FsError::NotFound(_));
     }
 }

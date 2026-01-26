@@ -3,6 +3,7 @@ use std::io::Write;
 use std::path::PathBuf;
 
 use regex::Regex;
+use reqwest::{Client, Url};
 use surrealdb::engine::any::connect;
 use surrealdb::engine::local::RocksDb;
 use surrealdb::opt::auth::Root;
@@ -46,6 +47,8 @@ where
     let stdin = BufReader::new(io::stdin());
     let mut lines = stdin.lines();
 
+    let mut cwd = String::from("/");
+
     loop {
         print!("surrealfs> ");
         std::io::stdout().flush().ok();
@@ -71,11 +74,12 @@ where
 
         let result = match cmd {
             "ls" => {
-                let (opts, target_path) = parse_ls_args(&args);
-                handle_ls(&fs, target_path, opts).await
+                let (opts, target_arg) = parse_ls_args(&args);
+                let target_path = resolve_cli_path(&cwd, target_arg);
+                handle_ls(&fs, &target_path, opts).await
             }
             "cat" => match args.as_slice() {
-                [path] => fs.cat(path).await.map(|c| {
+                [path] => fs.cat(&resolve_cli_path(&cwd, path)).await.map(|c| {
                     print!("{}", c);
                 }),
                 _ => Err(help_error()),
@@ -93,7 +97,8 @@ where
                     } else {
                         (10, args[0])
                     };
-                    fs.tail(path, n).await.map(|lines| {
+                    let path = resolve_cli_path(&cwd, path);
+                    fs.tail(&path, n).await.map(|lines| {
                         for l in lines {
                             println!("{}", l);
                         }
@@ -104,9 +109,9 @@ where
                 if args.is_empty() {
                     Err(help_error())
                 } else {
-                    let path = args[0];
+                    let path = resolve_cli_path(&cwd, args[0]);
                     let start = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
-                    fs.nl(path, start).await.map(|lines| {
+                    fs.nl(&path, start).await.map(|lines| {
                         for l in lines {
                             println!("{:>4}  {}", l.number, l.line);
                         }
@@ -119,9 +124,9 @@ where
                 } else {
                     let recursive = args.contains(&"-r") || args.contains(&"--recursive");
                     let pattern = args[0];
-                    let path = args[1];
+                    let path = resolve_cli_path(&cwd, args[1]);
                     match Regex::new(pattern) {
-                        Ok(re) => fs.grep(&re, path, recursive).await.map(|matches| {
+                        Ok(re) => fs.grep(&re, &path, recursive).await.map(|matches| {
                             for m in matches {
                                 println!("{}:{}: {}", m.path, m.line_number, m.line);
                             }
@@ -134,24 +139,51 @@ where
                 }
             }
             "touch" => match args.as_slice() {
-                [path] => fs.touch(path).await,
+                [path] => fs.touch(&resolve_cli_path(&cwd, path)).await,
                 _ => Err(help_error()),
             },
             "mkdir_p" => match args.as_slice() {
-                [path] => fs.mkdir_p(path).await,
+                [path] => fs.mkdir_p(&resolve_cli_path(&cwd, path)).await,
                 _ => Err(help_error()),
             },
             "write_file" => {
                 if args.len() < 2 {
                     Err(help_error())
                 } else {
-                    let path = args[0];
+                    let path = resolve_cli_path(&cwd, args[0]);
                     let content = args[1..].join(" ");
-                    fs.write_file(path, content).await
+                    fs.write_file(&path, content).await
                 }
             }
             "cp" => match args.as_slice() {
-                [src, dest] => fs.cp(src, dest).await,
+                [src, dest] => {
+                    let src = resolve_cli_path(&cwd, src);
+                    let dest = resolve_cli_path(&cwd, dest);
+                    fs.cp(&src, &dest).await
+                }
+                _ => Err(help_error()),
+            },
+            "curl" => {
+                match parse_curl_args(&args, &cwd) {
+                    Ok(opts) => run_curl(&fs, opts).await,
+                    Err(e) => Err(e),
+                }
+            }
+            "pwd" => {
+                println!("{}", cwd);
+                Ok(())
+            }
+            "cd" => match args.as_slice() {
+                [path] => {
+                    let target = resolve_cli_path(&cwd, path);
+                    match fs.cd(&cwd, &target).await {
+                        Ok(new_cwd) => {
+                            cwd = new_cwd;
+                            Ok(())
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
                 _ => Err(help_error()),
             },
             "help" => {
@@ -185,8 +217,167 @@ fn print_help() {
     println!("  mkdir_p <path>");
     println!("  write_file <path> <content>");
     println!("  cp <src> <dest>");
+    println!("  curl [options] <url>");
+    println!("     options: -o <file>, -O, -L, -H <h:v>, -d <data>, -X <method>");
+    println!("  pwd");
+    println!("  cd <path>");
     println!("  help");
     println!("  exit | quit");
+}
+
+fn resolve_cli_path(cwd: &str, input: &str) -> String {
+    if input.starts_with('/') {
+        input.to_string()
+    } else {
+        let mut combined = cwd.to_string();
+        if !combined.ends_with('/') {
+            combined.push('/');
+        }
+        combined.push_str(input);
+        combined
+    }
+}
+
+#[derive(Debug)]
+struct CurlOptions {
+    url: String,
+    follow: bool,
+    headers: Vec<(String, String)>,
+    data: Option<String>,
+    method: Option<String>,
+    out: Option<String>,
+}
+
+fn parse_curl_args(args: &[&str], cwd: &str) -> Result<CurlOptions, FsError> {
+    let mut follow = false;
+    let mut headers = Vec::new();
+    let mut data = None;
+    let mut method = None;
+    let mut out = None;
+    let mut url = None;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i] {
+            "-L" => {
+                follow = true;
+                i += 1;
+            }
+            "-H" => {
+                if i + 1 >= args.len() {
+                    return Err(help_error());
+                }
+                let h = args[i + 1];
+                if let Some((k, v)) = h.split_once(':') {
+                    headers.push((k.trim().to_string(), v.trim().to_string()));
+                }
+                i += 2;
+            }
+            "-d" => {
+                if i + 1 >= args.len() {
+                    return Err(help_error());
+                }
+                data = Some(args[i + 1].to_string());
+                i += 2;
+            }
+            "-X" => {
+                if i + 1 >= args.len() {
+                    return Err(help_error());
+                }
+                method = Some(args[i + 1].to_string());
+                i += 2;
+            }
+            "-o" => {
+                if i + 1 >= args.len() {
+                    return Err(help_error());
+                }
+                out = Some(resolve_cli_path(cwd, args[i + 1]));
+                i += 2;
+            }
+            "-O" => {
+                out = Some(String::new());
+                i += 1;
+            }
+            other => {
+                if other.starts_with('-') {
+                    return Err(help_error());
+                }
+                url = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+
+    let url = url.ok_or_else(help_error)?;
+    Ok(CurlOptions {
+        url,
+        follow,
+        headers,
+        data,
+        method,
+        out,
+    })
+}
+
+async fn run_curl<DB>(fs: &SurrealFs<DB>, opts: CurlOptions) -> Result<(), FsError>
+where
+    DB: surrealdb::Connection,
+{
+    let mut client = Client::builder();
+    if opts.follow {
+        client = client.redirect(reqwest::redirect::Policy::limited(10));
+    } else {
+        client = client.redirect(reqwest::redirect::Policy::none());
+    }
+    let client = client.build().map_err(|e| FsError::Http(e.to_string()))?;
+
+    let method = opts
+        .method
+        .clone()
+        .unwrap_or_else(|| if opts.data.is_some() { "POST" } else { "GET" }.to_string());
+
+    let mut req = client.request(method.parse().unwrap_or(reqwest::Method::GET), &opts.url);
+
+    for (k, v) in &opts.headers {
+        req = req.header(k, v);
+    }
+
+    if let Some(body) = &opts.data {
+        req = req.body(body.clone());
+    }
+
+    let resp = req.send().await.map_err(|e| FsError::Http(e.to_string()))?;
+    let status = resp.status();
+    let bytes = resp.bytes().await.map_err(|e| FsError::Http(e.to_string()))?;
+
+    if let Some(out_path) = &opts.out {
+        let target = if out_path.is_empty() {
+            derive_out_name(&opts.url)
+        } else {
+            out_path.clone()
+        };
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        fs.write_file(&target, content).await?;
+        println!("Saved to {} (status {})", target, status);
+    } else {
+        println!("Status: {}", status);
+        print!("{}", String::from_utf8_lossy(&bytes));
+    }
+
+    if !status.is_success() {
+        return Err(FsError::Http(format!("HTTP status {}", status)));
+    }
+
+    Ok(())
+}
+
+fn derive_out_name(url: &str) -> String {
+    if let Ok(parsed) = Url::parse(url) {
+        if let Some(seg) = parsed.path_segments().and_then(|s| s.filter(|v| !v.is_empty()).last()) {
+            return seg.to_string();
+        }
+    }
+    "index.html".to_string()
 }
 
 fn help_error() -> FsError {
