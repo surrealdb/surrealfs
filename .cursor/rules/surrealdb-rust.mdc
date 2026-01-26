@@ -1,0 +1,196 @@
+---
+description: This rule provides information using SurrealDB in rust.
+alwaysApply: false
+---
+
+## Schemas and structs
+
+```rust
+static SCHEMA_SQL: &str = r#"
+    DEFINE TABLE IF NOT EXISTS doc;
+
+    DEFINE FIELD OVERWRITE time ON doc TYPE object DEFAULT {};
+    DEFINE FIELD OVERWRITE time.created_at ON doc TYPE datetime VALUE time::now() READONLY;
+    DEFINE FIELD OVERWRITE time.updated_at ON doc TYPE datetime VALUE time::now();
+    DEFINE FIELD OVERWRITE time.deleted_at ON doc TYPE option<datetime> DEFAULT NONE;
+"#;
+
+
+#[derive(Debug, Deserialize, Serialize)]
+struct Document {
+    id: RecordId,
+    title: String,
+    body: String,
+    created_at: TimeStamps,
+}
+```
+
+## Connecting to SurrealDB
+
+```rust
+let db = Surreal::new::<Any>("ws://localhost:8000").await.unwrap();
+db.signin(Root {
+    username: "root",
+    password: "root"
+}).await.unwrap();
+db.use_ns("namespace").use_db("database").await.unwrap();
+```
+
+### Running embedded in-memory
+
+```rust
+let db = Surreal::new::<Mem>(()).await?;
+db.use_ns("namespace").use_db("database").await?;
+```
+
+Embedded connections don't require authentication.
+
+## Example queries
+
+```rust
+// Define schema exactly as requested.
+db.query(SCHEMA_SQL).await?;
+
+// Insert record letting SurrealDB populate timestamps (no `time` provided)
+db.query(r#"CREATE doc:one CONTENT { title: "Document One", body: "Minimal doc" }"#)
+    .await?;
+println!("Created doc:one");
+
+// Insert record with explicit timestamps provided from Rust
+let doc_two = Document {
+    id: RecordId::from_table_key("doc", "two"),
+    title: "Document Two".to_string(),
+    body: "Has Rust timestamps".to_string(),
+    time: TimeStamps::default(),
+};
+let _: Option<Document> = db.create("doc").content(doc_two).await?;
+println!("Created doc:two");
+
+// Insert record and mark it as deleted (set deleted_at)
+let doc_three = Document {
+    id: RecordId::from_table_key("doc", "three"),
+    title: "Document Three".to_string(),
+    body: "Soft-deleted".to_string(),
+    time: TimeStamps::deleted_now(),
+};
+let _: Option<Document> = db.create("doc").content(doc_three).await?;
+println!("Created doc:three (deleted)");
+
+// Update existing record
+let new_doc_three = Document {
+    id: RecordId::from_table_key("doc", "three"),
+    title: "Document Three".to_string(),
+    body: "Updated".to_string(),
+    time: TimeStamps::empty(),
+};
+let updated: Option<Document> = db
+    .update(new_doc_three.id.clone())
+    .merge(new_doc_three)
+    .await?;
+println!("Updated doc:three: {:?}", updated);
+
+// Another way to delete a record
+let deleted: Option<Document> = db
+    .update(RecordId::from_table_key("doc", "two"))
+    .patch(PatchOp::replace(
+        "time.deleted_at",
+        surrealdb::sql::Datetime::from(Utc::now()),
+    ))
+    .await?;
+println!("\nDelete doc:\n{:#?}", deleted);
+
+// Un-delete a record
+let deleted: Option<Document> = db
+    .update(RecordId::from_table_key("doc", "two"))
+    .patch(PatchOp::remove("time.deleted_at"))
+    .await?;
+println!("\nDelete doc:\n{:#?}", deleted);
+
+// Verify inserted records (select all docs)
+let all_docs: Vec<Document> = db.select("doc").await?;
+println!("\nAll docs (raw):\n{:#?}", all_docs);
+
+// Demonstrate a simple query: only non-deleted docs (where time.deleted_at = NONE)
+let non_deleted = db
+    .query("SELECT * FROM doc WHERE time.deleted_at = NONE ORDER BY time.created_at DESC;")
+    .await?;
+println!("\nNon-deleted docs:\n{:#?}", non_deleted);
+
+// Demonstrate selecting deleted docs
+let deleted = db
+    .query("SELECT * FROM doc WHERE time.deleted_at != NONE;")
+    .await?;
+println!("\nDeleted docs:\n{:#?}", deleted);
+```
+
+## Serializing and deserializing datetimes
+
+```rust
+#[derive(Debug, Serialize, Deserialize)]
+struct TimeStamps {
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_option_chrono_as_sql_datetime"
+    )]
+    created_at: Option<DateTime<Utc>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_option_chrono_as_sql_datetime"
+    )]
+    updated_at: Option<DateTime<Utc>>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_option_chrono_as_sql_datetime"
+    )]
+    deleted_at: Option<DateTime<Utc>>,
+}
+
+impl Default for TimeStamps {
+    fn default() -> Self {
+        let now = Utc::now();
+        Self {
+            created_at: Some(now),
+            updated_at: Some(now),
+            deleted_at: None,
+        }
+    }
+}
+
+impl TimeStamps {
+    fn empty() -> Self {
+        Self {
+            created_at: None,
+            updated_at: None,
+            deleted_at: None,
+        }
+    }
+    fn deleted_now() -> Self {
+        let now = Utc::now();
+        Self {
+            created_at: None,
+            updated_at: Some(now),
+            deleted_at: Some(now),
+        }
+    }
+}
+
+fn serialize_chrono_as_sql_datetime<S>(x: &DateTime<Utc>, s: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    Into::<surrealdb::sql::Datetime>::into(*x).serialize(s)
+}
+
+fn serialize_option_chrono_as_sql_datetime<S>(
+    x: &Option<DateTime<Utc>>,
+    s: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match x {
+        Some(dt) => serialize_chrono_as_sql_datetime(dt, s),
+        None => s.serialize_none(),
+    }
+}
+```
