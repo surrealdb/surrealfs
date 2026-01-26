@@ -7,7 +7,7 @@ name = "surrealfs_py"
 version = "0.1.0"
 description = "Python bindings for surrealfs, backed by SurrealDB"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -15,6 +15,13 @@ classifiers = [
     "Programming Language :: Rust",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
+]
+
+[project.optional-dependencies]
+examples = [
+    "logfire>=4.20.0",
+    "pydantic>=2.12.5",
+    "pydantic-ai>=0.8.1",
 ]
 
 [tool.maturin]
