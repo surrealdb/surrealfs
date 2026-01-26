@@ -14,6 +14,7 @@ use surrealdb::engine::local::{Db, Mem};
 use surrealdb::opt::auth::Root;
 use tokio::runtime::Runtime;
 
+use crate::curl::{self, CurlOutput, CurlRequest};
 use crate::{Entry, FsError, SurrealFs};
 
 create_exception!(surrealfs_py, SurrealFsError, pyo3::exceptions::PyException);
@@ -354,6 +355,51 @@ impl PySurrealFs {
             .block_on(self.fs.glob(&resolved))
             .map_err(to_py_err)?;
         Ok(join_lines(paths))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn curl(
+        &self,
+        url: &str,
+        follow: Option<bool>,
+        headers: Option<Vec<(String, String)>>,
+        data: Option<&str>,
+        method: Option<&str>,
+        out: Option<&str>,
+        auto_name: Option<bool>,
+    ) -> PyResult<String> {
+        let follow = follow.unwrap_or(false);
+        let headers = headers.unwrap_or_default();
+        let data = data.map(|d| d.to_string());
+        let method = method.map(|m| m.to_string());
+        let out_path = out.map(|p| self.resolve_path(p)).transpose()?;
+        let output = if let Some(path) = out_path {
+            Some(CurlOutput::Path(path))
+        } else if auto_name.unwrap_or(false) {
+            Some(CurlOutput::AutoName)
+        } else {
+            None
+        };
+
+        let request = CurlRequest {
+            url: url.to_string(),
+            follow,
+            headers,
+            data,
+            method,
+            output,
+        };
+
+        self.rt
+            .block_on(curl::curl(&self.fs, request))
+            .map_err(to_py_err)
+            .map(|resp| {
+                if let Some(saved) = resp.saved_to {
+                    format!("Saved to {} (status {})", saved, resp.status)
+                } else {
+                    format!("Status: {}\n{}", resp.status, resp.body)
+                }
+            })
     }
 }
 
