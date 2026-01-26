@@ -54,6 +54,13 @@ impl FsInner {
         }
     }
 
+    async fn read(&self, path: &str, offset: usize, limit: usize) -> crate::Result<Vec<String>> {
+        match self {
+            FsInner::Remote(fs) => fs.read(path, offset, limit).await,
+            FsInner::Local(fs) => fs.read(path, offset, limit).await,
+        }
+    }
+
     async fn nl(&self, path: &str, start_at: usize) -> crate::Result<Vec<crate::NumberedLine>> {
         match self {
             FsInner::Remote(fs) => fs.nl(path, start_at).await,
@@ -84,6 +91,19 @@ impl FsInner {
         match self {
             FsInner::Remote(fs) => fs.write_file(path, content).await,
             FsInner::Local(fs) => fs.write_file(path, content).await,
+        }
+    }
+
+    async fn edit(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        replace_all: bool,
+    ) -> crate::Result<String> {
+        match self {
+            FsInner::Remote(fs) => fs.edit(path, old, new, replace_all).await,
+            FsInner::Local(fs) => fs.edit(path, old, new, replace_all).await,
         }
     }
 
@@ -215,6 +235,15 @@ impl PySurrealFs {
         Ok(join_lines(lines))
     }
 
+    pub fn read(&self, path: &str, offset: usize, limit: usize) -> PyResult<String> {
+        let resolved = self.resolve_path(path)?;
+        let lines = self
+            .rt
+            .block_on(self.fs.read(&resolved, offset, limit))
+            .map_err(to_py_err)?;
+        Ok(join_lines(lines))
+    }
+
     pub fn nl(&self, path: &str, start: Option<usize>) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         let start_at = start.unwrap_or(1);
@@ -258,6 +287,22 @@ impl PySurrealFs {
             .block_on(self.fs.write_file(&resolved, content.to_string()))
             .map_err(to_py_err)?;
         Ok(String::new())
+    }
+
+    pub fn edit(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        replace_all: Option<bool>,
+    ) -> PyResult<String> {
+        let resolved = self.resolve_path(path)?;
+        self.rt
+            .block_on(
+                self.fs
+                    .edit(&resolved, old, new, replace_all.unwrap_or(false)),
+            )
+            .map_err(to_py_err)
     }
 
     pub fn mkdir(&self, path: &str, parents: bool) -> PyResult<String> {
