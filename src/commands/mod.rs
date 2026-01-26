@@ -1,5 +1,4 @@
 use surrealdb::Connection;
-
 use surrealfs::SurrealFs;
 
 pub mod curl;
@@ -34,6 +33,9 @@ where
         "tail" => fs_ops::tail(args, state)
             .await
             .map(|_| ReplControl::Continue),
+        "read" => fs_ops::read(args, state)
+            .await
+            .map(|_| ReplControl::Continue),
         "nl" => fs_ops::nl(args, state).await.map(|_| ReplControl::Continue),
         "grep" => fs_ops::grep(args, state)
             .await
@@ -51,6 +53,9 @@ where
             .await
             .map(|_| ReplControl::Continue),
         "cp" => fs_ops::cp(args, state).await.map(|_| ReplControl::Continue),
+        "glob" => fs_ops::glob(args, state)
+            .await
+            .map(|_| ReplControl::Continue),
         "curl" => curl::run(args, state).await.map(|_| ReplControl::Continue),
         "pwd" => shell::pwd(state).map(|_| ReplControl::Continue),
         "cd" => shell::cd(args, state).await.map(|_| ReplControl::Continue),

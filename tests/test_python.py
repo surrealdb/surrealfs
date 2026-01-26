@@ -4,7 +4,7 @@ from surrealfs_py import PySurrealFs
 def test_mem_roundtrip() -> None:
     fs = PySurrealFs.mem()
 
-    assert fs.mkdir("/code", True) == ""
+    assert fs.mkdir("/code") == ""
     assert fs.write_file("/code/readme.md", "hi there") == ""
 
     ls_out = fs.ls("/code").strip().splitlines()
@@ -17,3 +17,20 @@ def test_mem_roundtrip() -> None:
 
     grep_out = fs.grep("hi", "/code", True).strip().splitlines()
     assert any(line.startswith("/code/readme.md:1:") for line in grep_out)
+
+
+def test_read_and_edit() -> None:
+    fs = PySurrealFs.mem()
+
+    fs.mkdir("/code", True)
+    fs.write_file("/code/app.txt", "alpha\nbeta\ngamma\nbeta")
+
+    assert fs.read("/code/app.txt", 1, 2) == "beta\ngamma\n"
+
+    diff = fs.edit("/code/app.txt", "beta", "BETA")
+    assert diff.startswith("--- original")
+    assert fs.cat("/code/app.txt") == "alpha\nBETA\ngamma\nbeta"
+
+    diff_all = fs.edit("/code/app.txt", "beta", "BETA", True)
+    assert diff_all.startswith("--- original")
+    assert fs.cat("/code/app.txt") == "alpha\nBETA\ngamma\nBETA"

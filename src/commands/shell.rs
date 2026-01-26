@@ -38,8 +38,10 @@ pub fn print_help() {
     println!("     options: -l (long), -a (all), -R (recursive), -d (dir only), -h (human sizes)");
     println!("  cat <path>");
     println!("  tail [n] <path>");
+    println!("  read <path> <offset> <limit>");
     println!("  nl <path> [start]");
     println!("  grep [-r|--recursive] <pattern> <path>");
+    println!("  glob <pattern>");
     println!("  touch <path>");
     println!("  edit <path> <old> <new> [replace_all]");
     println!("  mkdir [-p] <path>");

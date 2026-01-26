@@ -54,6 +54,13 @@ impl FsInner {
         }
     }
 
+    async fn read(&self, path: &str, offset: usize, limit: usize) -> crate::Result<Vec<String>> {
+        match self {
+            FsInner::Remote(fs) => fs.read(path, offset, limit).await,
+            FsInner::Local(fs) => fs.read(path, offset, limit).await,
+        }
+    }
+
     async fn nl(&self, path: &str, start_at: usize) -> crate::Result<Vec<crate::NumberedLine>> {
         match self {
             FsInner::Remote(fs) => fs.nl(path, start_at).await,
@@ -87,6 +94,19 @@ impl FsInner {
         }
     }
 
+    async fn edit(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        replace_all: bool,
+    ) -> crate::Result<String> {
+        match self {
+            FsInner::Remote(fs) => fs.edit(path, old, new, replace_all).await,
+            FsInner::Local(fs) => fs.edit(path, old, new, replace_all).await,
+        }
+    }
+
     async fn mkdir(&self, path: &str, parents: bool) -> crate::Result<()> {
         match self {
             FsInner::Remote(fs) => fs.mkdir(path, parents).await,
@@ -98,6 +118,13 @@ impl FsInner {
         match self {
             FsInner::Remote(fs) => fs.cp(src, dest).await,
             FsInner::Local(fs) => fs.cp(src, dest).await,
+        }
+    }
+
+    async fn glob(&self, pattern: &str) -> crate::Result<Vec<String>> {
+        match self {
+            FsInner::Remote(fs) => fs.glob(pattern).await,
+            FsInner::Local(fs) => fs.glob(pattern).await,
         }
     }
 
@@ -215,6 +242,15 @@ impl PySurrealFs {
         Ok(join_lines(lines))
     }
 
+    pub fn read(&self, path: &str, offset: usize, limit: usize) -> PyResult<String> {
+        let resolved = self.resolve_path(path)?;
+        let lines = self
+            .rt
+            .block_on(self.fs.read(&resolved, offset, limit))
+            .map_err(to_py_err)?;
+        Ok(join_lines(lines))
+    }
+
     pub fn nl(&self, path: &str, start: Option<usize>) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         let start_at = start.unwrap_or(1);
@@ -260,10 +296,26 @@ impl PySurrealFs {
         Ok(String::new())
     }
 
-    pub fn mkdir(&self, path: &str, parents: bool) -> PyResult<String> {
+    pub fn edit(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        replace_all: Option<bool>,
+    ) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         self.rt
-            .block_on(self.fs.mkdir(&resolved, parents))
+            .block_on(
+                self.fs
+                    .edit(&resolved, old, new, replace_all.unwrap_or(false)),
+            )
+            .map_err(to_py_err)
+    }
+
+    pub fn mkdir(&self, path: &str, parents: Option<bool>) -> PyResult<String> {
+        let resolved = self.resolve_path(path)?;
+        self.rt
+            .block_on(self.fs.mkdir(&resolved, parents.unwrap_or(false)))
             .map_err(to_py_err)?;
         Ok(String::new())
     }
@@ -293,6 +345,15 @@ impl PySurrealFs {
         let current = self.current_cwd();
         let path = self.fs.pwd(&current).map_err(to_py_err)?;
         Ok(format!("{}\n", path))
+    }
+
+    pub fn glob(&self, pattern: &str) -> PyResult<String> {
+        let resolved = self.resolve_path(pattern)?;
+        let paths = self
+            .rt
+            .block_on(self.fs.glob(&resolved))
+            .map_err(to_py_err)?;
+        Ok(join_lines(paths))
     }
 }
 
