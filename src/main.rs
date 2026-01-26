@@ -75,7 +75,10 @@ where
         let result = match cmd {
             "ls" => {
                 let (opts, target_arg) = parse_ls_args(&args);
-                let target_path = resolve_cli_path(&cwd, target_arg);
+                let target_path = match target_arg {
+                    Some(arg) => resolve_cli_path(&cwd, arg),
+                    None => cwd.clone(),
+                };
                 handle_ls(&fs, &target_path, opts).await
             }
             "cat" => match args.as_slice() {
@@ -145,10 +148,42 @@ where
                 [path] => fs.touch(&resolve_cli_path(&cwd, path)).await,
                 _ => Err(help_error()),
             },
-            "mkdir_p" => match args.as_slice() {
-                [path] => fs.mkdir_p(&resolve_cli_path(&cwd, path)).await,
+            "edit" => match args.as_slice() {
+                [path, old, new] => {
+                    let target = resolve_cli_path(&cwd, path);
+                    fs.edit(&target, old, new, false).await.map(|diff| {
+                        if !diff.is_empty() {
+                            print!("{}", diff);
+                        }
+                    })
+                }
+                [path, old, new, flag] => {
+                    let target = resolve_cli_path(&cwd, path);
+                    let replace_all = matches!(*flag, "true" | "1" | "yes" | "-a" | "--all");
+                    fs.edit(&target, old, new, replace_all).await.map(|diff| {
+                        if !diff.is_empty() {
+                            print!("{}", diff);
+                        }
+                    })
+                }
                 _ => Err(help_error()),
             },
+            "mkdir" => {
+                let mut parents = false;
+                let mut targets = Vec::new();
+                for arg in &args {
+                    if *arg == "-p" {
+                        parents = true;
+                    } else {
+                        targets.push(*arg);
+                    }
+                }
+
+                match targets.as_slice() {
+                    [path] => fs.mkdir(&resolve_cli_path(&cwd, path), parents).await,
+                    _ => Err(help_error()),
+                }
+            }
             "write_file" => {
                 if args.len() < 2 {
                     Err(help_error())
@@ -215,7 +250,8 @@ fn print_help() {
     println!("  nl <path> [start]");
     println!("  grep [-r|--recursive] <pattern> <path>");
     println!("  touch <path>");
-    println!("  mkdir_p <path>");
+    println!("  edit <path> <old> <new> [replace_all]");
+    println!("  mkdir [-p] <path>");
     println!("  write_file <path> <content>");
     println!("  cp <src> <dest>");
     println!("  curl [options] <url>");
@@ -400,7 +436,7 @@ struct LsOptions {
     human: bool,
 }
 
-fn parse_ls_args<'a>(args: &'a [&str]) -> (LsOptions, &'a str) {
+fn parse_ls_args<'a>(args: &'a [&str]) -> (LsOptions, Option<&'a str>) {
     let mut opts = LsOptions {
         all: false,
         long: false,
@@ -429,7 +465,7 @@ fn parse_ls_args<'a>(args: &'a [&str]) -> (LsOptions, &'a str) {
         }
     }
 
-    (opts, path.unwrap_or("/"))
+    (opts, path)
 }
 
 async fn handle_ls<DB>(fs: &SurrealFs<DB>, path: &str, opts: LsOptions) -> surrealfs::Result<()>

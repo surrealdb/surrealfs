@@ -1,5 +1,6 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use similar::{ChangeTag, TextDiff};
 use surrealdb::{Surreal, engine::remote::ws::Client};
 use thiserror::Error;
 
@@ -191,34 +192,93 @@ where
         Ok(())
     }
 
-    pub async fn mkdir_p(&self, path: impl AsRef<str>) -> Result<()> {
+    pub async fn edit(
+        &self,
+        path: impl AsRef<str>,
+        old: impl AsRef<str>,
+        new: impl AsRef<str>,
+        replace_all: bool,
+    ) -> Result<String> {
+        let path = normalize_path(path.as_ref())?;
+        let old_str = old.as_ref();
+        let new_str = new.as_ref();
+
+        if old_str.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+
+        let current = self.cat(&path).await?;
+
+        let (updated, changed) = if replace_all {
+            let replaced = current.replace(old_str, new_str);
+            let changed = replaced != current;
+            (replaced, changed)
+        } else if let Some(idx) = current.find(old_str) {
+            let mut result =
+                String::with_capacity(current.len() + new_str.len().saturating_sub(old_str.len()));
+            result.push_str(&current[..idx]);
+            result.push_str(new_str);
+            result.push_str(&current[idx + old_str.len()..]);
+            (result, true)
+        } else {
+            (current.clone(), false)
+        };
+
+        if !changed {
+            return Ok(String::new());
+        }
+
+        self.write_file(&path, updated.clone()).await?;
+        Ok(render_diff(&current, &updated))
+    }
+
+    pub async fn mkdir(&self, path: impl AsRef<str>, parents: bool) -> Result<()> {
         let path = normalize_path(path.as_ref())?;
         if path == "/" {
-            return Ok(());
+            return if parents {
+                Ok(())
+            } else {
+                Err(FsError::AlreadyExists(path))
+            };
         }
-        let mut current = String::from("/");
-        for segment in path.trim_start_matches('/').split('/') {
-            if segment.is_empty() {
-                continue;
-            }
-            if current != "/" {
-                current.push('/');
-            }
-            current.push_str(segment);
 
-            match self.get_entry(&current).await? {
-                Some(entry) => {
-                    if !entry.is_dir {
-                        return Err(FsError::NotADirectory(current));
+        if parents {
+            let mut current = String::from("/");
+            for segment in path.trim_start_matches('/').split('/') {
+                if segment.is_empty() {
+                    continue;
+                }
+                if current != "/" {
+                    current.push('/');
+                }
+                current.push_str(segment);
+
+                match self.get_entry(&current).await? {
+                    Some(entry) => {
+                        if !entry.is_dir {
+                            return Err(FsError::NotADirectory(current));
+                        }
+                    }
+                    None => {
+                        let parent = parent_path(&current).unwrap_or("/".to_string());
+                        self.create_dir(&current, &parent).await?;
                     }
                 }
-                None => {
-                    let parent = parent_path(&current).unwrap_or("/".to_string());
-                    self.create_dir(&current, &parent).await?;
-                }
+            }
+            return Ok(());
+        }
+
+        let parent = parent_path(&path).ok_or(FsError::InvalidPath)?;
+        self.ensure_dir(&parent).await?;
+
+        match self.get_entry(&path).await? {
+            Some(entry) if entry.is_dir => Err(FsError::AlreadyExists(path)),
+            Some(_) => Err(FsError::AlreadyExists(path)),
+            None => {
+                self.create_dir(&path, &parent).await?;
+                Ok(())
             }
         }
-        Ok(())
     }
 
     /// Copy a file from `src` to `dest`, overwriting the destination file if it exists.
@@ -359,6 +419,31 @@ where
     }
 }
 
+fn render_diff(old: &str, new: &str) -> String {
+    if old == new {
+        return String::new();
+    }
+
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = String::from("--- original\n+++ updated\n");
+
+    for change in diff.iter_all_changes() {
+        let sign = match change.tag() {
+            ChangeTag::Delete => '-',
+            ChangeTag::Insert => '+',
+            ChangeTag::Equal => ' ',
+        };
+
+        out.push(sign);
+        out.push_str(change.value());
+        if !change.value().ends_with('\n') {
+            out.push('\n');
+        }
+    }
+
+    out
+}
+
 fn leaf_name(path: &str) -> String {
     if path == "/" {
         return "/".into();
@@ -438,7 +523,7 @@ mod tests {
     #[tokio::test]
     async fn touch_and_cat() {
         let fs = setup_fs().await.unwrap();
-        fs.mkdir_p("/dir").await.unwrap();
+        fs.mkdir("/dir", true).await.unwrap();
         fs.touch("/dir/file.txt").await.unwrap();
         fs.write_file("/dir/file.txt", "hello\nworld")
             .await
@@ -450,7 +535,7 @@ mod tests {
     #[tokio::test]
     async fn tail_and_nl() {
         let fs = setup_fs().await.unwrap();
-        fs.mkdir_p("/logs").await.unwrap();
+        fs.mkdir("/logs", true).await.unwrap();
         fs.write_file("/logs/app.log", "a\nb\nc\nd").await.unwrap();
         let tail = fs.tail("/logs/app.log", 2).await.unwrap();
         assert_eq!(tail, vec!["c", "d"]);
@@ -462,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn ls_and_grep_recursive() {
         let fs = setup_fs().await.unwrap();
-        fs.mkdir_p("/code/src").await.unwrap();
+        fs.mkdir("/code/src", true).await.unwrap();
         fs.write_file("/code/src/main.rs", "fn main() { println!(\"hi\"); }\n")
             .await
             .unwrap();
@@ -480,20 +565,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mkdir_p_nested() {
+    async fn mkdir_nested_with_parents() {
         let fs = setup_fs().await.unwrap();
-        fs.mkdir_p("/a/b/c").await.unwrap();
+        fs.mkdir("/a/b/c", true).await.unwrap();
         let entries = fs.ls("/a/b").await.unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].is_dir);
     }
 
     #[tokio::test]
+    async fn mkdir_without_parents_needs_parent() {
+        let fs = setup_fs().await.unwrap();
+        let err = fs.mkdir("/missing/child", false).await.unwrap_err();
+        matches!(err, FsError::NotFound(_));
+    }
+
+    #[tokio::test]
+    async fn mkdir_without_parents_fails_when_exists() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/data", true).await.unwrap();
+        let err = fs.mkdir("/data", false).await.unwrap_err();
+        matches!(err, FsError::AlreadyExists(_));
+    }
+
+    #[tokio::test]
     async fn cp_file() {
         let fs = setup_fs().await.unwrap();
-        fs.mkdir_p("/docs").await.unwrap();
+        fs.mkdir("/docs", true).await.unwrap();
         fs.write_file("/docs/src.txt", "copy me").await.unwrap();
-        fs.mkdir_p("/docs/copies").await.unwrap();
+        fs.mkdir("/docs/copies", true).await.unwrap();
         fs.cp("/docs/src.txt", "/docs/copies/dest.txt")
             .await
             .unwrap();
@@ -503,9 +603,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_replaces_first() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/notes", true).await.unwrap();
+        fs.write_file("/notes/todo.txt", "alpha beta alpha")
+            .await
+            .unwrap();
+
+        let diff = fs
+            .edit("/notes/todo.txt", "alpha", "ALPHA", false)
+            .await
+            .unwrap();
+
+        let content = fs.cat("/notes/todo.txt").await.unwrap();
+        assert_eq!(content, "ALPHA beta alpha");
+        assert!(diff.contains("-alpha beta alpha"));
+        assert!(diff.contains("+ALPHA beta alpha"));
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_all() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/notes", true).await.unwrap();
+        fs.write_file("/notes/all.txt", "foo bar foo")
+            .await
+            .unwrap();
+
+        let diff = fs.edit("/notes/all.txt", "foo", "FOO", true).await.unwrap();
+
+        let content = fs.cat("/notes/all.txt").await.unwrap();
+        assert_eq!(content, "FOO bar FOO");
+        assert!(diff.contains("-foo bar foo"));
+        assert!(diff.contains("+FOO bar FOO"));
+    }
+
+    #[tokio::test]
     async fn cd_and_pwd() {
         let fs = setup_fs().await.unwrap();
-        fs.mkdir_p("/home/user").await.unwrap();
+        fs.mkdir("/home/user", true).await.unwrap();
         let mut cwd = "/".to_string();
 
         cwd = fs.cd(&cwd, "home").await.unwrap();
