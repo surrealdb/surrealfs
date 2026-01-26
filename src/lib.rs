@@ -1,9 +1,12 @@
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use surrealdb::{engine::remote::ws::Client, Surreal};
+use surrealdb::{Surreal, engine::remote::ws::Client};
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, FsError>;
+
+#[cfg(feature = "python")]
+pub mod python;
 
 #[derive(Debug, Error)]
 pub enum FsError {
@@ -164,7 +167,11 @@ where
         }
     }
 
-    pub async fn write_file(&self, path: impl AsRef<str>, content: impl Into<String>) -> Result<()> {
+    pub async fn write_file(
+        &self,
+        path: impl AsRef<str>,
+        content: impl Into<String>,
+    ) -> Result<()> {
         let path = normalize_path(path.as_ref())?;
         if path == "/" {
             return Err(FsError::NotAFile(path));
@@ -311,7 +318,12 @@ where
         Ok(())
     }
 
-    async fn create_file(&self, path: &str, parent: &str, content: impl Into<String>) -> Result<()> {
+    async fn create_file(
+        &self,
+        path: &str,
+        parent: &str,
+        content: impl Into<String>,
+    ) -> Result<()> {
         let content = content.into();
         let path_owned = path.to_string();
         let parent_owned = parent.to_string();
@@ -428,7 +440,9 @@ mod tests {
         let fs = setup_fs().await.unwrap();
         fs.mkdir_p("/dir").await.unwrap();
         fs.touch("/dir/file.txt").await.unwrap();
-        fs.write_file("/dir/file.txt", "hello\nworld").await.unwrap();
+        fs.write_file("/dir/file.txt", "hello\nworld")
+            .await
+            .unwrap();
         let content = fs.cat("/dir/file.txt").await.unwrap();
         assert_eq!(content, "hello\nworld");
     }
@@ -449,8 +463,12 @@ mod tests {
     async fn ls_and_grep_recursive() {
         let fs = setup_fs().await.unwrap();
         fs.mkdir_p("/code/src").await.unwrap();
-        fs.write_file("/code/src/main.rs", "fn main() { println!(\"hi\"); }\n").await.unwrap();
-        fs.write_file("/code/readme.md", "hi there\n").await.unwrap();
+        fs.write_file("/code/src/main.rs", "fn main() { println!(\"hi\"); }\n")
+            .await
+            .unwrap();
+        fs.write_file("/code/readme.md", "hi there\n")
+            .await
+            .unwrap();
         let entries = fs.ls("/code").await.unwrap();
         let names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
         assert!(names.contains(&"src".to_string()));

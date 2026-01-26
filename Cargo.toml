@@ -3,6 +3,9 @@ name = "surrealfs"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+crate-type = ["rlib", "cdylib"]
+
 [dependencies]
 surrealdb = { version = "=2.4.1", features = ["kv-mem", "kv-rocksdb"] }
 serde = { version = "1", features = ["derive"] }
@@ -11,5 +14,11 @@ thiserror = "1"
 regex = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+pyo3 = { version = "0.20", features = ["extension-module", "abi3-py38"], optional = true }
+pyo3-asyncio = { version = "0.20", features = ["attributes", "tokio-runtime"], optional = true }
 
 [dev-dependencies]
+
+[features]
+default = []
+python = ["pyo3", "pyo3-asyncio"]

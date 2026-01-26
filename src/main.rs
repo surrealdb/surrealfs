@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use regex::Regex;
 use reqwest::{Client, Url};
+use surrealdb::Surreal;
 use surrealdb::engine::any::connect;
 use surrealdb::engine::local::RocksDb;
 use surrealdb::opt::auth::Root;
-use surrealdb::Surreal;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 
 use surrealfs::{Entry, FsError, SurrealFs};
@@ -110,7 +110,10 @@ where
                     Err(help_error())
                 } else {
                     let path = resolve_cli_path(&cwd, args[0]);
-                    let start = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                    let start = args
+                        .get(1)
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(1);
                     fs.nl(&path, start).await.map(|lines| {
                         for l in lines {
                             println!("{:>4}  {}", l.number, l.line);
@@ -163,12 +166,10 @@ where
                 }
                 _ => Err(help_error()),
             },
-            "curl" => {
-                match parse_curl_args(&args, &cwd) {
-                    Ok(opts) => run_curl(&fs, opts).await,
-                    Err(e) => Err(e),
-                }
-            }
+            "curl" => match parse_curl_args(&args, &cwd) {
+                Ok(opts) => run_curl(&fs, opts).await,
+                Err(e) => Err(e),
+            },
             "pwd" => {
                 println!("{}", cwd);
                 Ok(())
@@ -348,7 +349,10 @@ where
 
     let resp = req.send().await.map_err(|e| FsError::Http(e.to_string()))?;
     let status = resp.status();
-    let bytes = resp.bytes().await.map_err(|e| FsError::Http(e.to_string()))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| FsError::Http(e.to_string()))?;
 
     if let Some(out_path) = &opts.out {
         let target = if out_path.is_empty() {
@@ -373,7 +377,10 @@ where
 
 fn derive_out_name(url: &str) -> String {
     if let Ok(parsed) = Url::parse(url) {
-        if let Some(seg) = parsed.path_segments().and_then(|s| s.filter(|v| !v.is_empty()).last()) {
+        if let Some(seg) = parsed
+            .path_segments()
+            .and_then(|s| s.filter(|v| !v.is_empty()).last())
+        {
             return seg.to_string();
         }
     }
