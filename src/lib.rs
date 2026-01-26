@@ -212,6 +212,23 @@ where
         Ok(())
     }
 
+    /// Copy a file from `src` to `dest`, overwriting the destination file if it exists.
+    /// Destination parent must already exist and be a directory.
+    pub async fn cp(&self, src: impl AsRef<str>, dest: impl AsRef<str>) -> Result<()> {
+        let src = normalize_path(src.as_ref())?;
+        let dest = normalize_path(dest.as_ref())?;
+
+        let content = self.cat(&src).await?;
+
+        if dest == "/" {
+            return Err(FsError::NotAFile(dest));
+        }
+        let parent = parent_path(&dest).ok_or(FsError::InvalidPath)?;
+        self.ensure_dir(&parent).await?;
+
+        self.write_file(&dest, content).await
+    }
+
     async fn require_file(&self, path: &str) -> Result<Entry> {
         let path = normalize_path(path)?;
         match self.get_entry(&path).await? {
@@ -417,5 +434,19 @@ mod tests {
         let entries = fs.ls("/a/b").await.unwrap();
         assert_eq!(entries.len(), 1);
         assert!(entries[0].is_dir);
+    }
+
+    #[tokio::test]
+    async fn cp_file() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir_p("/docs").await.unwrap();
+        fs.write_file("/docs/src.txt", "copy me").await.unwrap();
+        fs.mkdir_p("/docs/copies").await.unwrap();
+        fs.cp("/docs/src.txt", "/docs/copies/dest.txt")
+            .await
+            .unwrap();
+
+        let content = fs.cat("/docs/copies/dest.txt").await.unwrap();
+        assert_eq!(content, "copy me");
     }
 }
