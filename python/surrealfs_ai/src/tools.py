@@ -63,6 +63,14 @@ async def ls(args: LsArgs) -> str:
     )
 
 
+class GlobArgs(BaseModel):
+    pattern: str = Field(..., description="Glob pattern; absolute or relative to cwd")
+
+
+async def glob(args: GlobArgs) -> str:
+    return run_tool(lambda: fs.glob(args.pattern))
+
+
 class CatArgs(BaseModel):
     path: str = Field(..., description="File to read")
 
@@ -143,6 +151,9 @@ async def pwd() -> str:
 
 TOOLSET = FunctionToolset()
 TOOLSET.add_function(ls, description=load_description("ls", "List files in SurrealFs"))
+TOOLSET.add_function(
+    glob, description=load_description("glob", "Match paths using a glob pattern")
+)
 TOOLSET.add_function(cat, description=load_description("cat", "Read a file"))
 TOOLSET.add_function(
     tail, description=load_description("tail", "Read the last N lines of a file")
