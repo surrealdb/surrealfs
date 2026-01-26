@@ -313,6 +313,7 @@ impl PySurrealFs {
             .map_err(to_py_err)
     }
 
+    #[pyo3(signature = (path, parents=false))]
     pub fn mkdir(&self, path: &str, parents: Option<bool>) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         self.rt
