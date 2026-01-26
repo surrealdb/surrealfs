@@ -305,10 +305,10 @@ impl PySurrealFs {
             .map_err(to_py_err)
     }
 
-    pub fn mkdir(&self, path: &str, parents: bool) -> PyResult<String> {
+    pub fn mkdir(&self, path: &str, parents: Option<bool>) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         self.rt
-            .block_on(self.fs.mkdir(&resolved, parents))
+            .block_on(self.fs.mkdir(&resolved, parents.unwrap_or(false)))
             .map_err(to_py_err)?;
         Ok(String::new())
     }

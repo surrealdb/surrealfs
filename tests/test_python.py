@@ -4,7 +4,7 @@ from surrealfs_py import PySurrealFs
 def test_mem_roundtrip() -> None:
     fs = PySurrealFs.mem()
 
-    assert fs.mkdir("/code", True) == ""
+    assert fs.mkdir("/code") == ""
     assert fs.write_file("/code/readme.md", "hi there") == ""
 
     ls_out = fs.ls("/code").strip().splitlines()
