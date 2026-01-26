@@ -285,13 +285,12 @@ where
         let old_str = old.as_ref();
         let new_str = new.as_ref();
 
-        if old_str.is_empty() {
-            return Err(FsError::InvalidPath);
-        }
-
         let current = self.cat(&path).await?;
 
-        let (updated, changed) = if replace_all {
+        let (updated, changed) = if old_str.is_empty() {
+            let changed = current != new_str;
+            (new_str.to_string(), changed)
+        } else if replace_all {
             let replaced = current.replace(old_str, new_str);
             let changed = replaced != current;
             (replaced, changed)
@@ -798,6 +797,29 @@ mod tests {
         assert_eq!(content, "FOO bar FOO");
         assert!(diff.contains("-foo bar foo"));
         assert!(diff.contains("+FOO bar FOO"));
+    }
+
+    #[tokio::test]
+    async fn edit_with_empty_old_overwrites_file() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/notes", true).await.unwrap();
+        fs.write_file("/notes/full.txt", "original").await.unwrap();
+
+        let diff = fs
+            .edit("/notes/full.txt", "", "hello martin!", false)
+            .await
+            .unwrap();
+
+        let content = fs.cat("/notes/full.txt").await.unwrap();
+        assert_eq!(content, "hello martin!");
+        assert!(diff.contains("-original"));
+        assert!(diff.contains("+hello martin!"));
+
+        let no_diff = fs
+            .edit("/notes/full.txt", "", "hello martin!", false)
+            .await
+            .unwrap();
+        assert!(no_diff.is_empty());
     }
 
     #[tokio::test]
