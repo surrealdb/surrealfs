@@ -6,6 +6,7 @@ This example shows how to expose SurrealFs operations to an agent using a
 """
 
 import asyncio
+from pathlib import Path
 from typing import Callable
 
 import logfire
@@ -20,12 +21,23 @@ _ = logfire.configure(send_to_logfire="if-token-present")
 logfire.instrument_pydantic_ai()
 logfire.instrument_anthropic()
 
+DOCS_DIR = Path(__file__).with_name("tool_docs")
+
 
 def run_tool(call: Callable[[], str]) -> str:
     try:
         return call()
     except Exception as e:
         return f"error: {e}"
+
+
+def load_description(tool_name: str, fallback: str) -> str:
+    path = DOCS_DIR / f"{tool_name}.md"
+    if path.exists():
+        text = path.read_text(encoding="utf-8").strip()
+        if text:
+            return text
+    return fallback
 
 
 class LsArgs(BaseModel):
@@ -114,15 +126,25 @@ async def pwd() -> str:
 
 
 TOOLSET = FunctionToolset()
-TOOLSET.add_function(ls, description="List files in SurrealFs")
-TOOLSET.add_function(cat, description="Read a file")
-TOOLSET.add_function(tail, description="Read the last N lines of a file")
-TOOLSET.add_function(write_file, description="Write file contents")
-TOOLSET.add_function(touch, description="Create a file if missing")
-TOOLSET.add_function(mkdir, description="Create a directory (with parents)")
-TOOLSET.add_function(cp, description="Copy a file")
-TOOLSET.add_function(cd, description="Change working directory")
-TOOLSET.add_function(pwd, description="Print working directory")
+TOOLSET.add_function(ls, description=load_description("ls", "List files in SurrealFs"))
+TOOLSET.add_function(cat, description=load_description("cat", "Read a file"))
+TOOLSET.add_function(
+    tail, description=load_description("tail", "Read the last N lines of a file")
+)
+TOOLSET.add_function(
+    write_file, description=load_description("write-file", "Write file contents")
+)
+TOOLSET.add_function(
+    touch, description=load_description("touch", "Create a file if missing")
+)
+TOOLSET.add_function(
+    mkdir, description=load_description("mkdir", "Create a directory (with parents)")
+)
+TOOLSET.add_function(cp, description=load_description("cp", "Copy a file"))
+TOOLSET.add_function(cd, description=load_description("cd", "Change working directory"))
+TOOLSET.add_function(
+    pwd, description=load_description("pwd", "Print working directory")
+)
 
 
 async def demo() -> None:
