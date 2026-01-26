@@ -121,6 +121,13 @@ impl FsInner {
         }
     }
 
+    async fn glob(&self, pattern: &str) -> crate::Result<Vec<String>> {
+        match self {
+            FsInner::Remote(fs) => fs.glob(pattern).await,
+            FsInner::Local(fs) => fs.glob(pattern).await,
+        }
+    }
+
     async fn cd(&self, current: &str, target: &str) -> crate::Result<String> {
         match self {
             FsInner::Remote(fs) => fs.cd(current, target).await,
@@ -338,6 +345,15 @@ impl PySurrealFs {
         let current = self.current_cwd();
         let path = self.fs.pwd(&current).map_err(to_py_err)?;
         Ok(format!("{}\n", path))
+    }
+
+    pub fn glob(&self, pattern: &str) -> PyResult<String> {
+        let resolved = self.resolve_path(pattern)?;
+        let paths = self
+            .rt
+            .block_on(self.fs.glob(&resolved))
+            .map_err(to_py_err)?;
+        Ok(join_lines(paths))
     }
 }
 

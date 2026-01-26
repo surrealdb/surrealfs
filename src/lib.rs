@@ -1,3 +1,6 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use globset::{GlobBuilder, GlobSetBuilder};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use similar::{ChangeTag, TextDiff};
@@ -34,6 +37,8 @@ pub struct Entry {
     pub parent: Option<String>,
     pub is_dir: bool,
     pub content: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -169,6 +174,59 @@ where
         Ok(matches)
     }
 
+    pub async fn glob(&self, pattern: impl AsRef<str>) -> Result<Vec<String>> {
+        let pattern = pattern.as_ref();
+        if pattern.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+
+        let normalized = normalize_path(pattern)?;
+        let trimmed = normalized.trim_start_matches('/');
+        if trimmed.is_empty() {
+            return Err(FsError::InvalidPath);
+        }
+
+        let mut builder = GlobSetBuilder::new();
+        let trimmed_glob = GlobBuilder::new(trimmed)
+            .literal_separator(true)
+            .build()
+            .map_err(|_| FsError::InvalidPath)?;
+        builder.add(trimmed_glob);
+
+        if trimmed != normalized {
+            let absolute_glob = GlobBuilder::new(&normalized)
+                .literal_separator(true)
+                .build()
+                .map_err(|_| FsError::InvalidPath)?;
+            builder.add(absolute_glob);
+        }
+
+        let matcher = builder.build().map_err(|_| FsError::InvalidPath)?;
+
+        let mut res = self
+            .db
+            .query(format!(
+                "SELECT path, name, parent, is_dir, content, updated_at FROM {}",
+                self.table
+            ))
+            .await?;
+        let mut entries: Vec<Entry> = res.take(0)?;
+
+        entries.retain(|entry| {
+            let path = entry.path.as_str();
+            let trimmed_path = path.trim_start_matches('/');
+            matcher.is_match(path) || matcher.is_match(trimmed_path)
+        });
+
+        entries.sort_by(|a, b| {
+            let a_time = a.updated_at.unwrap_or(0);
+            let b_time = b.updated_at.unwrap_or(0);
+            b_time.cmp(&a_time).then_with(|| a.path.cmp(&b.path))
+        });
+
+        Ok(entries.into_iter().map(|e| e.path).collect())
+    }
+
     pub async fn touch(&self, path: impl AsRef<str>) -> Result<()> {
         let path = normalize_path(path.as_ref())?;
         if path == "/" {
@@ -179,7 +237,10 @@ where
 
         match self.get_entry(&path).await? {
             Some(entry) if entry.is_dir => Err(FsError::NotAFile(path)),
-            Some(_) => Ok(()),
+            Some(entry) => {
+                self.persist_entry(&entry).await?;
+                Ok(())
+            }
             None => {
                 self.create_file(&path, &parent, "").await?;
                 Ok(())
@@ -358,7 +419,7 @@ where
         let mut res = self
             .db
             .query(format!(
-                "SELECT path, name, parent, is_dir, content FROM {} WHERE parent = $parent ORDER BY name",
+                "SELECT path, name, parent, is_dir, content, updated_at FROM {} WHERE parent = $parent ORDER BY name",
                 self.table
             ))
             .bind(("parent", parent))
@@ -373,7 +434,7 @@ where
         let mut res = self
             .db
             .query(format!(
-                "SELECT path, name, parent, is_dir, content FROM {} WHERE path = $path LIMIT 1",
+                "SELECT path, name, parent, is_dir, content, updated_at FROM {} WHERE path = $path LIMIT 1",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -387,12 +448,13 @@ where
         let parent_owned = parent.to_string();
         self.db
             .query(format!(
-                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = true, content = NONE",
+                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = true, content = NONE, updated_at = $updated_at",
                 self.table
             ))
             .bind(("path", path_owned))
             .bind(("name", leaf_name(path)))
             .bind(("parent", parent_owned))
+            .bind(("updated_at", now_millis()))
             .await?;
         Ok(())
     }
@@ -408,13 +470,14 @@ where
         let parent_owned = parent.to_string();
         self.db
             .query(format!(
-                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = false, content = $content",
+                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = false, content = $content, updated_at = $updated_at",
                 self.table
             ))
             .bind(("path", path_owned))
             .bind(("name", leaf_name(path)))
             .bind(("parent", parent_owned))
             .bind(("content", content))
+            .bind(("updated_at", now_millis()))
             .await?;
         Ok(())
     }
@@ -425,7 +488,7 @@ where
         let parent_owned = entry.parent.clone();
         self.db
             .query(format!(
-                "UPDATE {} SET content = $content, name = $name, parent = $parent, is_dir = $is_dir WHERE path = $path",
+                "UPDATE {} SET content = $content, name = $name, parent = $parent, is_dir = $is_dir, updated_at = $updated_at WHERE path = $path",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -433,9 +496,17 @@ where
             .bind(("parent", parent_owned))
             .bind(("is_dir", entry.is_dir))
             .bind(("content", entry.content.clone()))
+            .bind(("updated_at", now_millis()))
             .await?;
         Ok(())
     }
+}
+
+fn now_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 fn render_diff(old: &str, new: &str) -> String {
@@ -538,7 +609,9 @@ fn resolve_relative(base: &str, target: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     use surrealdb::engine::local::{Db, Mem};
+    use tokio::time::sleep;
 
     async fn setup_fs() -> Result<SurrealFs<Db>> {
         let db = Surreal::new::<Mem>(()).await?;
@@ -662,6 +735,32 @@ mod tests {
 
         let content = fs.cat("/docs/copies/dest.txt").await.unwrap();
         assert_eq!(content, "copy me");
+    }
+
+    #[tokio::test]
+    async fn glob_matches_newest_first() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/proj/src", true).await.unwrap();
+        fs.mkdir("/proj/tests", true).await.unwrap();
+
+        fs.write_file("/proj/src/main.rs", "main").await.unwrap();
+        sleep(Duration::from_millis(5)).await;
+        fs.write_file("/proj/src/lib.rs", "lib").await.unwrap();
+        sleep(Duration::from_millis(5)).await;
+        fs.write_file("/proj/tests/main.rs", "test").await.unwrap();
+
+        let matches = fs.glob("/proj/**/*.rs").await.unwrap();
+        assert_eq!(
+            matches,
+            vec![
+                "/proj/tests/main.rs",
+                "/proj/src/lib.rs",
+                "/proj/src/main.rs",
+            ]
+        );
+
+        let root_matches = fs.glob("**/*.rs").await.unwrap();
+        assert_eq!(root_matches, matches);
     }
 
     #[tokio::test]

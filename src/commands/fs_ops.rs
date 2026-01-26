@@ -108,6 +108,23 @@ where
     }
 }
 
+pub async fn glob<DB>(args: &[&str], state: &mut ReplState<DB>) -> Result<(), FsError>
+where
+    DB: Connection,
+{
+    match args {
+        [pattern] => {
+            let pattern = resolve_cli_path(&state.cwd, pattern);
+            state.fs.glob(&pattern).await.map(|paths| {
+                for p in paths {
+                    println!("{}", p);
+                }
+            })
+        }
+        _ => Err(help_error()),
+    }
+}
+
 pub async fn touch<DB>(args: &[&str], state: &mut ReplState<DB>) -> Result<(), FsError>
 where
     DB: Connection,
