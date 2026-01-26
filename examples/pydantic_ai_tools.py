@@ -98,10 +98,11 @@ async def touch(args: TouchArgs) -> str:
 
 class MkdirArgs(BaseModel):
     path: str = Field(..., description="Directory path to create (parents included)")
+    parents: bool = Field(False, description="Create parent directories as needed")
 
 
 async def mkdir(args: MkdirArgs) -> str:
-    return run_tool(lambda: fs.mkdir(args.path))
+    return run_tool(lambda: fs.mkdir(args.path, args.parents))
 
 
 class CpArgs(BaseModel):

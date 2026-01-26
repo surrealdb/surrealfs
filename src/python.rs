@@ -142,6 +142,13 @@ impl FsInner {
             FsInner::Local(fs) => fs.pwd(current),
         }
     }
+
+    async fn curl(&self, request: CurlRequest) -> crate::Result<curl::CurlResult> {
+        match self {
+            FsInner::Remote(fs) => curl::curl(fs, request.clone()).await,
+            FsInner::Local(fs) => curl::curl(fs, request).await,
+        }
+    }
 }
 
 #[pyclass(module = "surrealfs_py")]
@@ -313,11 +320,10 @@ impl PySurrealFs {
             .map_err(to_py_err)
     }
 
-    #[pyo3(signature = (path, parents=false))]
-    pub fn mkdir(&self, path: &str, parents: Option<bool>) -> PyResult<String> {
+    pub fn mkdir(&self, path: &str, parents: bool) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         self.rt
-            .block_on(self.fs.mkdir(&resolved, parents.unwrap_or(false)))
+            .block_on(self.fs.mkdir(&resolved, parents))
             .map_err(to_py_err)?;
         Ok(String::new())
     }
@@ -392,7 +398,7 @@ impl PySurrealFs {
         };
 
         self.rt
-            .block_on(curl::curl(&self.fs, request))
+            .block_on(self.fs.curl(request))
             .map_err(to_py_err)
             .map(|resp| {
                 if let Some(saved) = resp.saved_to {
