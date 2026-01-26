@@ -87,10 +87,10 @@ impl FsInner {
         }
     }
 
-    async fn mkdir_p(&self, path: &str) -> crate::Result<()> {
+    async fn mkdir(&self, path: &str, parents: bool) -> crate::Result<()> {
         match self {
-            FsInner::Remote(fs) => fs.mkdir_p(path).await,
-            FsInner::Local(fs) => fs.mkdir_p(path).await,
+            FsInner::Remote(fs) => fs.mkdir(path, parents).await,
+            FsInner::Local(fs) => fs.mkdir(path, parents).await,
         }
     }
 
@@ -260,10 +260,10 @@ impl PySurrealFs {
         Ok(String::new())
     }
 
-    pub fn mkdir_p(&self, path: &str) -> PyResult<String> {
+    pub fn mkdir(&self, path: &str, parents: bool) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         self.rt
-            .block_on(self.fs.mkdir_p(&resolved))
+            .block_on(self.fs.mkdir(&resolved, parents))
             .map_err(to_py_err)?;
         Ok(String::new())
     }

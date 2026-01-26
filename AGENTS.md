@@ -28,7 +28,7 @@ Runtime / Environment
 - `.env` is optional; Justfile only wraps `cargo run`.
 
 Source Layout
-- src/lib.rs: SurrealFs API (ls, cat, tail, nl, grep, touch, mkdir_p, write_file, edit, cp, cd, pwd), path helpers, error types, public structs.
+- src/lib.rs: SurrealFs API (ls, cat, tail, nl, grep, touch, mkdir, write_file, edit, cp, cd, pwd), path helpers, error types, public structs.
 - src/main.rs: interactive REPL, cwd tracking, arg parsing, curl, ls flags, cd/pwd handling.
 - .cursor/rules/: curated Cursor guidance (see below). No Copilot instructions present.
 - Justfile: shortcut `just run`.
@@ -69,7 +69,7 @@ Async Patterns
 Path & Filesystem Rules
 - Always normalize via `normalize_path` and `resolve_relative`; forbid escaping root (`..` cannot climb past `/`).
 - `/` is never a file; operations on root either noop or error NotAFile/NotADirectory appropriately.
-- Ensure parent directories exist before writes/touch/mkdir_p. cd must target existing dir.
+- Ensure parent directories exist before writes/touch/mkdir. cd must target existing dir.
 - cp/edit respect types (dir vs file); maintain trailing path semantics.
 
 SurrealDB Usage

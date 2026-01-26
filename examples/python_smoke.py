@@ -3,7 +3,7 @@ from surrealfs_py import PySurrealFs
 
 def main() -> None:
     fs = PySurrealFs.mem()
-    fs.mkdir_p("/demo")
+    fs.mkdir("/demo", True)
     fs.write_file("/demo/hello.txt", "hello\nworld")
 
     print("ls:\n" + fs.ls("/demo"))
