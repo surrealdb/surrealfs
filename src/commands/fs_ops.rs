@@ -139,30 +139,51 @@ pub async fn edit<DB>(args: &[&str], state: &mut ReplState<DB>) -> Result<(), Fs
 where
     DB: Connection,
 {
-    match args {
-        [path, old, new] => {
-            let target = resolve_cli_path(&state.cwd, path);
-            state.fs.edit(&target, old, new, false).await.map(|diff| {
-                if !diff.is_empty() {
-                    print!("{}", diff);
-                }
-            })
-        }
-        [path, old, new, flag] => {
-            let target = resolve_cli_path(&state.cwd, path);
-            let replace_all = matches!(*flag, "true" | "1" | "yes" | "-a" | "--all");
-            state
-                .fs
-                .edit(&target, old, new, replace_all)
-                .await
-                .map(|diff| {
-                    if !diff.is_empty() {
-                        print!("{}", diff);
-                    }
-                })
-        }
-        _ => Err(help_error()),
+    if args.len() < 3 {
+        return Err(help_error());
     }
+
+    let path = resolve_cli_path(&state.cwd, args[0]);
+    let old = unquote(args[1]);
+
+    let (new_parts, replace_all) = if args.len() >= 4 {
+        let (maybe_flag, rest) = args.split_last().unwrap();
+        let is_flag = matches!(*maybe_flag, "true" | "1" | "yes" | "-a" | "--all");
+
+        if is_flag {
+            (rest[2..].to_vec(), true)
+        } else {
+            (args[2..].to_vec(), false)
+        }
+    } else {
+        (args[2..].to_vec(), false)
+    };
+
+    let new = unquote(&new_parts.join(" "));
+
+    state
+        .fs
+        .edit(&path, old.as_str(), new.as_str(), replace_all)
+        .await
+        .map(|diff| {
+            if !diff.is_empty() {
+                print!("{}", diff);
+            }
+        })
+}
+
+fn unquote(input: &str) -> String {
+    if input.len() >= 2 {
+        let bytes = input.as_bytes();
+        let first = bytes[0];
+        let last = *bytes.last().unwrap();
+
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return input[1..input.len() - 1].to_string();
+        }
+    }
+
+    input.to_string()
 }
 
 pub async fn mkdir<DB>(args: &[&str], state: &mut ReplState<DB>) -> Result<(), FsError>
