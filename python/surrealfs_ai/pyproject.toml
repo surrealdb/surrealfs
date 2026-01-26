@@ -1,0 +1,18 @@
+[project]
+name = "surrealfs-ai"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+authors = [
+    { name = "Martin Schaer", email = "martin.schaer@surrealdb.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "logfire>=4.20.0",
+    "pydantic>=2.12.5",
+    "pydantic-ai>=0.8.1",
+    "surrealfs_py"
+]
+
+[tool.uv.sources]
+surrealfs_py = { workspace = true }

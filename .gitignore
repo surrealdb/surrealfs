@@ -1,6 +1,21 @@
-/target
-__pycache__
+target/
 
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# OS
+.DS_Store
+
+# Env
 .env
 
+# DB
 /demo-db

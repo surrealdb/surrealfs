@@ -3,7 +3,7 @@ requires = ["maturin>=1.6,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "surrealfs_py"
+name = "surrealfs-py"
 version = "0.1.0"
 description = "Python bindings for surrealfs, backed by SurrealDB"
 readme = "README.md"
@@ -17,13 +17,6 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-[project.optional-dependencies]
-examples = [
-    "logfire>=4.20.0",
-    "pydantic>=2.12.5",
-    "pydantic-ai>=0.8.1",
-]
-
 [tool.maturin]
 features = ["python"]
 module-name = "surrealfs_py"
@@ -34,3 +27,9 @@ dev = [
     "maturin>=1.11.5",
     "pytest>=8.3.5",
 ]
+
+[tool.uv.workspace]
+members = ["python/surrealfs_ai"]
+
+[tool.uv.sources]
+surrealfs_ai = { workspace = true }

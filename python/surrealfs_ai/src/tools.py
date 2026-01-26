@@ -5,13 +5,14 @@ This example shows how to expose SurrealFs operations to an agent using a
 (mem vs ws) without touching the tool definitions.
 """
 
-import asyncio
 from pathlib import Path
 from typing import Callable
 
 import logfire
 from pydantic import BaseModel, Field
-from pydantic_ai import Agent, FunctionToolset
+from pydantic_ai import FunctionToolset
+
+# TODO: generate types
 from surrealfs_py import PySurrealFs  # type: ignore
 
 # Remote backend; SurrealDB must be running at this endpoint.
@@ -146,24 +147,3 @@ TOOLSET.add_function(cd, description=load_description("cd", "Change working dire
 TOOLSET.add_function(
     pwd, description=load_description("pwd", "Print working directory")
 )
-
-
-async def demo() -> None:
-    agent = Agent(
-        model="claude-haiku-4-5-20251001",
-        toolsets=[TOOLSET],
-        system_prompt=(
-            "You are a helpful filesystem agent. Use the SurrealFs tools to"
-            " manage files; prefer absolute paths under / unless instructed"
-            " otherwise."
-        ),
-    )
-
-    result = await agent.run(
-        "Create /demo/hello.txt containing 'hello world', then show its content",
-    )
-    print(result.output)
-
-
-if __name__ == "__main__":
-    asyncio.run(demo())
