@@ -46,7 +46,8 @@ pub fn print_help() {
     println!("  write_file <path> <content>");
     println!("  cp <src> <dest>");
     println!("  curl [options] <url>");
-    println!("     options: -o <file>, -O, -L, -H <h:v>, -d <data>, -X <method>");
+    println!("     options: -o <file>, -O, -L, -H <h:v>, -d <data>, -X <method>, > <file>");
+    println!("     pipeline: curl <url> | write_file <path>");
     println!("  pwd");
     println!("  cd <path>");
     println!("  help");

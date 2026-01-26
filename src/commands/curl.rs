@@ -21,7 +21,31 @@ where
     DB: Connection,
 {
     let opts = parse_curl_args(args, &state.cwd)?;
-    run_curl(&state.fs, opts).await
+    run_curl(&state.fs, opts, OutputMode::Print)
+        .await
+        .map(|_| ())
+}
+
+#[derive(Debug, Clone)]
+pub struct CurlResponse {
+    pub status: reqwest::StatusCode,
+    pub body: String,
+}
+
+pub async fn run_capture<DB>(
+    args: &[&str],
+    state: &mut ReplState<DB>,
+) -> Result<CurlResponse, FsError>
+where
+    DB: Connection,
+{
+    let opts = parse_curl_args(args, &state.cwd)?;
+    run_curl(&state.fs, opts, OutputMode::Capture)
+        .await
+        .map(|resp| CurlResponse {
+            status: resp.status,
+            body: resp.body,
+        })
 }
 
 fn parse_curl_args(args: &[&str], cwd: &str) -> Result<CurlOptions, FsError> {
@@ -95,7 +119,16 @@ fn parse_curl_args(args: &[&str], cwd: &str) -> Result<CurlOptions, FsError> {
     })
 }
 
-async fn run_curl<DB>(fs: &SurrealFs<DB>, opts: CurlOptions) -> Result<(), FsError>
+enum OutputMode {
+    Print,
+    Capture,
+}
+
+async fn run_curl<DB>(
+    fs: &SurrealFs<DB>,
+    opts: CurlOptions,
+    mode: OutputMode,
+) -> Result<CurlResponse, FsError>
 where
     DB: Connection,
 {
@@ -129,25 +162,31 @@ where
         .await
         .map_err(|e| FsError::Http(e.to_string()))?;
 
-    if let Some(out_path) = &opts.out {
-        let target = if out_path.is_empty() {
-            derive_out_name(&opts.url)
-        } else {
-            out_path.clone()
-        };
-        let content = String::from_utf8_lossy(&bytes).to_string();
-        fs.write_file(&target, content).await?;
-        println!("Saved to {} (status {})", target, status);
-    } else {
-        println!("Status: {}", status);
-        print!("{}", String::from_utf8_lossy(&bytes));
+    let body = String::from_utf8_lossy(&bytes).to_string();
+
+    match mode {
+        OutputMode::Print => {
+            if let Some(out_path) = &opts.out {
+                let target = if out_path.is_empty() {
+                    derive_out_name(&opts.url)
+                } else {
+                    out_path.clone()
+                };
+                fs.write_file(&target, body.clone()).await?;
+                println!("Saved to {} (status {})", target, status);
+            } else {
+                println!("Status: {}", status);
+                print!("{}", body);
+            }
+        }
+        OutputMode::Capture => {}
     }
 
     if !status.is_success() {
         return Err(FsError::Http(format!("HTTP status {}", status)));
     }
 
-    Ok(())
+    Ok(CurlResponse { status, body })
 }
 
 fn derive_out_name(url: &str) -> String {

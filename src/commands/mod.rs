@@ -2,7 +2,7 @@ use surrealdb::Connection;
 
 use surrealfs::SurrealFs;
 
-mod curl;
+pub mod curl;
 mod fs_ops;
 mod ls;
 mod shell;
