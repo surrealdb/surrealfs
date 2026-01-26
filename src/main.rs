@@ -4,10 +4,10 @@ use std::path::PathBuf;
 
 use regex::Regex;
 use reqwest::{Client, Url};
+use surrealdb::Surreal;
 use surrealdb::engine::any::connect;
 use surrealdb::engine::local::RocksDb;
 use surrealdb::opt::auth::Root;
-use surrealdb::Surreal;
 use tokio::io::{self, AsyncBufReadExt, BufReader};
 
 use surrealfs::{Entry, FsError, SurrealFs};
@@ -75,7 +75,10 @@ where
         let result = match cmd {
             "ls" => {
                 let (opts, target_arg) = parse_ls_args(&args);
-                let target_path = resolve_cli_path(&cwd, target_arg);
+                let target_path = match target_arg {
+                    Some(arg) => resolve_cli_path(&cwd, arg),
+                    None => cwd.clone(),
+                };
                 handle_ls(&fs, &target_path, opts).await
             }
             "cat" => match args.as_slice() {
@@ -110,7 +113,10 @@ where
                     Err(help_error())
                 } else {
                     let path = resolve_cli_path(&cwd, args[0]);
-                    let start = args.get(1).and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                    let start = args
+                        .get(1)
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(1);
                     fs.nl(&path, start).await.map(|lines| {
                         for l in lines {
                             println!("{:>4}  {}", l.number, l.line);
@@ -142,10 +148,42 @@ where
                 [path] => fs.touch(&resolve_cli_path(&cwd, path)).await,
                 _ => Err(help_error()),
             },
-            "mkdir_p" => match args.as_slice() {
-                [path] => fs.mkdir_p(&resolve_cli_path(&cwd, path)).await,
+            "edit" => match args.as_slice() {
+                [path, old, new] => {
+                    let target = resolve_cli_path(&cwd, path);
+                    fs.edit(&target, old, new, false).await.map(|diff| {
+                        if !diff.is_empty() {
+                            print!("{}", diff);
+                        }
+                    })
+                }
+                [path, old, new, flag] => {
+                    let target = resolve_cli_path(&cwd, path);
+                    let replace_all = matches!(*flag, "true" | "1" | "yes" | "-a" | "--all");
+                    fs.edit(&target, old, new, replace_all).await.map(|diff| {
+                        if !diff.is_empty() {
+                            print!("{}", diff);
+                        }
+                    })
+                }
                 _ => Err(help_error()),
             },
+            "mkdir" => {
+                let mut parents = false;
+                let mut targets = Vec::new();
+                for arg in &args {
+                    if *arg == "-p" {
+                        parents = true;
+                    } else {
+                        targets.push(*arg);
+                    }
+                }
+
+                match targets.as_slice() {
+                    [path] => fs.mkdir(&resolve_cli_path(&cwd, path), parents).await,
+                    _ => Err(help_error()),
+                }
+            }
             "write_file" => {
                 if args.len() < 2 {
                     Err(help_error())
@@ -163,12 +201,10 @@ where
                 }
                 _ => Err(help_error()),
             },
-            "curl" => {
-                match parse_curl_args(&args, &cwd) {
-                    Ok(opts) => run_curl(&fs, opts).await,
-                    Err(e) => Err(e),
-                }
-            }
+            "curl" => match parse_curl_args(&args, &cwd) {
+                Ok(opts) => run_curl(&fs, opts).await,
+                Err(e) => Err(e),
+            },
             "pwd" => {
                 println!("{}", cwd);
                 Ok(())
@@ -214,7 +250,8 @@ fn print_help() {
     println!("  nl <path> [start]");
     println!("  grep [-r|--recursive] <pattern> <path>");
     println!("  touch <path>");
-    println!("  mkdir_p <path>");
+    println!("  edit <path> <old> <new> [replace_all]");
+    println!("  mkdir [-p] <path>");
     println!("  write_file <path> <content>");
     println!("  cp <src> <dest>");
     println!("  curl [options] <url>");
@@ -348,7 +385,10 @@ where
 
     let resp = req.send().await.map_err(|e| FsError::Http(e.to_string()))?;
     let status = resp.status();
-    let bytes = resp.bytes().await.map_err(|e| FsError::Http(e.to_string()))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| FsError::Http(e.to_string()))?;
 
     if let Some(out_path) = &opts.out {
         let target = if out_path.is_empty() {
@@ -373,7 +413,10 @@ where
 
 fn derive_out_name(url: &str) -> String {
     if let Ok(parsed) = Url::parse(url) {
-        if let Some(seg) = parsed.path_segments().and_then(|s| s.filter(|v| !v.is_empty()).last()) {
+        if let Some(seg) = parsed
+            .path_segments()
+            .and_then(|s| s.filter(|v| !v.is_empty()).last())
+        {
             return seg.to_string();
         }
     }
@@ -393,7 +436,7 @@ struct LsOptions {
     human: bool,
 }
 
-fn parse_ls_args<'a>(args: &'a [&str]) -> (LsOptions, &'a str) {
+fn parse_ls_args<'a>(args: &'a [&str]) -> (LsOptions, Option<&'a str>) {
     let mut opts = LsOptions {
         all: false,
         long: false,
@@ -422,7 +465,7 @@ fn parse_ls_args<'a>(args: &'a [&str]) -> (LsOptions, &'a str) {
         }
     }
 
-    (opts, path.unwrap_or("/"))
+    (opts, path)
 }
 
 async fn handle_ls<DB>(fs: &SurrealFs<DB>, path: &str, opts: LsOptions) -> surrealfs::Result<()>
