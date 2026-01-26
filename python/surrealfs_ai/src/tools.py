@@ -89,6 +89,20 @@ async def write_file(args: WriteFileArgs) -> str:
     return run_tool(lambda: fs.write_file(args.path, args.content))
 
 
+class EditArgs(BaseModel):
+    path: str = Field(..., description="File to edit")
+    old: str = Field(..., description="Substring or pattern to replace")
+    new: str = Field(..., description="Replacement text")
+    replace_all: bool = Field(
+        False,
+        description="Replace all occurrences (default replaces first only)",
+    )
+
+
+async def edit(args: EditArgs) -> str:
+    return run_tool(lambda: fs.edit(args.path, args.old, args.new, args.replace_all))
+
+
 class TouchArgs(BaseModel):
     path: str = Field(..., description="Path to create or update")
 
@@ -135,6 +149,12 @@ TOOLSET.add_function(
 )
 TOOLSET.add_function(
     write_file, description=load_description("write-file", "Write file contents")
+)
+TOOLSET.add_function(
+    edit,
+    description=load_description(
+        "edit", "Replace text in a file (optionally all occurrences)"
+    ),
 )
 TOOLSET.add_function(
     touch, description=load_description("touch", "Create a file if missing")
