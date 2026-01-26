@@ -2,106 +2,151 @@ AGENTS PLAYBOOK (surrealfs)
 Version: 2026-01-26
 
 Purpose
-- Field guide for coding agents working in this repo. Focus on commands, style, guardrails, and local conventions.
+- Field guide for coding agents in this repo: commands, style, guardrails, local conventions. Treat as the source of truth when automating work.
 
 Repository Snapshot
 - Language: Rust (edition 2024).
 - Crate type: library + demo bin (async, tokio-based).
-- Key deps: surrealdb (=2.4.1, features: kv-mem, kv-rocksdb), tokio, regex, reqwest (0.12, rustls), serde, thiserror.
-- Demo REPL in src/main.rs; primary API in src/lib.rs.
+- Key deps: surrealdb (=2.4.1, features: kv-mem, kv-rocksdb), tokio, regex, reqwest (0.12, rustls), serde, thiserror, similar.
+- Demo REPL in src/main.rs; primary API in src/lib.rs. No workspace members.
+- No CI config; keep checks local.
 
 Build / Test / Run
 - Full check: `cargo check`
 - Full tests: `cargo test`
 - Single test (by name): `cargo test <test_name>` (e.g., `cargo test cd_and_pwd`)
-- Run demo (respecting .env): `cargo run` (or `just run` if using Justfile; loads .env)
-- Format (if needed): `cargo fmt`
-- Lint (none configured); prefer `cargo clippy -- -D warnings` if you add clippy.
+- Run demo (loads .env if present): `cargo run` (or `just run` via Justfile)
+- Format: `cargo fmt`
+- Lint (opt-in): `cargo clippy -- -D warnings`
+- Clean: `cargo clean` (rarely needed; prefer incremental builds)
+- Examples: none beyond demo bin.
 
-Runtime Notes
-- REPL chooses remote vs local based on `SURREALFS_REMOTE` env. Remote: ws://127.0.0.1:8000 root/root ns=surrealfs db=demo. Local: RocksDB under ./demo-db.
-- Async everywhere; tokio macros enabled.
+Runtime / Environment
+- Default runtime: tokio (multi-thread). Avoid blocking operations in async code.
+- REPL chooses backend via `SURREALFS_REMOTE`. If set: ws://127.0.0.1:8000, auth root/root, ns=surrealfs, db=demo. Otherwise RocksDB at ./demo-db (created if missing).
+- CLI prints and flushes manually; library remains silent (no prints/logging).
+- `.env` is optional; Justfile only wraps `cargo run`.
 
 Source Layout
-- src/lib.rs: SurrealFs API (ls, cat, tail, nl, grep, touch, mkdir_p, write_file, cp, cd, pwd). Path normalization helpers, error types.
-- src/main.rs: Interactive CLI (tracks cwd), commands mirror API plus curl, ls options, cd/pwd.
-- Justfile: `just run` (loads .env, calls cargo run).
-- .cursor/rules: surrealdb-rust.mdc and surrealql.mdc provide guidance; see below.
+- src/lib.rs: SurrealFs API (ls, cat, tail, nl, grep, touch, mkdir_p, write_file, edit, cp, cd, pwd), path helpers, error types, public structs.
+- src/main.rs: interactive REPL, cwd tracking, arg parsing, curl, ls flags, cd/pwd handling.
+- .cursor/rules/: curated Cursor guidance (see below). No Copilot instructions present.
+- Justfile: shortcut `just run`.
 
-Coding Conventions
-- Imports: group std, third-party, crate; keep unused imports out to avoid warnings. Prefer explicit imports over glob.
-- Error handling: use Result<T, FsError>. Convert external errors via FsError variants; currently only Surreal and Http variants in lib. In CLI, map reqwest errors to FsError::Http.
-- Paths: normalize via `normalize_path` and `resolve_relative`; never allow escaping root. Use these helpers for any path handling.
-- Filesystem API: treat `/` specially (cannot be file). Ensure parent dirs exist before writing. cd must target existing directory.
-- Async: use `.await` directly; avoid blocking calls. Use tokio IO for stdin.
-- Data types: Entry/NumberedLine/GrepMatch are serde-friendly structs. Keep public structs camel-case; fields snake_case.
-- Naming: functions snake_case; structs PascalCase; constants SCREAMING_SNAKE if added. Keep command names consistent with Unix analogs.
-- Formatting: rustfmt defaults; prefer 100ish columns but follow rustfmt.
-- Pattern matching: exhaustively handle command args; on invalid args in CLI, print help.
-- Logging/prints: CLI prints via println!/print!; library should not print.
-- HTTP (curl): default GET; if -d used and no -X, default POST. Follow redirects only with -L. Headers parsed as `Key: Value`. Non-2xx -> FsError::Http.
-- Size printing: ls -h uses base 1024.
+Dependencies / Features
+- surrealdb: remote ws client + local RocksDB; tests use Mem. Table default `fs_entry`.
+- reqwest uses rustls; HTTP helpers live only in CLI for curl.
+- similar/TextDiff used for edit diffs.
+- serde derives on exposed structs for potential bindings.
 
-Cursor Rules (from .cursor/rules)
-- surrealdb-rust.mdc: shows SurrealDB Rust usage patterns, in-memory vs remote examples, schema definition snippets, datetime serialization helpers.
-- surrealql.mdc: SurrealQL guidance; record IDs table:id, parameterized queries, MERGE/PATCH, relationships, non-SQL differences, example statements. Remember SurrealQL != SQL.
-- Apply these as reference; not mandatory unless relevant code touches SurrealDB queries.
+Imports / Modules
+- Group imports std :: third-party :: crate. Avoid unused imports to keep builds warning-free.
+- Prefer explicit paths over glob use. Keep `use crate::{...}` small and clear.
 
-Style for SurrealDB Usage
-- Connect via Surreal::new::<Any>/connect for remote; Surreal::new::<RocksDb>/Mem for local. Set namespace/db explicitly. Root signin required for remote.
-- Prefer parameter binding in queries; avoid string interpolation of user data.
-- Keep table name `fs_entry` unless intentionally parameterized.
+Formatting / Style
+- Run rustfmt defaults. Aim ~100 columns but trust rustfmt.
+- Prefer early returns over deeply nested branches when readable.
+- Keep comments minimal; use only for non-obvious intent.
+- Stick to ASCII unless existing file uses otherwise.
+
+Naming / Types
+- Functions snake_case; structs/enums PascalCase; constants SCREAMING_SNAKE. Command strings mirror Unix names (ls, cat, etc.).
+- Public data structs (Entry, NumberedLine, GrepMatch) serde-friendly; fields snake_case.
+- Type alias Result<T> = std::result::Result<T, FsError> (use it).
+- Prefer `&str`/`String` over PathBuf internally; path logic handled by helpers.
+
+Error Handling
+- FsError variants: NotFound, AlreadyExists, NotAFile, NotADirectory, InvalidPath, Http, Surreal.
+- Map external errors explicitly (reqwest -> FsError::Http in CLI; surrealdb errors auto-convert via From).
+- Messages should include context (path/status) but stay concise.
+- Do not panic for recoverable cases; return FsError.
+
+Async Patterns
+- Everything async; await directly. Avoid blocking std IO inside async (use tokio IO).
+- REPL input via tokio BufReader; maintain responsiveness.
+- Avoid spawning unless needed; most ops run in-line.
+
+Path & Filesystem Rules
+- Always normalize via `normalize_path` and `resolve_relative`; forbid escaping root (`..` cannot climb past `/`).
+- `/` is never a file; operations on root either noop or error NotAFile/NotADirectory appropriately.
+- Ensure parent directories exist before writes/touch/mkdir_p. cd must target existing dir.
+- cp/edit respect types (dir vs file); maintain trailing path semantics.
+
+SurrealDB Usage
+- Construct client via Surreal::new::<RocksDb>/Mem or connect (Any) for remote. Always set namespace/db before use.
+- Keep table name `fs_entry` unless intentionally parameterized; `with_table` exists for alt tables.
+- Prefer parameter binding in queries; avoid interpolating user input.
+- Handle missing entries gracefully; ls on `/` with no entries returns empty vec.
+
+SurrealQL Guidance (from .cursor/rules/surrealql.mdc)
+- Record IDs formatted table:id; use parameterized statements instead of string concat.
+- MERGE/PATCH available; relationships are non-SQL; respect SurrealQL differences.
+- Use bindings for values; avoid raw string interpolation.
+
+SurrealDB Rust Guidance (from .cursor/rules/surrealdb-rust.mdc)
+- Examples for Mem vs remote clients; set ns/db each time; root signin required remotely.
+- Includes schema snippets, datetime helpers. Follow patterns when adding queries or types.
+
+HTTP / Curl Behavior
+- Default method GET. If `-d` present without `-X`, default POST.
+- Follow redirects only with `-L`. Headers parsed as `Key: Value` pairs.
+- Non-2xx surfaces as FsError::Http with status/message; body printed only when appropriate.
+
+CLI Extension Tips
+- To add commands: update REPL match arms, help text, and path resolution via `resolve_cli_path` to honor cwd.
+- Keep arg parsing simple; on invalid args, return help_error() and print usage.
+- Preserve stdout formatting (ls -h uses base 1024 sizes; nl right-align numbers width 4).
 
 Testing Guidance
-- Unit tests live in src/lib.rs. Use in-memory engine (Mem) and ns/db "test". Avoid external network in tests.
-- When adding tests for CLI-adjacent logic, prefer exercising underlying library instead of stdin parsing.
+- Unit tests live in src/lib.rs; use in-memory engine (`Surreal::new::<Mem>(())`) with ns/db "test".
+- Avoid network in tests. Exercise library directly rather than stdin parsing for CLI behavior.
+- Example targeted test: `cargo test ls_and_grep_recursive`.
+- Keep tests deterministic; avoid system time/env dependence unless explicitly set.
 
-CI/Tooling
-- No CI config present; run cargo test before commits. If adding clippy/format checks, document commands here.
+Tooling / CI
+- No enforced CI. Before commits run `cargo fmt && cargo test` (optionally clippy with -D warnings).
+- If adding clippy/config, document commands here and keep warnings as errors for consistency.
 
-Behavioral Guardrails
-- Do not introduce non-ASCII unless required.
-- Avoid destructive git commands; never reset user changes.
-- Keep REPL responsive: avoid long network calls; report HTTP status even on errors.
-- For new commands, ensure they honor cwd and use path resolvers.
-
-Extending CLI
-- Add new commands by updating REPL match, help text, and path resolution via `resolve_cli_path`.
-- Keep options parsing simple; on invalid args, call print_help.
-
-Error Messages
-- FsError variants: NotFound, AlreadyExists, NotAFile, NotADirectory, InvalidPath, Surreal, Http.
-- Prefer precise context in Http errors (status, message).
+Security / Secrets
+- No real secrets tracked. Demo remote creds are root/root only for local dev. Do not commit real credentials or tokens.
+- Avoid writing secrets to repo; prefer env vars when adding integrations.
 
 Performance Notes
-- SurrealQL queries currently simple selects/creates/updates; no pagination. For large listings, consider streaming later.
-- ls recursive uses DFS stack; no cycle detection needed (tree model), but watch for deep recursion via stack vector.
+- Surreal queries are simple create/select/update; no pagination yet. Consider streaming if large results are added later.
+- Recursive ls uses DFS stack; watch for deep recursion but tree model means no cycles.
+- Avoid unnecessary cloning of large strings; reuse references when possible.
 
-Security/Secrets
-- No secrets in repo. Remote creds are root/root for demo only. Do not commit real credentials.
+Dependency Hygiene
+- Pin compatible versions; if bumping surrealdb or reqwest, ensure feature flags (kv-mem, kv-rocksdb, rustls) remain correct.
+- After `cargo update -p <crate>`, re-check imports/types in main.rs and lib.rs.
 
-Adding Dependencies
-- Pin compatible versions; ensure features match (reqwest with rustls). Run `cargo update -p <crate>` cautiously; re-check main.rs imports.
+Release / Versioning
+- Crate version 0.1.0. No release process defined; tag manually if needed.
 
-Release/Versioning
-- Crate version 0.1.0. No release process defined.
+Behavioral Guardrails
+- Avoid destructive git commands; never reset user changes. Do not amend commits unless explicitly asked.
+- Keep outputs concise; library stays silent, CLI handles prints. Avoid non-ASCII unless file already uses it.
+- Honor cwd semantics and path resolvers for all file operations.
 
-Examples
-- Connect embedded:
+Examples / Snippets
+- Embedded in-memory client:
   ```rust
   let db = Surreal::new::<surrealdb::engine::local::Mem>(()).await?;
   db.use_ns("demo").use_db("demo").await?;
   let fs = SurrealFs::new(db);
   ```
-- Single test run: `cargo test ls_and_grep_recursive`
+- Single test: `cargo test ls_and_grep_recursive`
+- Run REPL with remote DB: `SURREALFS_REMOTE=1 cargo run`
 
 Common Pitfalls
-- Forgetting to set ns/db on Surreal connection -> errors.
-- Using absolute paths incorrectly: always normalize; forbid `..` beyond root.
-- curl without -o/-O prints body; may be large—consider in future improvements.
+- Forgetting to set namespace/database on Surreal connection -> runtime errors.
+- Allowing `..` to escape root -> reject via normalize_path.
+- Treating `/` like a file -> should error/ignore appropriately.
+- curl without -o/-O prints body; may be large.
+- Missing flush on prompts leads to hidden REPL prompt; keep `stdout().flush()`.
 
-Help/Docs
-- REPL help shows available commands and flags; update it when adding commands.
-- Keep this file in sync with new commands/features.
+Help / Docs
+- REPL help lists commands/flags; update when adding features.
+- Keep this file in sync with new commands, dependencies, or tooling changes.
 
 End of AGENTS.md
