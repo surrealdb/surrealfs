@@ -45,6 +45,25 @@ where
     }
 }
 
+pub async fn read<DB>(args: &[&str], state: &mut ReplState<DB>) -> Result<(), FsError>
+where
+    DB: Connection,
+{
+    match args {
+        [path, offset, limit] => {
+            let offset = offset.parse::<usize>().map_err(|_| help_error())?;
+            let limit = limit.parse::<usize>().map_err(|_| help_error())?;
+            let path = resolve_cli_path(&state.cwd, path);
+            state.fs.read(&path, offset, limit).await.map(|lines| {
+                for l in lines {
+                    println!("{}", l);
+                }
+            })
+        }
+        _ => Err(help_error()),
+    }
+}
+
 pub async fn nl<DB>(args: &[&str], state: &mut ReplState<DB>) -> Result<(), FsError>
 where
     DB: Connection,

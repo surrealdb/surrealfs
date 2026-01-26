@@ -105,6 +105,23 @@ where
         Ok(lines[start..].iter().map(|s| s.to_string()).collect())
     }
 
+    pub async fn read(
+        &self,
+        path: impl AsRef<str>,
+        offset: usize,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let content = self.cat(path.as_ref()).await?;
+        let lines: Vec<&str> = content.lines().collect();
+        let start = offset.min(lines.len());
+        let end = start.saturating_add(limit).min(lines.len());
+        Ok(lines[start..end].iter().map(|s| s.to_string()).collect())
+    }
+
     pub async fn nl(&self, path: impl AsRef<str>, start_at: usize) -> Result<Vec<NumberedLine>> {
         let content = self.cat(path.as_ref()).await?;
         Ok(content
@@ -551,6 +568,27 @@ mod tests {
         let numbered = fs.nl("/logs/app.log", 1).await.unwrap();
         assert_eq!(numbered[0].number, 1);
         assert_eq!(numbered[3].line, "d");
+    }
+
+    #[tokio::test]
+    async fn read_with_offset_and_limit() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/logs", true).await.unwrap();
+        fs.write_file("/logs/app.log", "l1\nl2\nl3\nl4\nl5")
+            .await
+            .unwrap();
+
+        let middle = fs.read("/logs/app.log", 1, 3).await.unwrap();
+        assert_eq!(middle, vec!["l2", "l3", "l4"]);
+
+        let tail = fs.read("/logs/app.log", 4, 10).await.unwrap();
+        assert_eq!(tail, vec!["l5"]);
+
+        let empty = fs.read("/logs/app.log", 10, 2).await.unwrap();
+        assert!(empty.is_empty());
+
+        let none = fs.read("/logs/app.log", 0, 0).await.unwrap();
+        assert!(none.is_empty());
     }
 
     #[tokio::test]

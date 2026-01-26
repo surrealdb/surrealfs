@@ -34,6 +34,9 @@ where
         "tail" => fs_ops::tail(args, state)
             .await
             .map(|_| ReplControl::Continue),
+        "read" => fs_ops::read(args, state)
+            .await
+            .map(|_| ReplControl::Continue),
         "nl" => fs_ops::nl(args, state).await.map(|_| ReplControl::Continue),
         "grep" => fs_ops::grep(args, state)
             .await
