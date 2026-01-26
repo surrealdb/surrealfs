@@ -78,14 +78,16 @@ where
 
     pub async fn ls(&self, path: impl AsRef<str>) -> Result<Vec<Entry>> {
         let path = normalize_path(path.as_ref())?;
+        if path == "/" {
+            return self.children(&path).await;
+        }
+
         if let Some(entry) = self.get_entry(&path).await? {
             if entry.is_dir {
                 self.children(&path).await
             } else {
                 Ok(vec![entry])
             }
-        } else if path == "/" {
-            Ok(vec![])
         } else {
             Err(FsError::NotFound(path))
         }
@@ -462,10 +464,17 @@ fn parent_path(path: &str) -> Option<String> {
     let mut parts: Vec<&str> = path.trim_end_matches('/').split('/').collect();
     parts.pop();
     if parts.is_empty() {
-        Some("/".into())
-    } else {
-        Some(parts.join("/").replace("//", "/"))
+        return Some("/".into());
     }
+
+    let mut parent = parts.join("/");
+    if parent.is_empty() {
+        parent.push('/');
+    } else if !parent.starts_with('/') {
+        parent.insert(0, '/');
+    }
+
+    Some(parent.replace("//", "/"))
 }
 
 fn normalize_path(input: &str) -> Result<String> {
@@ -578,6 +587,21 @@ mod tests {
         let fs = setup_fs().await.unwrap();
         let err = fs.mkdir("/missing/child", false).await.unwrap_err();
         matches!(err, FsError::NotFound(_));
+    }
+
+    #[tokio::test]
+    async fn ls_root_lists_children() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/docs", true).await.unwrap();
+        fs.write_file("/readme.md", "hello").await.unwrap();
+
+        let entries = fs.ls("/").await.unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"docs"));
+        assert!(names.contains(&"readme.md"));
+
+        let dir = entries.iter().find(|e| e.name == "docs").unwrap();
+        assert!(dir.is_dir);
     }
 
     #[tokio::test]
