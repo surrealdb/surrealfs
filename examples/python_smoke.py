@@ -1,4 +1,4 @@
-from surrealfs_py import PySurrealFs
+from surrealfs_py import PySurrealFs  # pyright: ignore[reportAttributeAccessIssue]
 
 
 def main() -> None:

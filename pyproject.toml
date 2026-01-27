@@ -1,13 +1,12 @@
-[build-system]
-requires = ["maturin>=1.6,<2.0"]
-build-backend = "maturin"
-
 [project]
-name = "surrealfs-py"
+name = "surrealfs-monorepo"
 version = "0.1.0"
-description = "Python bindings for surrealfs, backed by SurrealDB"
+description = "Monorepo for SurrealFS tools"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
+authors = [
+    { name = "Martin Schaer", email = "martin.schaer@surrealdb.com" }
+]
 classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
@@ -17,19 +16,5 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 
-[tool.maturin]
-features = ["python"]
-module-name = "surrealfs_py"
-strip = true
-
-[dependency-groups]
-dev = [
-    "maturin>=1.11.5",
-    "pytest>=8.3.5",
-]
-
 [tool.uv.workspace]
-members = ["python/surrealfs_ai"]
-
-[tool.uv.sources]
-surrealfs_ai = { workspace = true }
+members = ["python/*"]
