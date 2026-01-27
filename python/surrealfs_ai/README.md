@@ -8,6 +8,7 @@ Pydantic AI toolset that exposes SurrealFs to an agent so it can read, write, an
 - Local build of the `surrealfs_py` Python extension from this repo (Rust bindings via maturin).
 
 ## Install (from repo root)
+
 ```bash
 uv venv
 source .venv/bin/activate
@@ -17,25 +18,23 @@ uv pip install -e python/surrealfs_ai
 
 ## Quickstart
 Run the demo that asks the agent to create and read a file:
-```bash
-uv run python - <<'PY'
+
+```python
 import asyncio
 from surrealfs_ai import demo
 
 asyncio.run(demo())
-PY
 ```
 
 Host the agent as an HTTP service (defaults to 127.0.0.1:7932):
-```bash
-uv run python - <<'PY'
+
+```python
 import uvicorn
 from surrealfs_ai import build_chat_agent
 
 agent = build_chat_agent()
 app = agent.to_web()
 uvicorn.run(app, host="127.0.0.1", port=7932)
-PY
 ```
 
 ## Available tools
