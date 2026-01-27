@@ -1,0 +1,27 @@
+[build-system]
+requires = ["maturin>=1.6,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "surrealfs-py"
+version = "0.1.0"
+dependencies = [
+    "surrealfs-py",
+]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.11.5",
+    "pytest>=8.3.5",
+]
+
+[tool.uv.sources]
+surrealfs-py = { workspace = true }
+
+[tool.maturin]
+features = ["python"]
+strip = true
+# Point back to the root Rust source
+manifest-path = "../../Cargo.toml"
+python-source = "."
+module-name = "surrealfs_py.surrealfs_py"

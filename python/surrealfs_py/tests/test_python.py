@@ -1,10 +1,11 @@
-from surrealfs_py import PySurrealFs
+# TODO: generate types
+from surrealfs_py import PySurrealFs  # type: ignore
 
 
 def test_mem_roundtrip() -> None:
     fs = PySurrealFs.mem()
 
-    assert fs.mkdir("/code") == ""
+    assert fs.mkdir("/code", True) == ""
     assert fs.write_file("/code/readme.md", "hi there") == ""
 
     ls_out = fs.ls("/code").strip().splitlines()
