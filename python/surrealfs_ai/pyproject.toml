@@ -8,7 +8,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-demo = ["logfire>=4.20.0"]
+demo = [
+    "logfire>=4.20.0",
+    "pydantic-ai-slim[web,anthropic]>=1.47.0",
+]
 
 [build-system]
 requires = ["hatchling"]
