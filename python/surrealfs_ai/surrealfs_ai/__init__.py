@@ -1,7 +1,6 @@
 import uvicorn
 from pydantic_ai import Agent, ModelSettings, WebFetchTool, WebSearchTool
-
-from .tools import build_toolset, instructions
+from tools import build_toolset, instructions
 
 
 def build_chat_agent(
