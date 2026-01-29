@@ -13,8 +13,8 @@ from surrealfs_py import PySurrealFs  # type: ignore
 
 @dataclass
 class GenerateImageGlobalArgs:
-    model: str = "dall-e-2"
-    size: Literal["512x512", "1024x1024"] = "512x512"
+    model: str = "dall-e-3"
+    size: Literal["512x512", "1024x1024"] = "1024x1024"
     n: int = 1
 
 
@@ -65,7 +65,7 @@ def add_image_tools(
             data = base64.b64decode(b64)
             dest = base_path if global_args.n == 1 else f"{base_path}.{idx}"
             try:
-                await fs.write_bytes(dest, data)
+                fs.write_bytes(dest, data)
             except Exception as e:  # noqa: E722
                 return f"error: failed to write image to {dest}: {e}"
             paths.append(dest)
