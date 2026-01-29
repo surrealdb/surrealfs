@@ -35,3 +35,15 @@ def test_read_and_edit() -> None:
     diff_all = fs.edit("/code/app.txt", "beta", "BETA", True)
     assert diff_all.startswith("--- original")
     assert fs.cat("/code/app.txt") == "alpha\nBETA\ngamma\nBETA"
+
+
+def test_bytes_roundtrip() -> None:
+    fs = PySurrealFs.mem()
+
+    fs.mkdir("/bin", True)
+    data = bytes([0, 1, 2, 3, 250, 251, 252, 253, 254, 255])
+
+    fs.write_bytes("/bin/blob.bin", data)
+    stored = fs.cat_bytes("/bin/blob.bin")
+
+    assert stored == data

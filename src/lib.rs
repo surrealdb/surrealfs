@@ -2,10 +2,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use globset::{GlobBuilder, GlobSetBuilder};
 use regex::Regex;
+use rimage::codecs::{
+    avif::AvifEncoder, mozjpeg::MozJpegEncoder, oxipng::OxiPngEncoder, webp::WebPEncoder,
+};
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use similar::{ChangeTag, TextDiff};
 use surrealdb::{Surreal, engine::remote::ws::Client};
 use thiserror::Error;
+use zune_core::{bytestream::ZCursor, options::DecoderOptions};
+use zune_image::{image::Image, traits::EncoderTrait};
 
 pub type Result<T> = std::result::Result<T, FsError>;
 
@@ -26,6 +32,8 @@ pub enum FsError {
     NotADirectory(String),
     #[error("invalid path")]
     InvalidPath,
+    #[error("invalid utf-8 for: {0}")]
+    InvalidUtf8(String),
     #[error("http error: {0}")]
     Http(String),
     #[error("database error: {0}")]
@@ -40,7 +48,44 @@ pub struct Entry {
     pub is_dir: bool,
     pub content: Option<String>,
     #[serde(default)]
+    pub content_bytes: Option<ByteBuf>,
+    #[serde(default)]
     pub updated_at: Option<i64>,
+}
+
+impl Entry {
+    pub fn size(&self) -> usize {
+        if self.is_dir {
+            return 0;
+        }
+        if let Some(bytes) = &self.content_bytes {
+            return bytes.len();
+        }
+        self.content.as_ref().map(|c| c.len()).unwrap_or(0)
+    }
+
+    pub fn is_binary(&self) -> bool {
+        self.content_bytes.is_some() && self.content.is_none()
+    }
+
+    pub fn text(&self) -> Result<Option<String>> {
+        if let Some(content) = &self.content {
+            return Ok(Some(content.clone()));
+        }
+        if let Some(bytes) = &self.content_bytes {
+            let text = String::from_utf8(bytes.clone().into_vec())
+                .map_err(|_| FsError::InvalidUtf8(self.path.clone()))?;
+            return Ok(Some(text));
+        }
+        Ok(None)
+    }
+
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        if let Some(bytes) = &self.content_bytes {
+            return Some(bytes.clone().into_vec());
+        }
+        self.content.as_ref().map(|c| c.as_bytes().to_vec())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,7 +147,12 @@ where
 
     pub async fn cat(&self, path: impl AsRef<str>) -> Result<String> {
         let entry = self.require_file(path.as_ref()).await?;
-        Ok(entry.content.unwrap_or_default())
+        Ok(entry.text()?.unwrap_or_default())
+    }
+
+    pub async fn cat_bytes(&self, path: impl AsRef<str>) -> Result<Vec<u8>> {
+        let entry = self.require_file(path.as_ref()).await?;
+        Ok(entry.bytes().unwrap_or_default())
     }
 
     pub async fn tail(&self, path: impl AsRef<str>, n: usize) -> Result<Vec<String>> {
@@ -161,7 +211,7 @@ where
                         stack.push(child.path);
                     }
                 }
-            } else if let Some(content) = &entry.content {
+            } else if let Some(content) = entry.text()? {
                 for (idx, line) in content.lines().enumerate() {
                     if pattern.is_match(line) {
                         matches.push(GrepMatch {
@@ -244,7 +294,8 @@ where
                 Ok(())
             }
             None => {
-                self.create_file(&path, &parent, "").await?;
+                self.create_file(&path, &parent, Some(String::new()), None)
+                    .await?;
                 Ok(())
             }
         }
@@ -262,14 +313,53 @@ where
         let parent = parent_path(&path).ok_or(FsError::InvalidPath)?;
         self.ensure_dir(&parent).await?;
 
+        let content = content.into();
+
         if let Some(mut entry) = self.get_entry(&path).await? {
             if entry.is_dir {
                 return Err(FsError::NotAFile(path));
             }
-            entry.content = Some(content.into());
+            entry.content = Some(content.clone());
+            entry.content_bytes = None;
             self.persist_entry(&entry).await?;
         } else {
-            self.create_file(&path, &parent, content.into()).await?;
+            self.create_file(&path, &parent, Some(content), None)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn write_bytes(&self, path: impl AsRef<str>, data: impl Into<Vec<u8>>) -> Result<()> {
+        let path = normalize_path(path.as_ref())?;
+        self.write_bytes_internal(&path, data.into(), true).await
+    }
+
+    async fn write_bytes_internal(
+        &self,
+        path: &str,
+        mut data: Vec<u8>,
+        optimize_images: bool,
+    ) -> Result<()> {
+        if path == "/" {
+            return Err(FsError::NotAFile(path.to_string()));
+        }
+        let parent = parent_path(path).ok_or(FsError::InvalidPath)?;
+        self.ensure_dir(&parent).await?;
+
+        if optimize_images {
+            data = optimize_image_bytes(path, data);
+        }
+
+        if let Some(mut entry) = self.get_entry(path).await? {
+            if entry.is_dir {
+                return Err(FsError::NotAFile(path.to_string()));
+            }
+            entry.content = None;
+            entry.content_bytes = Some(ByteBuf::from(data));
+            self.persist_entry(&entry).await?;
+        } else {
+            self.create_file(path, &parent, None, Some(ByteBuf::from(data)))
+                .await?;
         }
         Ok(())
     }
@@ -367,8 +457,7 @@ where
     pub async fn cp(&self, src: impl AsRef<str>, dest: impl AsRef<str>) -> Result<()> {
         let src = normalize_path(src.as_ref())?;
         let dest = normalize_path(dest.as_ref())?;
-
-        let content = self.cat(&src).await?;
+        let entry = self.require_file(&src).await?;
 
         if dest == "/" {
             return Err(FsError::NotAFile(dest));
@@ -376,7 +465,13 @@ where
         let parent = parent_path(&dest).ok_or(FsError::InvalidPath)?;
         self.ensure_dir(&parent).await?;
 
-        self.write_file(&dest, content).await
+        if let Some(bytes) = entry.content_bytes {
+            self.write_bytes_internal(&dest, bytes.into_vec(), false)
+                .await
+        } else {
+            self.write_file(&dest, entry.content.unwrap_or_default())
+                .await
+        }
     }
 
     /// Change directory: resolve `target` relative to `current`, ensure it exists and is a directory.
@@ -420,7 +515,7 @@ where
         let mut res = self
             .db
             .query(format!(
-                "SELECT path, name, parent, is_dir, content, updated_at FROM {} WHERE parent = $parent ORDER BY name",
+                "SELECT path, name, parent, is_dir, content, content_bytes, updated_at FROM {} WHERE parent = $parent ORDER BY name",
                 self.table
             ))
             .bind(("parent", parent))
@@ -435,7 +530,7 @@ where
         let mut res = self
             .db
             .query(format!(
-                "SELECT path, name, parent, is_dir, content, updated_at FROM {} WHERE path = $path LIMIT 1",
+                "SELECT path, name, parent, is_dir, content, content_bytes, updated_at FROM {} WHERE path = $path LIMIT 1",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -449,7 +544,7 @@ where
         let parent_owned = parent.to_string();
         self.db
             .query(format!(
-                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = true, content = NONE, updated_at = $updated_at",
+                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = true, content = NONE, content_bytes = NONE, updated_at = $updated_at",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -464,20 +559,21 @@ where
         &self,
         path: &str,
         parent: &str,
-        content: impl Into<String>,
+        content: Option<String>,
+        content_bytes: Option<ByteBuf>,
     ) -> Result<()> {
-        let content = content.into();
         let path_owned = path.to_string();
         let parent_owned = parent.to_string();
         self.db
             .query(format!(
-                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = false, content = $content, updated_at = $updated_at",
+                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = false, content = $content, content_bytes = $content_bytes, updated_at = $updated_at",
                 self.table
             ))
             .bind(("path", path_owned))
             .bind(("name", leaf_name(path)))
             .bind(("parent", parent_owned))
             .bind(("content", content))
+            .bind(("content_bytes", content_bytes))
             .bind(("updated_at", now_millis()))
             .await?;
         Ok(())
@@ -489,7 +585,7 @@ where
         let parent_owned = entry.parent.clone();
         self.db
             .query(format!(
-                "UPDATE {} SET content = $content, name = $name, parent = $parent, is_dir = $is_dir, updated_at = $updated_at WHERE path = $path",
+                "UPDATE {} SET content = $content, content_bytes = $content_bytes, name = $name, parent = $parent, is_dir = $is_dir, updated_at = $updated_at WHERE path = $path",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -497,6 +593,7 @@ where
             .bind(("parent", parent_owned))
             .bind(("is_dir", entry.is_dir))
             .bind(("content", entry.content.clone()))
+            .bind(("content_bytes", entry.content_bytes.clone()))
             .bind(("updated_at", now_millis()))
             .await?;
         Ok(())
@@ -533,6 +630,48 @@ fn render_diff(old: &str, new: &str) -> String {
     }
 
     out
+}
+
+fn optimize_image_bytes(path: &str, data: Vec<u8>) -> Vec<u8> {
+    let ext = path
+        .rsplit('.')
+        .next()
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if !matches!(ext.as_str(), "png" | "jpg" | "jpeg" | "webp" | "avif") {
+        return data;
+    }
+
+    let cursor = ZCursor::new(&data);
+    let image = match Image::read(cursor, DecoderOptions::default()) {
+        Ok(img) => img,
+        Err(_) => return data,
+    };
+
+    let optimized = match ext.as_str() {
+        "png" => encode_with(OxiPngEncoder::new(), &image),
+        "jpg" | "jpeg" => encode_with(MozJpegEncoder::new(), &image),
+        "webp" => encode_with(WebPEncoder::new(), &image),
+        "avif" => encode_with(AvifEncoder::new(), &image),
+        _ => None,
+    };
+
+    if let Some(bytes) = optimized {
+        if bytes.len() < data.len() {
+            bytes
+        } else {
+            data
+        }
+    } else {
+        data
+    }
+}
+
+fn encode_with<E: EncoderTrait>(mut encoder: E, image: &Image) -> Option<Vec<u8>> {
+    let mut out = Vec::new();
+    encoder.encode(image, &mut out).ok()?;
+    Some(out)
 }
 
 fn leaf_name(path: &str) -> String {
@@ -613,6 +752,16 @@ mod tests {
     use std::time::Duration;
     use surrealdb::engine::local::{Db, Mem};
     use tokio::time::sleep;
+    use zune_core::{bytestream::ZCursor, options::DecoderOptions};
+    use zune_image::image::Image;
+
+    const ONE_BY_ONE_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
 
     async fn setup_fs() -> Result<SurrealFs<Db>> {
         let db = Surreal::new::<Mem>(()).await?;
@@ -736,6 +885,91 @@ mod tests {
 
         let content = fs.cat("/docs/copies/dest.txt").await.unwrap();
         assert_eq!(content, "copy me");
+    }
+
+    #[tokio::test]
+    async fn write_and_cat_bytes() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/bin", true).await.unwrap();
+        let data = vec![0u8, 159, 255];
+        fs.write_bytes("/bin/blob", data.clone()).await.unwrap();
+
+        let raw = fs.cat_bytes("/bin/blob").await.unwrap();
+        assert_eq!(raw, data);
+
+        let err = fs.cat("/bin/blob").await.unwrap_err();
+        matches!(err, FsError::InvalidUtf8(_));
+    }
+
+    #[tokio::test]
+    async fn write_bytes_utf8_reads_as_text() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/notes", true).await.unwrap();
+        fs.write_bytes("/notes/msg", b"hello".to_vec())
+            .await
+            .unwrap();
+
+        let text = fs.cat("/notes/msg").await.unwrap();
+        assert_eq!(text, "hello");
+    }
+
+    #[tokio::test]
+    async fn cp_preserves_binary() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/bin", true).await.unwrap();
+        fs.mkdir("/copy", true).await.unwrap();
+        let data = vec![1u8, 2, 3, 4];
+        fs.write_bytes("/bin/src.bin", data.clone()).await.unwrap();
+
+        fs.cp("/bin/src.bin", "/copy/dest.bin").await.unwrap();
+
+        let copied = fs.cat_bytes("/copy/dest.bin").await.unwrap();
+        assert_eq!(copied, data);
+
+        let entries = fs.ls("/copy").await.unwrap();
+        let dest = entries.iter().find(|e| e.name == "dest.bin").unwrap();
+        assert_eq!(dest.size(), data.len());
+    }
+
+    #[tokio::test]
+    async fn write_bytes_leaves_non_images_untouched() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/bin", true).await.unwrap();
+        let payload = vec![7u8, 8, 9];
+        fs.write_bytes("/bin/raw", payload.clone()).await.unwrap();
+
+        let stored = fs.cat_bytes("/bin/raw").await.unwrap();
+        assert_eq!(stored, payload);
+    }
+
+    #[tokio::test]
+    async fn write_bytes_optimizes_png() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/img", true).await.unwrap();
+
+        fs.write_bytes("/img/pixel.png", ONE_BY_ONE_PNG.to_vec())
+            .await
+            .unwrap();
+
+        let stored = fs.cat_bytes("/img/pixel.png").await.unwrap();
+        let image = Image::read(ZCursor::new(&stored), DecoderOptions::default()).unwrap();
+        assert_eq!(image.dimensions(), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn cp_does_not_recompress_virtual_files() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/data", true).await.unwrap();
+        let data = vec![5u8, 4, 3, 2, 1];
+        fs.write_bytes("/data/src.bin", data.clone()).await.unwrap();
+
+        fs.mkdir("/data/copies", true).await.unwrap();
+        fs.cp("/data/src.bin", "/data/copies/dst.bin")
+            .await
+            .unwrap();
+
+        let copied = fs.cat_bytes("/data/copies/dst.bin").await.unwrap();
+        assert_eq!(copied, data);
     }
 
     #[tokio::test]

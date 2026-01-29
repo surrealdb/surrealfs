@@ -113,11 +113,7 @@ where
 fn print_entry(entry: &Entry, opts: LsOptions) {
     if opts.long {
         let kind = if entry.is_dir { 'd' } else { '-' };
-        let size = if entry.is_dir {
-            0
-        } else {
-            entry.content.as_ref().map(|c| c.len()).unwrap_or(0)
-        };
+        let size = entry.size();
         if opts.human {
             let (val, unit) = human_size(size as f64);
             println!("{} {:>6.1}{} {}", kind, val, unit, entry.path);

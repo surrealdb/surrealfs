@@ -74,7 +74,7 @@ where
             CurlOutput::Path(path) => path,
             CurlOutput::AutoName => derive_out_name(&request.url),
         };
-        fs.write_file(&target, body.clone()).await?;
+        fs.write_bytes(&target, bytes.to_vec()).await?;
         Some(target)
     } else {
         None

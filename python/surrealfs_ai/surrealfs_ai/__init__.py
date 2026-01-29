@@ -1,6 +1,7 @@
 import uvicorn
 from pydantic_ai import Agent, ModelSettings, WebFetchTool, WebSearchTool
-from tools import build_toolset, instructions
+
+from surrealfs_ai.tools import build_toolset, instructions
 
 
 def build_chat_agent(
@@ -20,14 +21,6 @@ def build_chat_agent(
     return agent
 
 
-async def demo() -> None:
-    agent = build_chat_agent()
-    result = await agent.run(
-        "Create /demo/hello.txt containing 'hello world', then show its content"
-    )
-    print(result.output)
-
-
 if __name__ == "__main__":
     try:
         import logfire
@@ -38,10 +31,6 @@ if __name__ == "__main__":
     _ = logfire.configure(send_to_logfire="if-token-present")
     logfire.instrument_pydantic_ai()
     logfire.instrument_anthropic()
-
-    # Simple demo:
-    # import asyncio
-    # asyncio.run(demo())
 
     # Chat UI demo:
     agent = build_chat_agent()

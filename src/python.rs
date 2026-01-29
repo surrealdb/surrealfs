@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyBytes, PyType};
 use regex::Regex;
 use surrealdb::Surreal;
 use surrealdb::engine::any::connect;
@@ -95,6 +95,13 @@ impl FsInner {
         }
     }
 
+    async fn write_bytes(&self, path: &str, data: Vec<u8>) -> crate::Result<()> {
+        match self {
+            FsInner::Remote(fs) => fs.write_bytes(path, data).await,
+            FsInner::Local(fs) => fs.write_bytes(path, data).await,
+        }
+    }
+
     async fn edit(
         &self,
         path: &str,
@@ -147,6 +154,13 @@ impl FsInner {
         match self {
             FsInner::Remote(fs) => curl::curl(fs, request.clone()).await,
             FsInner::Local(fs) => curl::curl(fs, request).await,
+        }
+    }
+
+    async fn cat_bytes(&self, path: &str) -> crate::Result<Vec<u8>> {
+        match self {
+            FsInner::Remote(fs) => fs.cat_bytes(path).await,
+            FsInner::Local(fs) => fs.cat_bytes(path).await,
         }
     }
 }
@@ -240,6 +254,15 @@ impl PySurrealFs {
         self.rt.block_on(self.fs.cat(&resolved)).map_err(to_py_err)
     }
 
+    pub fn cat_bytes<'py>(&self, py: Python<'py>, path: &str) -> PyResult<&'py PyBytes> {
+        let resolved = self.resolve_path(path)?;
+        let data = self
+            .rt
+            .block_on(self.fs.cat_bytes(&resolved))
+            .map_err(to_py_err)?;
+        Ok(PyBytes::new(py, &data))
+    }
+
     pub fn tail(&self, path: &str, n: Option<usize>) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         let count = n.unwrap_or(10);
@@ -300,6 +323,14 @@ impl PySurrealFs {
         let resolved = self.resolve_path(path)?;
         self.rt
             .block_on(self.fs.write_file(&resolved, content.to_string()))
+            .map_err(to_py_err)?;
+        Ok(String::new())
+    }
+
+    pub fn write_bytes(&self, path: &str, data: &[u8]) -> PyResult<String> {
+        let resolved = self.resolve_path(path)?;
+        self.rt
+            .block_on(self.fs.write_bytes(&resolved, data.to_vec()))
             .map_err(to_py_err)?;
         Ok(String::new())
     }
@@ -434,11 +465,7 @@ fn join_lines(lines: Vec<String>) -> String {
 fn format_entry(entry: &Entry, opts: LsOptions) -> String {
     if opts.long {
         let kind = if entry.is_dir { 'd' } else { '-' };
-        let size = if entry.is_dir {
-            0
-        } else {
-            entry.content.as_ref().map(|c| c.len()).unwrap_or(0)
-        };
+        let size = entry.size();
         if opts.human {
             let (val, unit) = human_size(size as f64);
             format!("{} {:>6.1}{} {}", kind, val, unit, entry.name)

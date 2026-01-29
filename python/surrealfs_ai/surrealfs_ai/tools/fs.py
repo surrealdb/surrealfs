@@ -1,10 +1,11 @@
 """pydantic-ai tool definitions backed by PySurrealFs.
 
-This example shows how to expose SurrealFs operations to an agent using a
-`FunctionToolset`. The functions stay thin so you can swap the client setup
-(mem vs ws) without touching the tool definitions.
+This module exposes SurrealFs operations to an agent using a FunctionToolset.
+It keeps the client setup thin so you can swap the backend without touching
+the tool definitions.
 """
 
+import base64
 from pathlib import Path
 from typing import Any, Callable
 
@@ -14,7 +15,9 @@ from pydantic_ai import FunctionToolset
 # TODO: generate types
 from surrealfs_py import PySurrealFs  # type: ignore
 
-DOCS_DIR = Path(__file__).with_name("tool_docs")
+from .images import add_image_tools
+
+DOCS_DIR = Path(__file__).resolve().parent.parent / "tool_docs"
 
 
 def run_tool(call: Callable[[], str]) -> str:
@@ -72,6 +75,21 @@ def build_toolset(ns: str, db: str) -> FunctionToolset[Any]:
     async def cat(args: CatArgs) -> str:
         return run_tool(lambda: fs.cat(args.path))
 
+    class CatBytesArgs(BaseModel):
+        path: str = Field(
+            ..., description="File to read as raw bytes; returns base64 string"
+        )
+
+    async def cat_bytes(args: CatBytesArgs) -> str:
+        def call() -> str:
+            data = fs.cat_bytes(args.path)
+            if isinstance(data, str):
+                # PySurrealFs should return bytes, but guard to avoid crashes.
+                raise ValueError("cat_bytes returned text; expected bytes")
+            return base64.b64encode(data).decode("ascii")
+
+        return run_tool(call)
+
     class TailArgs(BaseModel):
         path: str = Field(..., description="File to read")
         n: int = Field(10, description="Number of lines from the end")
@@ -85,6 +103,20 @@ def build_toolset(ns: str, db: str) -> FunctionToolset[Any]:
 
     async def write_file(args: WriteFileArgs) -> str:
         return run_tool(lambda: fs.write_file(args.path, args.content))
+
+    class WriteBytesArgs(BaseModel):
+        path: str = Field(..., description="Destination path")
+        data: str = Field(..., description="Base64-encoded data to write as raw bytes")
+
+    async def write_bytes(args: WriteBytesArgs) -> str:
+        def call() -> str:
+            try:
+                decoded = base64.b64decode(args.data)
+            except Exception:
+                raise ValueError("invalid base64 data")
+            return fs.write_bytes(args.path, decoded)
+
+        return run_tool(call)
 
     class EditArgs(BaseModel):
         path: str = Field(..., description="File to edit")
@@ -146,6 +178,14 @@ def build_toolset(ns: str, db: str) -> FunctionToolset[Any]:
         cat, description=load_description("cat", "Read a file"), takes_ctx=False
     )
     TOOLSET.add_function(
+        cat_bytes,
+        description=load_description(
+            "cat-bytes",
+            "Read a file as base64-encoded bytes (useful for images/binaries)",
+        ),
+        takes_ctx=False,
+    )
+    TOOLSET.add_function(
         tail,
         description=load_description("tail", "Read the last N lines of a file"),
         takes_ctx=False,
@@ -153,6 +193,14 @@ def build_toolset(ns: str, db: str) -> FunctionToolset[Any]:
     TOOLSET.add_function(
         write_file,
         description=load_description("write-file", "Write file contents"),
+        takes_ctx=False,
+    )
+    TOOLSET.add_function(
+        write_bytes,
+        description=load_description(
+            "write-bytes",
+            "Write base64-encoded data to a file (images/binaries)",
+        ),
         takes_ctx=False,
     )
     TOOLSET.add_function(
@@ -185,6 +233,8 @@ def build_toolset(ns: str, db: str) -> FunctionToolset[Any]:
         description=load_description("pwd", "Print working directory"),
         takes_ctx=False,
     )
+
+    add_image_tools(TOOLSET, fs)
 
     return TOOLSET
 
