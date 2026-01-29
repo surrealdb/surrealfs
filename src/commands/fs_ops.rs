@@ -1,5 +1,8 @@
+use std::path::PathBuf;
+
 use regex::Regex;
 use surrealdb::Connection;
+use tokio::{fs, fs::OpenOptions, io::AsyncWriteExt};
 
 use surrealfs::FsError;
 
@@ -230,10 +233,132 @@ where
 {
     match args {
         [src, dest] => {
-            let src = resolve_cli_path(&state.cwd, src);
-            let dest = resolve_cli_path(&state.cwd, dest);
-            state.fs.cp(&src, &dest).await
+            let src_is_host = src.starts_with("host:");
+            let dest_is_host = dest.starts_with("host:");
+
+            if src_is_host && dest_is_host {
+                return Err(FsError::InvalidPath);
+            }
+
+            if src_is_host {
+                let host_path = &src[5..];
+                let data = fs::read(host_path)
+                    .await
+                    .map_err(|e| FsError::Http(format!("read host {}: {}", host_path, e)))?;
+                let dest = resolve_cli_path(&state.cwd, dest);
+                state.fs.write_bytes(&dest, data).await
+            } else if dest_is_host {
+                let src = resolve_cli_path(&state.cwd, src);
+                let bytes = state.fs.cat_bytes(&src).await?;
+                let host_path = &dest[5..];
+                let host_pathbuf = PathBuf::from(host_path);
+
+                if let Some(parent) = host_pathbuf.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent).await.map_err(|e| {
+                            FsError::Http(format!("create host dir {}: {}", parent.display(), e))
+                        })?;
+                    }
+                }
+
+                if fs::metadata(&host_pathbuf).await.is_ok() {
+                    return Err(FsError::AlreadyExists(host_path.to_string()));
+                }
+
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&host_pathbuf)
+                    .await
+                    .map_err(|e| {
+                        FsError::Http(format!("open host {}: {}", host_pathbuf.display(), e))
+                    })?;
+                file.write_all(&bytes).await.map_err(|e| {
+                    FsError::Http(format!("write host {}: {}", host_pathbuf.display(), e))
+                })?;
+                Ok(())
+            } else {
+                let src = resolve_cli_path(&state.cwd, src);
+                let dest = resolve_cli_path(&state.cwd, dest);
+                state.fs.cp(&src, &dest).await
+            }
         }
         _ => Err(help_error()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use surrealdb::Surreal;
+    use surrealdb::engine::local::{Db, Mem};
+
+    async fn setup_state() -> ReplState<Db> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        ReplState {
+            fs: surrealfs::SurrealFs::new(db),
+            cwd: "/".to_string(),
+        }
+    }
+
+    fn unique_path(name: &str) -> PathBuf {
+        let mut p = std::env::temp_dir();
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_micros();
+        p.push(format!("surrealfs-{}-{}", name, ts));
+        p
+    }
+
+    #[tokio::test]
+    async fn cp_host_to_virtual() {
+        let host_dir = unique_path("host-src");
+        fs::create_dir_all(&host_dir).await.unwrap();
+        let host_file = host_dir.join("file.bin");
+        let data = vec![1u8, 2, 3, 4];
+        fs::write(&host_file, &data).await.unwrap();
+
+        let mut state = setup_state().await;
+        let host_arg = format!("host:{}", host_file.display());
+        cp(&[host_arg.as_str(), "/virtual.bin"], &mut state)
+            .await
+            .unwrap();
+
+        let stored = state.fs.cat_bytes("/virtual.bin").await.unwrap();
+        assert_eq!(stored, data);
+
+        fs::remove_dir_all(&host_dir).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cp_virtual_to_host_respects_existing_and_creates_parent() {
+        let mut state = setup_state().await;
+        state
+            .fs
+            .write_bytes("/data.bin", vec![9u8, 8, 7])
+            .await
+            .unwrap();
+
+        let host_dir = unique_path("host-dest");
+        let host_file = host_dir.join("out.bin");
+        let host_arg = format!("host:{}", host_file.display());
+
+        // creates parent automatically
+        cp(&["/data.bin", host_arg.as_str()], &mut state)
+            .await
+            .unwrap();
+        let read_back = fs::read(&host_file).await.unwrap();
+        assert_eq!(read_back, vec![9u8, 8, 7]);
+
+        // second copy should fail due to existing target
+        let err = cp(&["/data.bin", host_arg.as_str()], &mut state)
+            .await
+            .unwrap_err();
+        matches!(err, FsError::AlreadyExists(_));
+
+        fs::remove_dir_all(&host_dir).await.unwrap();
     }
 }

@@ -1,8 +1,8 @@
 """pydantic-ai tool definitions backed by PySurrealFs.
 
-This example shows how to expose SurrealFs operations to an agent using a
-`FunctionToolset`. The functions stay thin so you can swap the client setup
-(mem vs ws) without touching the tool definitions.
+This module exposes SurrealFs operations to an agent using a FunctionToolset.
+It keeps the client setup thin so you can swap the backend without touching
+the tool definitions.
 """
 
 from pathlib import Path
@@ -14,7 +14,9 @@ from pydantic_ai import FunctionToolset
 # TODO: generate types
 from surrealfs_py import PySurrealFs  # type: ignore
 
-DOCS_DIR = Path(__file__).with_name("tool_docs")
+from .images import add_image_tools
+
+DOCS_DIR = Path(__file__).resolve().parent.parent / "tool_docs"
 
 
 def run_tool(call: Callable[[], str]) -> str:
@@ -185,6 +187,8 @@ def build_toolset(ns: str, db: str) -> FunctionToolset[Any]:
         description=load_description("pwd", "Print working directory"),
         takes_ctx=False,
     )
+
+    add_image_tools(TOOLSET, fs)
 
     return TOOLSET
 

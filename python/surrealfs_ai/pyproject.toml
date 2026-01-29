@@ -5,6 +5,7 @@ dependencies = [
     "surrealfs-py",
     "pydantic>=2.12.5",
     "pydantic-ai-slim[web]>=1.47.0",
+    "openai==2.16.0",
 ]
 
 [project.optional-dependencies]

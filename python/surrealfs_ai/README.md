@@ -4,8 +4,9 @@ Pydantic AI toolset that exposes SurrealFs to an agent so it can read, write, an
 
 ## Requirements
 - Python 3.11+
-- SurrealDB reachable at `ws://localhost:8000` (default Root signin); adjust `src/tools.py` if you use a different endpoint or auth.
+- SurrealDB reachable at `ws://localhost:8000` (default Root signin); adjust `surrealfs_ai/tools/fs.py` if you use a different endpoint or auth.
 - Local build of the `surrealfs_py` Python extension from this repo (Rust bindings via maturin).
+-- OpenAI API key via `OPENAI_API_KEY` (needed for the image generation tool).
 
 ## Install (from repo root)
 
@@ -38,14 +39,15 @@ uvicorn.run(app, host="127.0.0.1", port=7932)
 ```
 
 ## Available tools
-The toolset mirrors SurrealFs operations:
+ The toolset mirrors SurrealFs operations and adds image generation:
 - `ls` (all/long/recursive/dir_only/human flags)
 - `cat`, `tail` (n)
 - `write_file`, `edit` (replace_all), `touch`
 - `mkdir` (parents), `cp`
 - `cd`, `pwd`
+- `generate_image` (OpenAI image generation; saves bytes into SurrealFs)
 
-Each tool description lives in `src/tool_docs/`; the agent uses them to build richer, self-describing prompts.
+Each tool description lives in `surrealfs_ai/tool_docs/`; the agent uses them to build richer, self-describing prompts.
 
 ## Notes
 - Telemetry is handled via `logfire` and auto-instrumented when a token is present; otherwise it stays local.

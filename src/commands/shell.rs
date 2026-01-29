@@ -47,6 +47,7 @@ pub fn print_help() {
     println!("  mkdir [-p] <path>");
     println!("  write_file <path> <content>");
     println!("  cp <src> <dest>");
+    println!("     use host:<path> to copy to/from host (no host overwrite)");
     println!("  curl [options] <url>");
     println!("     options: -o <file>, -O, -L, -H <h:v>, -d <data>, -X <method>, > <file>");
     println!("     pipeline: curl <url> | write_file <path>");

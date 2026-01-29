@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use globset::{GlobBuilder, GlobSetBuilder};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use serde_bytes::ByteBuf;
 use similar::{ChangeTag, TextDiff};
 use surrealdb::{Surreal, engine::remote::ws::Client};
 use thiserror::Error;
@@ -26,6 +27,8 @@ pub enum FsError {
     NotADirectory(String),
     #[error("invalid path")]
     InvalidPath,
+    #[error("invalid utf-8 for: {0}")]
+    InvalidUtf8(String),
     #[error("http error: {0}")]
     Http(String),
     #[error("database error: {0}")]
@@ -40,7 +43,44 @@ pub struct Entry {
     pub is_dir: bool,
     pub content: Option<String>,
     #[serde(default)]
+    pub content_bytes: Option<ByteBuf>,
+    #[serde(default)]
     pub updated_at: Option<i64>,
+}
+
+impl Entry {
+    pub fn size(&self) -> usize {
+        if self.is_dir {
+            return 0;
+        }
+        if let Some(bytes) = &self.content_bytes {
+            return bytes.len();
+        }
+        self.content.as_ref().map(|c| c.len()).unwrap_or(0)
+    }
+
+    pub fn is_binary(&self) -> bool {
+        self.content_bytes.is_some() && self.content.is_none()
+    }
+
+    pub fn text(&self) -> Result<Option<String>> {
+        if let Some(content) = &self.content {
+            return Ok(Some(content.clone()));
+        }
+        if let Some(bytes) = &self.content_bytes {
+            let text = String::from_utf8(bytes.clone().into_vec())
+                .map_err(|_| FsError::InvalidUtf8(self.path.clone()))?;
+            return Ok(Some(text));
+        }
+        Ok(None)
+    }
+
+    pub fn bytes(&self) -> Option<Vec<u8>> {
+        if let Some(bytes) = &self.content_bytes {
+            return Some(bytes.clone().into_vec());
+        }
+        self.content.as_ref().map(|c| c.as_bytes().to_vec())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,7 +142,12 @@ where
 
     pub async fn cat(&self, path: impl AsRef<str>) -> Result<String> {
         let entry = self.require_file(path.as_ref()).await?;
-        Ok(entry.content.unwrap_or_default())
+        Ok(entry.text()?.unwrap_or_default())
+    }
+
+    pub async fn cat_bytes(&self, path: impl AsRef<str>) -> Result<Vec<u8>> {
+        let entry = self.require_file(path.as_ref()).await?;
+        Ok(entry.bytes().unwrap_or_default())
     }
 
     pub async fn tail(&self, path: impl AsRef<str>, n: usize) -> Result<Vec<String>> {
@@ -161,7 +206,7 @@ where
                         stack.push(child.path);
                     }
                 }
-            } else if let Some(content) = &entry.content {
+            } else if let Some(content) = entry.text()? {
                 for (idx, line) in content.lines().enumerate() {
                     if pattern.is_match(line) {
                         matches.push(GrepMatch {
@@ -244,7 +289,8 @@ where
                 Ok(())
             }
             None => {
-                self.create_file(&path, &parent, "").await?;
+                self.create_file(&path, &parent, Some(String::new()), None)
+                    .await?;
                 Ok(())
             }
         }
@@ -262,14 +308,41 @@ where
         let parent = parent_path(&path).ok_or(FsError::InvalidPath)?;
         self.ensure_dir(&parent).await?;
 
+        let content = content.into();
+
         if let Some(mut entry) = self.get_entry(&path).await? {
             if entry.is_dir {
                 return Err(FsError::NotAFile(path));
             }
-            entry.content = Some(content.into());
+            entry.content = Some(content.clone());
+            entry.content_bytes = None;
             self.persist_entry(&entry).await?;
         } else {
-            self.create_file(&path, &parent, content.into()).await?;
+            self.create_file(&path, &parent, Some(content), None)
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn write_bytes(&self, path: impl AsRef<str>, data: impl Into<Vec<u8>>) -> Result<()> {
+        let path = normalize_path(path.as_ref())?;
+        if path == "/" {
+            return Err(FsError::NotAFile(path));
+        }
+        let parent = parent_path(&path).ok_or(FsError::InvalidPath)?;
+        self.ensure_dir(&parent).await?;
+
+        let bytes = data.into();
+        if let Some(mut entry) = self.get_entry(&path).await? {
+            if entry.is_dir {
+                return Err(FsError::NotAFile(path));
+            }
+            entry.content = None;
+            entry.content_bytes = Some(ByteBuf::from(bytes));
+            self.persist_entry(&entry).await?;
+        } else {
+            self.create_file(&path, &parent, None, Some(ByteBuf::from(bytes)))
+                .await?;
         }
         Ok(())
     }
@@ -367,8 +440,7 @@ where
     pub async fn cp(&self, src: impl AsRef<str>, dest: impl AsRef<str>) -> Result<()> {
         let src = normalize_path(src.as_ref())?;
         let dest = normalize_path(dest.as_ref())?;
-
-        let content = self.cat(&src).await?;
+        let entry = self.require_file(&src).await?;
 
         if dest == "/" {
             return Err(FsError::NotAFile(dest));
@@ -376,7 +448,12 @@ where
         let parent = parent_path(&dest).ok_or(FsError::InvalidPath)?;
         self.ensure_dir(&parent).await?;
 
-        self.write_file(&dest, content).await
+        if let Some(bytes) = entry.content_bytes {
+            self.write_bytes(&dest, bytes.into_vec()).await
+        } else {
+            self.write_file(&dest, entry.content.unwrap_or_default())
+                .await
+        }
     }
 
     /// Change directory: resolve `target` relative to `current`, ensure it exists and is a directory.
@@ -420,7 +497,7 @@ where
         let mut res = self
             .db
             .query(format!(
-                "SELECT path, name, parent, is_dir, content, updated_at FROM {} WHERE parent = $parent ORDER BY name",
+                "SELECT path, name, parent, is_dir, content, content_bytes, updated_at FROM {} WHERE parent = $parent ORDER BY name",
                 self.table
             ))
             .bind(("parent", parent))
@@ -435,7 +512,7 @@ where
         let mut res = self
             .db
             .query(format!(
-                "SELECT path, name, parent, is_dir, content, updated_at FROM {} WHERE path = $path LIMIT 1",
+                "SELECT path, name, parent, is_dir, content, content_bytes, updated_at FROM {} WHERE path = $path LIMIT 1",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -449,7 +526,7 @@ where
         let parent_owned = parent.to_string();
         self.db
             .query(format!(
-                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = true, content = NONE, updated_at = $updated_at",
+                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = true, content = NONE, content_bytes = NONE, updated_at = $updated_at",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -464,20 +541,21 @@ where
         &self,
         path: &str,
         parent: &str,
-        content: impl Into<String>,
+        content: Option<String>,
+        content_bytes: Option<ByteBuf>,
     ) -> Result<()> {
-        let content = content.into();
         let path_owned = path.to_string();
         let parent_owned = parent.to_string();
         self.db
             .query(format!(
-                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = false, content = $content, updated_at = $updated_at",
+                "CREATE {} SET path = $path, name = $name, parent = $parent, is_dir = false, content = $content, content_bytes = $content_bytes, updated_at = $updated_at",
                 self.table
             ))
             .bind(("path", path_owned))
             .bind(("name", leaf_name(path)))
             .bind(("parent", parent_owned))
             .bind(("content", content))
+            .bind(("content_bytes", content_bytes))
             .bind(("updated_at", now_millis()))
             .await?;
         Ok(())
@@ -489,7 +567,7 @@ where
         let parent_owned = entry.parent.clone();
         self.db
             .query(format!(
-                "UPDATE {} SET content = $content, name = $name, parent = $parent, is_dir = $is_dir, updated_at = $updated_at WHERE path = $path",
+                "UPDATE {} SET content = $content, content_bytes = $content_bytes, name = $name, parent = $parent, is_dir = $is_dir, updated_at = $updated_at WHERE path = $path",
                 self.table
             ))
             .bind(("path", path_owned))
@@ -497,6 +575,7 @@ where
             .bind(("parent", parent_owned))
             .bind(("is_dir", entry.is_dir))
             .bind(("content", entry.content.clone()))
+            .bind(("content_bytes", entry.content_bytes.clone()))
             .bind(("updated_at", now_millis()))
             .await?;
         Ok(())
@@ -736,6 +815,50 @@ mod tests {
 
         let content = fs.cat("/docs/copies/dest.txt").await.unwrap();
         assert_eq!(content, "copy me");
+    }
+
+    #[tokio::test]
+    async fn write_and_cat_bytes() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/bin", true).await.unwrap();
+        let data = vec![0u8, 159, 255];
+        fs.write_bytes("/bin/blob", data.clone()).await.unwrap();
+
+        let raw = fs.cat_bytes("/bin/blob").await.unwrap();
+        assert_eq!(raw, data);
+
+        let err = fs.cat("/bin/blob").await.unwrap_err();
+        matches!(err, FsError::InvalidUtf8(_));
+    }
+
+    #[tokio::test]
+    async fn write_bytes_utf8_reads_as_text() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/notes", true).await.unwrap();
+        fs.write_bytes("/notes/msg", b"hello".to_vec())
+            .await
+            .unwrap();
+
+        let text = fs.cat("/notes/msg").await.unwrap();
+        assert_eq!(text, "hello");
+    }
+
+    #[tokio::test]
+    async fn cp_preserves_binary() {
+        let fs = setup_fs().await.unwrap();
+        fs.mkdir("/bin", true).await.unwrap();
+        fs.mkdir("/copy", true).await.unwrap();
+        let data = vec![1u8, 2, 3, 4];
+        fs.write_bytes("/bin/src.bin", data.clone()).await.unwrap();
+
+        fs.cp("/bin/src.bin", "/copy/dest.bin").await.unwrap();
+
+        let copied = fs.cat_bytes("/copy/dest.bin").await.unwrap();
+        assert_eq!(copied, data);
+
+        let entries = fs.ls("/copy").await.unwrap();
+        let dest = entries.iter().find(|e| e.name == "dest.bin").unwrap();
+        assert_eq!(dest.size(), data.len());
     }
 
     #[tokio::test]

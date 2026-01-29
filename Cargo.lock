@@ -1508,6 +1508,10 @@ name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+dependencies = [
+ "ahash 0.8.12",
+ "allocator-api2",
+]
 
 [[package]]
 name = "hashbrown"
@@ -3666,6 +3670,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3955,9 +3969,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "surrealdb"
-version = "2.5.0"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2679904b834ec4481a5305c5ac5ab68c0b6c8e3538e744c40b5a9b9867d3f5fa"
+checksum = "62b7720b39ce2985efbfa10858b7397ffd95655a9bab6d9dfaa03622bbdc3bc2"
 dependencies = [
  "arrayvec",
  "async-channel",
@@ -3997,9 +4011,9 @@ dependencies = [
 
 [[package]]
 name = "surrealdb-core"
-version = "2.5.0"
+version = "2.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3e764f99f016ddfaedafc9c777a830b371a1b2e536b5d146a1ef69674e041ed6"
+checksum = "c48e42c81713be2f9b3dae64328999eafe8b8060dd584059445a908748b39787"
 dependencies = [
  "addr",
  "affinitypool",
@@ -4029,6 +4043,7 @@ dependencies = [
  "geo",
  "geo-types",
  "getrandom 0.3.4",
+ "hashbrown 0.14.5",
  "hex",
  "http",
  "ipnet",
@@ -4123,6 +4138,7 @@ dependencies = [
  "regex",
  "reqwest",
  "serde",
+ "serde_bytes",
  "serde_json",
  "similar",
  "surrealdb",
