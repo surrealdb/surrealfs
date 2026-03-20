@@ -5,10 +5,9 @@ from typing import List, Literal
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, Field, field_validator
-from pydantic_ai import FunctionToolset
+from pydantic_ai import FunctionToolset, RunContext
 
-# TODO: generate types
-from surrealfs_py import PySurrealFs  # type: ignore
+from surrealfs_ai.definitions import AgentDeps  # type: ignore
 
 
 @dataclass
@@ -33,10 +32,11 @@ class GenerateImageArgs(BaseModel):
 
 def add_image_tools(
     toolset: FunctionToolset,
-    fs: PySurrealFs,
     global_args: GenerateImageGlobalArgs = GenerateImageGlobalArgs(),
 ) -> None:
-    async def generate_image(args: GenerateImageArgs) -> str:
+    async def generate_image(
+        ctx: RunContext[AgentDeps], *, args: GenerateImageArgs
+    ) -> str:
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             return "error: OPENAI_API_KEY is not set"
@@ -65,7 +65,7 @@ def add_image_tools(
             data = base64.b64decode(b64)
             dest = base_path if global_args.n == 1 else f"{base_path}.{idx}"
             try:
-                fs.write_bytes(dest, data)
+                ctx.fs.write_bytes(dest, data)
             except Exception as e:  # noqa: E722
                 return f"error: failed to write image to {dest}: {e}"
             paths.append(dest)
@@ -81,5 +81,5 @@ def add_image_tools(
             "Requires OPENAI_API_KEY. Args: prompt, path, optional model/size/n. "
             "Returns the virtual file path(s) where images were saved."
         ),
-        takes_ctx=False,
+        takes_ctx=True,
     )
