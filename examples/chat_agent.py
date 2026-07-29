@@ -15,7 +15,8 @@ import asyncio
 import os
 
 import uvicorn
-from pydantic_ai import Agent, WebFetchTool, WebSearchTool
+from pydantic_ai import Agent
+from pydantic_ai.capabilities import WebFetch, WebSearch
 from surrealdb import AsyncSurreal
 
 from surrealfs import SurrealFs, apply_schema
@@ -27,8 +28,9 @@ You organise the user's thoughts, conversations, and notes into a well-structure
 file system. You have a persistent filesystem; treat it as your memory.
 
 Conventions to follow:
-- Keep your working notes in /notes.md. Read it at the start of every
-  conversation, and update it when you learn something worth keeping.
+- Your working notes live in /notes.md. It may not exist yet, so start by
+  listing / to see what is there rather than reading it blind, and create it
+  once you have something worth keeping.
 - Record anything you learn about the user's preferences under /preferences/.
 - Give each project or task a folder under /projects/<project_name>/, with the
   notes and the current to-do list inside it.
@@ -54,9 +56,13 @@ def build_chat_agent(
         toolsets=[build_fs_toolset()],
         instructions=INSTRUCTIONS,
         deps_type=ToolContext,
-        # Server-side tools are `capabilities` in pydantic-ai 2.x; the
-        # `builtin_tools` argument they used in 1.x no longer exists.
-        capabilities=[WebSearchTool(), WebFetchTool()] if enable_web_tools else [],
+        # Server-side tools are `capabilities` in pydantic-ai 2.x (`builtin_tools`
+        # from 1.x is gone). Pass the *capability* wrappers from
+        # pydantic_ai.capabilities, not the WebSearchTool/WebFetchTool objects:
+        # `capabilities` also accepts plain callables, so a raw tool object is
+        # taken for one and invoked, failing at request time with
+        # "'WebSearchTool' object is not callable".
+        capabilities=[WebSearch(), WebFetch()] if enable_web_tools else [],
     )
 
 
@@ -77,6 +83,25 @@ async def connect() -> AsyncSurreal:
     return db
 
 
+async def serve(host: str = "127.0.0.1", port: int = 7932) -> None:
+    """Connect and serve the chat UI on a single event loop.
+
+    The connection has to be opened on the same loop that will serve requests.
+    `uvicorn.run()` creates its own loop, so connecting via a separate
+    `asyncio.run(connect())` first leaves the WebSocket bound to a loop that is
+    already closed, and the first message fails with "Future attached to a
+    different loop" — surfaced in the UI only as an opaque TaskGroup error.
+    Driving `uvicorn.Server` ourselves keeps everything on one loop.
+    """
+    db = await connect()
+    agent = build_chat_agent()
+    app = agent.to_web(deps=ToolContext(fs=SurrealFs(db)))
+    try:
+        await uvicorn.Server(uvicorn.Config(app, host=host, port=port)).serve()
+    finally:
+        await db.close()
+
+
 def main() -> None:
     try:
         import logfire
@@ -88,10 +113,7 @@ def main() -> None:
     logfire.instrument_pydantic_ai()
     logfire.instrument_anthropic()
 
-    db = asyncio.run(connect())
-    agent = build_chat_agent()
-    app = agent.to_web(deps=ToolContext(fs=SurrealFs(db)))
-    uvicorn.run(app, host="127.0.0.1", port=7932)
+    asyncio.run(serve())
 
 
 if __name__ == "__main__":
