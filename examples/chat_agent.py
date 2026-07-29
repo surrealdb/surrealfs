@@ -15,7 +15,7 @@ import asyncio
 import os
 
 import uvicorn
-from pydantic_ai import Agent, ModelSettings, WebFetchTool, WebSearchTool
+from pydantic_ai import Agent, WebFetchTool, WebSearchTool
 from surrealdb import AsyncSurreal
 
 from surrealfs import SurrealFs, apply_schema
@@ -40,17 +40,23 @@ search before you create — the note you want may already exist.
 
 
 def build_chat_agent(
-    model: str = "claude-sonnet-5", enable_web_tools: bool = True
+    model: str = "anthropic:claude-opus-5", enable_web_tools: bool = True
 ) -> Agent[ToolContext, str]:
+    """Build the agent.
+
+    Note the ``anthropic:`` prefix on the model name: pydantic-ai validates bare
+    strings against its own list of known models, so a plain ``claude-opus-5``
+    raises ``UserError: Unknown model``. The prefix selects the provider
+    explicitly and passes the ID straight through.
+    """
     return Agent(
         model,
         toolsets=[build_fs_toolset()],
         instructions=INSTRUCTIONS,
         deps_type=ToolContext,
-        model_settings=ModelSettings(
-            extra_headers={"anthropic-beta": "context-management-2025-06-27"}
-        ),
-        builtin_tools=[WebFetchTool(), WebSearchTool()] if enable_web_tools else [],
+        # Server-side tools are `capabilities` in pydantic-ai 2.x; the
+        # `builtin_tools` argument they used in 1.x no longer exists.
+        capabilities=[WebSearchTool(), WebFetchTool()] if enable_web_tools else [],
     )
 
 

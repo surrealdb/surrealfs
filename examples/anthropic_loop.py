@@ -21,7 +21,10 @@ from surrealfs import SurrealFs, apply_schema
 from surrealfs.integrations.json_tools import call_tool, tool_definitions
 from surrealfs.tools import ToolContext
 
-MODEL = "claude-sonnet-5"
+# No provider prefix here: this talks to the Anthropic SDK directly, which takes
+# the bare model ID. (The pydantic-ai example needs an `anthropic:` prefix.)
+MODEL = "claude-opus-5"
+MAX_TOKENS = 16_000
 MAX_TURNS = 20
 
 
@@ -39,7 +42,7 @@ async def run(prompt: str) -> str:
     try:
         for _ in range(MAX_TURNS):
             response = await client.messages.create(
-                model=MODEL, max_tokens=4096, tools=tools, messages=messages
+                model=MODEL, max_tokens=MAX_TOKENS, tools=tools, messages=messages
             )
             messages.append({"role": "assistant", "content": response.content})
 

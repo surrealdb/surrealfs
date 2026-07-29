@@ -96,7 +96,11 @@ from pydantic_ai import Agent
 from surrealfs.integrations.pydantic_ai import build_fs_toolset
 from surrealfs.tools import ToolContext
 
-agent = Agent("claude-sonnet-5", deps_type=ToolContext, toolsets=[build_fs_toolset()])
+agent = Agent(
+    "anthropic:claude-opus-5",  # the provider prefix is required by pydantic-ai
+    deps_type=ToolContext,
+    toolsets=[build_fs_toolset()],
+)
 
 await agent.run("Tidy up my notes", deps=ToolContext(fs=SurrealFs(db)))
 ```
