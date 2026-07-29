@@ -32,6 +32,10 @@ fmt:
 agent:
     uv run --extra demo python examples/chat_agent.py
 
+# Browse the filesystem in a web UI on http://127.0.0.1:7933
+browser:
+    uv run --extra demo python examples/file_browser.py
+
 # Run the framework-free Anthropic tool-use loop.
 loop *ARGS:
     uv run --extra demo python examples/anthropic_loop.py {{ARGS}}

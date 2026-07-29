@@ -29,6 +29,8 @@ demo = [
     "openai>=2.0",
     "logfire>=4.20",
     "uvicorn>=0.30",
+    # Only a transitive dep of rich today; the file browser imports it directly.
+    "markdown-it-py>=3",
 ]
 
 [dependency-groups]

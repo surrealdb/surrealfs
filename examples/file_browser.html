@@ -1,0 +1,657 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SurrealFS</title>
+<style>
+:root {
+  /* ---- Surface (dark variant) ---- */
+  --bg:         #0E0C14; /* obsidian-9 */
+  --card:       #16141F; /* obsidian-8 */
+  --card-hover: #1A1824;
+  --card-elev:  #201D29; /* obsidian-7 */
+
+  /* ---- Borders ---- */
+  --border-subtle:  rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-strong:  rgba(255, 255, 255, 0.16);
+
+  /* ---- Text ---- */
+  --text:       #E8E4ED;
+  --text-dim:   #8A8494;
+  --text-muted: #7B7585;
+
+  /* ---- Brand (the only brand colours allowed) ---- */
+  --primary:           #D255FE; /* Surreal pink — actuals, primary action */
+  --secondary:         #651DDD; /* Surreal deep purple — forecast, links, eyebrow */
+  --secondary-strong:  #4A17A3;
+  --grad-bg:           linear-gradient(135deg, #D255FE 0%, #651DDD 100%);
+  --grad-bg-hover:     linear-gradient(135deg, #DA6FFF 0%, #7438E3 100%);
+  --grad-bg-active:    linear-gradient(135deg, #B536D8 0%, #4F1AB0 100%);
+  --section-active-bg: rgba(101, 29, 221, 0.06);
+
+  /* ---- Semantic — favourable is BRAND PINK, never green ---- */
+  --success: #D255FE; /* alias for --primary */
+  --danger:  #E5484D; /* brand-aligned coral red */
+  --warn:    #FFD000; /* watch-list amber (dark) */
+  --danger-soft: rgba(229, 72, 77, 0.45); /* danger border tint */
+  --danger-fill: rgba(229, 72, 77, 0.10); /* danger fill tint */
+
+  /* ---- SurrealQL syntax palette — reserved accents (no cyan/lime/green) ---- */
+  --syn-orange: #ff9b67;
+  --syn-yellow: #ffd000;
+  --syn-pink:   #ff009e;
+  --syn-violet: #7f73ff;
+  --syn-slate:  #737e98;
+
+  /* ---- Chart / ghost (dark) ---- */
+  --chart-ghost-fill:   rgba(101, 29, 221, 0.18);
+  --chart-ghost-border: rgba(210, 85, 254, 0.55);
+  --chart-loss-fill:    rgba(231, 76, 60, 0.10);
+  --connector:          rgba(255, 255, 255, 0.15);
+
+  /* ---- Radius — flat surfaces, slightly tactile controls ---- */
+  --radius-card:    0;
+  --radius-control: 2px;
+
+  /* ---- Fonts ---- */
+  --font-sans: 'Geist', system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  height: 100vh;
+  display: grid;
+  grid-template-columns: 320px 1fr 380px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+
+button, input, textarea { font: inherit; color: inherit; }
+
+button {
+  background: var(--card-elev);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  padding: 5px 10px;
+  cursor: pointer;
+}
+button:hover:not(:disabled) { background: var(--card-hover); border-color: var(--border-strong); }
+button:disabled { opacity: .4; cursor: default; }
+button.primary { background: var(--grad-bg); border-color: transparent; color: #fff; }
+button.primary:hover:not(:disabled) { background: var(--grad-bg-hover); }
+button.primary:active { background: var(--grad-bg-active); }
+button.danger { color: var(--danger); border-color: var(--danger-soft); background: var(--danger-fill); }
+button.danger:hover { background: rgba(229, 72, 77, .18); }
+button.on { border-color: var(--primary); color: var(--primary); }
+
+/* ---------------------------------------------------------------- sidebar */
+#sidebar {
+  background: var(--card);
+  border-right: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#brand {
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border-subtle);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+#brand b {
+  background: var(--grad-bg);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 600;
+}
+
+#controls { padding: 10px 12px; display: grid; gap: 8px; border-bottom: 1px solid var(--border-subtle); }
+#controls .row { display: flex; gap: 8px; }
+#controls .row button { flex: 1; }
+
+#search {
+  width: 100%;
+  padding: 6px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+}
+#search:focus { outline: none; border-color: var(--primary); }
+
+#mode-note { font-size: 11px; color: var(--text-muted); }
+
+#tree { flex: 1; overflow: auto; padding: 8px 0 24px; }
+
+#tree details > summary,
+#tree .node {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+  padding: 3px 12px 3px 0;
+  background: none;
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  text-align: left;
+  color: var(--text-dim);
+  cursor: pointer;
+  list-style: none;
+  white-space: nowrap;
+}
+#tree summary::-webkit-details-marker { display: none; }
+#tree details > summary:hover, #tree .node:hover { background: var(--card-hover); color: var(--text); }
+#tree .node.selected, #tree summary.selected {
+  background: var(--section-active-bg);
+  border-left-color: var(--primary);
+  color: var(--text);
+}
+/* inline-block so the open-state rotation below actually applies */
+#tree .twist { color: var(--text-muted); width: 10px; flex: none; display: inline-block; font-size: 10px; transition: transform .12s; }
+#tree details[open] > summary .twist { transform: rotate(90deg); }
+#tree .kids { border-left: 1px solid var(--connector); margin-left: 17px; }
+#tree .empty, #tree .hint { padding: 12px 16px; color: var(--text-muted); font-size: 12px; }
+.indent { flex: none; }
+
+.hit-snippet {
+  display: block;
+  padding: 0 12px 8px 20px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  white-space: normal;
+}
+
+/* ------------------------------------------------------------------- main */
+#main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+#toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-default);
+  background: var(--card);
+  min-height: 52px;
+}
+#path { font-family: var(--font-mono); font-size: 13px; margin-right: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#path .dirty { color: var(--warn); }
+#meta { color: var(--text-muted); font-size: 11px; font-family: var(--font-mono); }
+
+#view { flex: 1; overflow: auto; min-height: 0; }
+#view.pad { padding: 24px 32px; }
+
+#status {
+  padding: 6px 16px;
+  font-size: 12px;
+  border-top: 1px solid var(--border-subtle);
+  color: var(--text-muted);
+  min-height: 27px;
+}
+#status.error { color: var(--danger); background: var(--danger-fill); }
+
+textarea {
+  width: 100%;
+  height: 100%;
+  padding: 16px 20px;
+  background: var(--bg);
+  border: 0;
+  resize: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.6;
+}
+textarea:focus { outline: none; }
+
+iframe { width: 100%; height: 100%; border: 0; background: #fff; }
+img.preview { max-width: 100%; display: block; }
+pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-space: pre-wrap; }
+
+/* ------------------------------------------------------------------- chat */
+#chat {
+  background: var(--card);
+  border-left: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+#messages { flex: 1; overflow: auto; padding: 12px 14px; display: grid; gap: 14px; align-content: start; }
+#messages .hint { color: var(--text-muted); font-size: 12px; }
+
+.msg .who { letter-spacing: .14em; text-transform: uppercase; font-size: 11px; color: var(--text-dim); margin-bottom: 4px; }
+.msg.you .who { color: var(--primary); }
+.msg .tools { font-family: var(--font-mono); font-size: 11px; color: var(--text-muted); }
+.msg .said { font-family: var(--font-mono); font-size: 13px; color: var(--text-dim); white-space: pre-wrap; }
+/* .md caps at 76ch, which is wider than this whole column */
+.msg .md { max-width: none; font-size: 13px; white-space: pre-wrap; }
+.msg .md.done { white-space: normal; }
+
+#compose { padding: 10px 12px; display: grid; gap: 8px; border-top: 1px solid var(--border-subtle); }
+#ask {
+  width: 100%;
+  height: auto;
+  padding: 7px 9px;
+  background: var(--bg);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  resize: vertical;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+}
+#ask:focus { outline: none; border-color: var(--primary); }
+
+/* rendered markdown */
+.md { max-width: 76ch; line-height: 1.65; }
+.md h1, .md h2, .md h3 { line-height: 1.25; margin: 1.6em 0 .6em; }
+.md h1 { font-size: 1.7em; }
+.md h2 { font-size: 1.35em; border-bottom: 1px solid var(--border-subtle); padding-bottom: .3em; }
+.md a { color: var(--primary); }
+.md code { font-family: var(--font-mono); font-size: .88em; background: var(--card-elev); padding: 1px 4px; border-radius: var(--radius-control); }
+.md pre { background: var(--card); border: 1px solid var(--border-subtle); padding: 12px 14px; overflow: auto; }
+.md pre code { background: none; padding: 0; }
+.md blockquote { margin: 1em 0; padding-left: 14px; border-left: 2px solid var(--secondary); color: var(--text-dim); }
+.md table { border-collapse: collapse; }
+.md th, .md td { border: 1px solid var(--border-default); padding: 5px 10px; }
+.md hr { border: 0; border-top: 1px solid var(--border-default); }
+.md img { max-width: 100%; }
+</style>
+</head>
+<body>
+
+<aside id="sidebar">
+  <div id="brand"><b>SurrealFS</b> &nbsp;browser</div>
+  <div id="controls">
+    <input id="search" type="search" placeholder="Search files…" autocomplete="off">
+    <div id="mode-note"></div>
+    <div class="row">
+      <button id="new-file">+ File</button>
+      <button id="new-folder">+ Folder</button>
+      <button id="refresh" title="Reload the tree">↻</button>
+    </div>
+  </div>
+  <div id="tree"></div>
+</aside>
+
+<main id="main">
+  <div id="toolbar">
+    <span id="path">Nothing open</span>
+    <span id="meta"></span>
+    <span id="actions"></span>
+  </div>
+  <div id="view" class="pad"><p style="color:var(--text-muted)">Pick a file from the tree.</p></div>
+  <div id="status"></div>
+</main>
+
+<aside id="chat">
+  <div id="brand"><b>Agent</b> &nbsp;chat</div>
+  <div id="messages"><div class="hint">Ask the agent to take notes. It reads and writes the same filesystem you are browsing.</div></div>
+  <div id="compose">
+    <textarea id="ask" rows="3" placeholder="Ask the agent…  (Enter to send, Shift+Enter for a newline)" spellcheck="false"></textarea>
+    <button id="send" class="primary">Send</button>
+  </div>
+</aside>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// --- tiny helpers -----------------------------------------------------------
+function make(tag, props = {}, ...kids) {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const kid of kids.flat()) if (kid) node.append(kid);
+  return node;
+}
+
+async function api(url, options) {
+  const res = await fetch(url, options);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body.error || res.statusText);
+    err.status = res.status;
+    throw err;
+  }
+  return res;
+}
+
+const json = (url, options) => api(url, options).then((r) => r.json());
+
+function say(message, isError = false) {
+  $('status').textContent = message;
+  $('status').classList.toggle('error', isError);
+}
+
+const guard = (fn) => async (...args) => {
+  try { say(''); await fn(...args); }
+  catch (e) { say(e.message, true); }
+};
+
+const isText = (ct) => ct.startsWith('text/') || /(json|javascript|xml|yaml|toml|x-sh)/.test(ct);
+const hasPreview = (ct) => ct === 'text/markdown' || ct === 'text/html';
+const size = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+
+// --- state ------------------------------------------------------------------
+let entries = [];       // flat list from /api/tree
+let current = null;     // the open entry
+let mode = 'preview';   // 'preview' | 'source'
+let dirty = false;
+
+window.addEventListener('beforeunload', (e) => { if (dirty) e.preventDefault(); });
+
+// --- tree -------------------------------------------------------------------
+async function loadTree(keepSelection = true) {
+  entries = await json('/api/tree');
+  renderTree();
+  if (keepSelection && current && !entries.some((e) => e.path === current.path)) closeFile();
+}
+
+function renderTree() {
+  const root = { kids: new Map() };
+  for (const entry of entries) {
+    let node = root;
+    const parts = entry.path.split('/').filter(Boolean);
+    parts.forEach((part, i) => {
+      if (!node.kids.has(part)) node.kids.set(part, { kids: new Map() });
+      node = node.kids.get(part);
+      if (i === parts.length - 1) node.entry = entry;
+    });
+  }
+  const tree = $('tree');
+  tree.replaceChildren();
+  if (!entries.length) tree.append(make('div', { className: 'empty', textContent: 'No files yet.' }));
+  else tree.append(...renderNodes(root, 0));
+}
+
+const isDirNode = (node) => !!node.entry?.is_folder || node.kids.size > 0;
+
+function renderNodes(node, depth) {
+  const pad = (n) => make('span', { className: 'indent', style: `width:${n * 12}px` });
+  const sorted = [...node.kids.entries()].sort(([a, x], [b, y]) =>
+    (isDirNode(y) - isDirNode(x)) || a.localeCompare(b));
+
+  return sorted.map(([name, child]) => {
+    const entry = child.entry;
+    const selected = current && entry && entry.path === current.path;
+
+    if (isDirNode(child)) {
+      // Clicking the twisty toggles (the <summary> default); clicking the name
+      // selects the folder instead, so it can be renamed or deleted.
+      const label = make('span', { textContent: name });
+      if (entry) label.onclick = (e) => { e.preventDefault(); openFile(entry.path); };
+      const summary = make('summary', {},
+        pad(depth), make('span', { className: 'twist', textContent: '▸' }), label);
+      if (selected) summary.classList.add('selected');
+      return make('details', { open: depth < 2 }, summary,
+        make('div', { className: 'kids' }, ...renderNodes(child, depth + 1)));
+    }
+
+    const button = make('button', { className: 'node', onclick: () => openFile(entry.path) },
+      pad(depth), make('span', { className: 'twist' }), make('span', { textContent: name }));
+    if (selected) button.classList.add('selected');
+    return button;
+  });
+}
+
+// --- search -----------------------------------------------------------------
+let searchTimer;
+$('search').addEventListener('input', (e) => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => runSearch(e.target.value), 250);
+});
+
+const runSearch = guard(async (query) => {
+  if (!query.trim()) { $('mode-note').textContent = ''; renderTree(); return; }
+  const { hybrid, results } = await json(`/api/search?q=${encodeURIComponent(query)}`);
+  $('mode-note').textContent = hybrid
+    ? `${results.length} hit(s) · full-text + vector`
+    : `${results.length} hit(s) · full-text only (set OPENAI_API_KEY)`;
+  const tree = $('tree');
+  tree.replaceChildren();
+  if (!results.length) { tree.append(make('div', { className: 'empty', textContent: 'No matches.' })); return; }
+  for (const hit of results) {
+    tree.append(
+      make('button', { className: 'node', onclick: () => openFile(hit.path) },
+        make('span', { textContent: hit.path })),
+      make('span', { className: 'hit-snippet', textContent: hit.snippet }));
+  }
+});
+
+// --- viewer -----------------------------------------------------------------
+function closeFile() {
+  current = null;
+  dirty = false;
+  $('path').textContent = 'Nothing open';
+  $('meta').textContent = '';
+  $('actions').replaceChildren();
+  $('view').className = 'pad';
+  $('view').replaceChildren(make('p', { style: 'color:var(--text-muted)', textContent: 'Pick a file from the tree.' }));
+}
+
+const openFile = guard(async (path) => {
+  if (dirty && !confirm('Discard unsaved changes?')) return;
+  let entry = entries.find((e) => e.path === path);
+  if (!entry) { await loadTree(false); entry = entries.find((e) => e.path === path); }
+  if (!entry) throw new Error(`Not found: ${path}`);
+  current = entry;
+  dirty = false;
+  mode = hasPreview(current.content_type) ? 'preview' : 'source';
+  renderTree();
+  await renderViewer();
+});
+
+async function renderViewer() {
+  const ct = current.content_type;
+  $('path').textContent = current.path;
+  $('meta').textContent = current.is_folder ? 'folder' : `${ct} · ${size(current.size)}`;
+  renderActions();
+
+  const view = $('view');
+  view.className = '';
+
+  if (current.is_folder) {
+    const inside = entries.filter((e) => e.path.startsWith(current.path + '/')).length;
+    view.className = 'pad';
+    view.replaceChildren(make('p', { style: 'color:var(--text-muted)', textContent: `${inside} item(s) inside.` }));
+  } else if (isText(ct) && mode === 'source') {
+    const text = await api(`/raw?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
+    const box = make('textarea', { value: text, spellcheck: false });
+    box.addEventListener('input', () => { if (!dirty) { dirty = true; renderActions(); markDirty(); } });
+    view.replaceChildren(box);
+    box.focus();
+  } else if (ct === 'text/markdown') {
+    const html = await api(`/api/markdown?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
+    view.className = 'pad';
+    view.replaceChildren(make('div', { className: 'md', innerHTML: html }));
+  } else if (ct === 'text/html') {
+    // No allow-same-origin: the frame gets an opaque origin and cannot reach
+    // this page. /raw also sends `Content-Security-Policy: sandbox`, so the
+    // framed document renders as static markup with scripts disabled.
+    view.replaceChildren(make('iframe', { src: `/raw?path=${encodeURIComponent(current.path)}`, sandbox: '' }));
+  } else if (ct.startsWith('image/')) {
+    view.className = 'pad';
+    view.replaceChildren(make('img', { className: 'preview', src: `/raw?path=${encodeURIComponent(current.path)}`, alt: current.filename }));
+  } else if (isText(ct)) {
+    const text = await api(`/raw?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
+    view.className = 'pad';
+    view.replaceChildren(make('pre', { className: 'plain', textContent: text }));
+  } else {
+    view.className = 'pad';
+    view.replaceChildren(
+      make('p', { textContent: `${ct} · ${size(current.size)} — no preview.` }),
+      make('a', { href: `/raw?path=${encodeURIComponent(current.path)}`, download: current.filename, textContent: 'Download', style: 'color:var(--primary)' }));
+  }
+}
+
+function markDirty() { $('path').textContent = current.path; $('path').append(make('span', { className: 'dirty', textContent: ' •' })); }
+
+function renderActions() {
+  const ct = current.content_type;
+  const actions = [];
+
+  if (!current.is_folder && hasPreview(ct)) {
+    for (const which of ['preview', 'source']) {
+      actions.push(make('button', {
+        className: mode === which ? 'on' : '',
+        textContent: which === 'preview' ? 'Preview' : 'Source',
+        onclick: guard(async () => {
+          if (mode === which) return;
+          if (dirty && !confirm('Discard unsaved changes?')) return;
+          mode = which; dirty = false; await renderViewer();
+        }),
+      }));
+    }
+  }
+  if (!current.is_folder && isText(ct)) {
+    actions.push(make('button', { className: 'primary', textContent: 'Save', disabled: !dirty, onclick: save }));
+  }
+  actions.push(make('button', { textContent: 'Rename', onclick: rename }));
+  actions.push(make('button', { className: 'danger', textContent: 'Delete', onclick: remove }));
+  $('actions').replaceChildren(make('span', { style: 'display:flex;gap:8px' }, ...actions));
+}
+
+// --- mutations ---------------------------------------------------------------
+const save = guard(async () => {
+  const box = $('view').querySelector('textarea');
+  if (!box) return;
+  const saved = await json('/api/file', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path: current.path, content: box.value }),
+  });
+  dirty = false;
+  current = saved;
+  $('path').textContent = current.path;
+  $('meta').textContent = `${current.content_type} · ${size(current.size)}`;
+  renderActions();
+  await loadTree();
+  say(`Saved ${current.path}`);
+});
+
+const rename = guard(async () => {
+  const dst = prompt('Move to:', current.path);
+  if (!dst || dst === current.path) return;
+  await json('/api/move', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ src: current.path, dst }),
+  });
+  dirty = false;
+  await loadTree(false);
+  await openFile(dst);
+  say(`Moved to ${dst}`);
+});
+
+const remove = guard(async () => {
+  if (!confirm(`Delete ${current.path}?`)) return;
+  const url = `/api/file?path=${encodeURIComponent(current.path)}`;
+  try {
+    await api(url, { method: 'DELETE' });
+  } catch (e) {
+    // 409 means a non-empty folder. Recursive deletion gets its own confirmation.
+    if (e.status !== 409 || !confirm(`${e.message}\n\nDelete it and everything inside?`)) throw e;
+    await api(`${url}&recursive=1`, { method: 'DELETE' });
+  }
+  say(`Deleted ${current.path}`);
+  dirty = false;
+  closeFile();
+  await loadTree(false);
+});
+
+const create = (folder) => guard(async () => {
+  const base = !current ? '/' : current.is_folder ? `${current.path}/` : current.path.replace(/[^/]*$/, '');
+  const path = prompt(folder ? 'New folder path:' : 'New file path:', base);
+  if (!path) return;
+  await json('/api/file', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path, folder }),
+  });
+  await loadTree(false);
+  if (!folder) await openFile(path);
+  say(`Created ${path}`);
+});
+
+$('new-file').onclick = create(false);
+$('new-folder').onclick = create(true);
+$('refresh').onclick = guard(() => loadTree());
+
+document.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); if (dirty) save(); }
+});
+
+// --- chat --------------------------------------------------------------------
+function bubble(who, bodyClass) {
+  const tools = make('div', { className: 'tools' });
+  const body = make('div', { className: bodyClass });
+  $('messages').append(make('div', { className: `msg ${who}` },
+    make('div', { className: 'who', textContent: who }), tools, body));
+  scrollChat();
+  return { tools, body };
+}
+
+function scrollChat() { $('messages').scrollTop = $('messages').scrollHeight; }
+
+const send = guard(async () => {
+  const text = $('ask').value.trim();
+  if (!text || $('send').disabled) return;
+  $('ask').value = '';
+  bubble('you', 'said').body.textContent = text;
+  const { tools, body } = bubble('agent', 'md');
+  $('send').disabled = true;
+  try {
+    const res = await api('/api/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ message: text }),
+    });
+    // NDJSON: one JSON object per line, and a chunk can split a line in half.
+    const reader = res.body.getReader(), decoder = new TextDecoder();
+    let buffer = '', reply = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      buffer += done ? '\n' : decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines.filter(Boolean)) {
+        const event = JSON.parse(line);
+        if (event.delta) { reply += event.delta; body.textContent = reply.trimStart(); }
+        else if (event.tool) tools.textContent += `▸ ${event.tool}  `;
+        else if (event.error) throw new Error(event.error);
+        // Streaming deltas land as text; the finished reply is markdown the
+        // server rendered with html=False, so innerHTML is safe here.
+        else if (event.done) { body.innerHTML = event.html; body.classList.add('done'); }
+        scrollChat();
+      }
+      if (done) break;
+    }
+    await loadTree();
+    // The turn may have rewritten the open file. Unsaved edits win -- reloading
+    // the textarea underneath the user would throw away their typing.
+    if (current && !dirty) { current = entries.find((e) => e.path === current.path); await renderViewer(); }
+    else if (dirty) say('The agent may have changed this file; your unsaved edits were kept.');
+  } finally {
+    $('send').disabled = false;
+    $('ask').focus();
+  }
+});
+
+$('send').onclick = send;
+$('ask').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+loadTree(false).catch((e) => say(e.message, true));
+</script>
+</body>
+</html>
