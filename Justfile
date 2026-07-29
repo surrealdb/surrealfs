@@ -11,3 +11,7 @@ agent:
 
 build:
     cd python/surrealfs_py && uv run maturin develop --uv
+
+stub-gen:
+    MACOSX_DEPLOYMENT_TARGET=26.2 cargo run --bin stub_gen
+    # cargo run --bin stub_gen

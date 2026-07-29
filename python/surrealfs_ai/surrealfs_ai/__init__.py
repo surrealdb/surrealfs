@@ -1,6 +1,6 @@
 import uvicorn
 from pydantic_ai import Agent, ModelSettings, WebFetchTool, WebSearchTool
-from surrealfs_py import PySurrealFs  # type: ignore
+from surrealfs_py.surrealfs_py import PySurrealFs
 
 from surrealfs_ai.definitions import AgentDeps
 from surrealfs_ai.tools import build_toolset, instructions
@@ -23,8 +23,6 @@ def build_chat_agent(
     )
     return agent
 
-
-__all__ = ["build_chat_agent", "PySurrealFs"]
 
 if __name__ == "__main__":
     import os

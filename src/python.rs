@@ -1,12 +1,11 @@
-#![cfg(feature = "python")]
-
 use std::fmt::Write as FmtWrite;
 use std::sync::Mutex;
 
 use pyo3::create_exception;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyType};
+use pyo3::types::{PyBytes, PyModule, PyType};
+use pyo3_stub_gen::derive::{gen_stub_pyclass, gen_stub_pymethods};
 use regex::Regex;
 use surrealdb::Surreal;
 use surrealdb::engine::any::connect;
@@ -165,18 +164,22 @@ impl FsInner {
     }
 }
 
-#[pyclass(module = "surrealfs_py")]
+#[gen_stub_pyclass(module = "surrealfs_py.surrealfs_py")]
+#[pyclass(module = "surrealfs_py.surrealfs_py")]
 pub struct PySurrealFs {
     rt: Runtime,
     cwd: Mutex<String>,
     fs: FsInner,
 }
 
+// TODO: accept user and password as params
+
+#[gen_stub_pymethods]
 #[pymethods]
 impl PySurrealFs {
     #[classmethod]
     pub fn connect_ws(
-        _cls: &PyType,
+        _cls: &Bound<'_, PyType>,
         url: &str,
         namespace: Option<&str>,
         database: Option<&str>,
@@ -189,8 +192,8 @@ impl PySurrealFs {
             .block_on(async move {
                 let db = connect(url).await?;
                 db.signin(Root {
-                    username: "root",
-                    password: "root",
+                    username: "root".to_string(),
+                    password: "root".to_string(),
                 })
                 .await?;
                 db.use_ns(ns).use_db(db_name).await?;
@@ -206,7 +209,11 @@ impl PySurrealFs {
     }
 
     #[classmethod]
-    pub fn mem(_cls: &PyType, namespace: Option<&str>, database: Option<&str>) -> PyResult<Self> {
+    pub fn mem(
+        _cls: &Bound<'_, PyType>,
+        namespace: Option<&str>,
+        database: Option<&str>,
+    ) -> PyResult<Self> {
         let ns = namespace.unwrap_or("surrealfs");
         let db_name = database.unwrap_or("demo");
 
@@ -254,7 +261,7 @@ impl PySurrealFs {
         self.rt.block_on(self.fs.cat(&resolved)).map_err(to_py_err)
     }
 
-    pub fn cat_bytes<'py>(&self, py: Python<'py>, path: &str) -> PyResult<&'py PyBytes> {
+    pub fn cat_bytes<'py>(&self, py: Python<'py>, path: &str) -> PyResult<Bound<'py, PyBytes>> {
         let resolved = self.resolve_path(path)?;
         let data = self
             .rt
@@ -327,10 +334,10 @@ impl PySurrealFs {
         Ok(String::new())
     }
 
-    pub fn write_bytes(&self, path: &str, data: &[u8]) -> PyResult<String> {
+    pub fn write_bytes(&self, path: &str, data: Vec<u8>) -> PyResult<String> {
         let resolved = self.resolve_path(path)?;
         self.rt
-            .block_on(self.fs.write_bytes(&resolved, data.to_vec()))
+            .block_on(self.fs.write_bytes(&resolved, data))
             .map_err(to_py_err)?;
         Ok(String::new())
     }
@@ -442,10 +449,17 @@ impl PySurrealFs {
 }
 
 #[pymodule]
-fn surrealfs_py(_py: Python, m: &PyModule) -> PyResult<()> {
+fn surrealfs_py(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PySurrealFs>()?;
-    m.add("SurrealFsError", _py.get_type::<SurrealFsError>())?;
+    m.add("SurrealFsError", m.py().get_type::<SurrealFsError>())?;
     Ok(())
+}
+
+pub fn stub_info() -> pyo3_stub_gen::Result<pyo3_stub_gen::StubInfo> {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    pyo3_stub_gen::StubInfo::from_pyproject_toml(
+        manifest_dir.join("python/surrealfs_py/pyproject.toml"),
+    )
 }
 
 fn to_py_err(err: FsError) -> PyErr {

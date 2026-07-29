@@ -8,7 +8,7 @@ use rimage::codecs::{
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use similar::{ChangeTag, TextDiff};
-use surrealdb::{Surreal, engine::remote::ws::Client};
+use surrealdb::{Surreal, engine::remote::ws::Client, types::SurrealValue};
 use thiserror::Error;
 use zune_core::{bytestream::ZCursor, options::DecoderOptions};
 use zune_image::{image::Image, traits::EncoderTrait};
@@ -17,7 +17,6 @@ pub type Result<T> = std::result::Result<T, FsError>;
 
 pub mod curl;
 
-#[cfg(feature = "python")]
 pub mod python;
 
 #[derive(Debug, Error)]
@@ -40,7 +39,7 @@ pub enum FsError {
     Surreal(#[from] surrealdb::Error),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, SurrealValue)]
 pub struct Entry {
     pub path: String,
     pub name: String,
