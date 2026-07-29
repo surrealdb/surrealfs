@@ -45,9 +45,7 @@ def _default_context(deps: Any) -> ToolContext:
     )
 
 
-def _as_tool(
-    spec: ToolSpec, get_context: Callable[[Any], ToolContext]
-) -> Tool[Any]:
+def _as_tool(spec: ToolSpec, get_context: Callable[[Any], ToolContext]) -> Tool[Any]:
     async def run(ctx: RunContext[Any], **kwargs: Any) -> str:
         try:
             return await spec(get_context(ctx.deps), kwargs)

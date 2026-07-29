@@ -61,9 +61,7 @@ def tool_definitions(
     raise ValueError(f"Unknown flavor {flavor!r}; expected 'anthropic' or 'openai'")
 
 
-async def call_tool(
-    ctx: ToolContext, name: str, arguments: dict[str, Any]
-) -> str:
+async def call_tool(ctx: ToolContext, name: str, arguments: dict[str, Any]) -> str:
     """Run a tool by name and return its result as text.
 
     Errors are returned as text rather than raised, since a tool-calling loop

@@ -54,8 +54,18 @@ def surreal_url() -> str:
 
     port = _free_port()
     process = subprocess.Popen(
-        [binary, "start", "--allow-all", "-u", "root", "-p", "root",
-         "--bind", f"127.0.0.1:{port}", "memory"],
+        [
+            binary,
+            "start",
+            "--allow-all",
+            "-u",
+            "root",
+            "-p",
+            "root",
+            "--bind",
+            f"127.0.0.1:{port}",
+            "memory",
+        ],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -63,8 +73,9 @@ def surreal_url() -> str:
     while time.monotonic() < deadline:
         if process.poll() is not None:
             pytest.fail("surreal server exited during startup")
-        with contextlib.suppress(OSError), socket.create_connection(
-            ("127.0.0.1", port), timeout=0.5
+        with (
+            contextlib.suppress(OSError),
+            socket.create_connection(("127.0.0.1", port), timeout=0.5),
         ):
             break
         time.sleep(0.1)

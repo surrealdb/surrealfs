@@ -1240,6 +1240,7 @@ pydantic-ai = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "pydantic-ai-slim" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
@@ -1260,6 +1261,7 @@ provides-extras = ["pydantic-ai", "demo"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "pydantic-ai-slim", specifier = ">=2.0" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "ruff", specifier = ">=0.8" },

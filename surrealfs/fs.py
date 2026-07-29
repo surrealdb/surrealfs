@@ -44,6 +44,7 @@ def _parent_key(parent_id: RecordID | None) -> str:
     """The indexed key for a parent record id, matching the schema's VALUE clause."""
     return ROOT_KEY if parent_id is None else str(parent_id)
 
+
 # Every field the model layer needs. `path` and `is_folder` are COMPUTED, so
 # selecting them costs a parent-chain walk per row -- worth it, and the only way
 # to get a path at all.
@@ -73,9 +74,7 @@ def raise_for_status(raw: Any) -> list[Any]:
             message = str(statement.get("result", "unknown query error"))
             # The kind sits at the top level on some versions and under
             # `details` on others, so check both.
-            kind = statement.get("kind") or (statement.get("details") or {}).get(
-                "kind"
-            )
+            kind = statement.get("kind") or (statement.get("details") or {}).get("kind")
             raise QueryError(
                 message,
                 retryable=kind == "TransactionConflict"
@@ -364,9 +363,7 @@ class SurrealFs:
             return FileEntry.from_row(row)
 
         parent_id = await self._ensure_parent(normalized, create=create_parents)
-        return await self._create(
-            filename, parent_id, resolved_type, content=content
-        )
+        return await self._create(filename, parent_id, resolved_type, content=content)
 
     async def write_bytes(
         self,
@@ -689,6 +686,8 @@ def _snippet(content: str, terms: Sequence[str], *, width: int = 160) -> str:
         return content[:width].strip()
     start = max(0, min(positions) - width // 3)
     end = min(len(content), start + width)
-    return ("..." if start else "") + content[start:end].strip() + (
-        "..." if end < len(content) else ""
+    return (
+        ("..." if start else "")
+        + content[start:end].strip()
+        + ("..." if end < len(content) else "")
     )

@@ -30,7 +30,14 @@ demo = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8"]
+# pydantic-ai is here as well as in the extra so `just test` exercises that
+# integration instead of silently skipping its tests.
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.8",
+    "pydantic-ai-slim>=2.0",
+]
 
 [build-system]
 requires = ["hatchling"]

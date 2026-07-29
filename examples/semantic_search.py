@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from collections.abc import Awaitable, Callable
 
 from openai import AsyncOpenAI
 from surrealdb import AsyncSurreal
@@ -24,15 +25,24 @@ from surrealfs.tools import ToolContext
 EMBED_MODEL = "text-embedding-3-small"  # 1536 dimensions
 INDEXER_VERSION = f"openai:{EMBED_MODEL}"
 
-client = AsyncOpenAI()
 
+def make_embedder() -> Callable[[str], Awaitable[list[float]]]:
+    """Build the embedding function.
 
-async def embed(text: str) -> list[float]:
-    response = await client.embeddings.create(model=EMBED_MODEL, input=text)
-    return response.data[0].embedding
+    The client is constructed here rather than at import time so that importing
+    this module does not require an API key.
+    """
+    client = AsyncOpenAI()
+
+    async def embed(text: str) -> list[float]:
+        response = await client.embeddings.create(model=EMBED_MODEL, input=text)
+        return response.data[0].embedding
+
+    return embed
 
 
 async def main() -> None:
+    embed = make_embedder()
     db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
     await db.signin({"username": "root", "password": "root"})
     await db.use("surrealfs", "demo")

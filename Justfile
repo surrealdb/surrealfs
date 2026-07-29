@@ -12,9 +12,8 @@ db-persist:
     surreal start --allow-all -u root -p root --bind 127.0.0.1:8000 rocksdb:demo-db
 
 # Apply the file table schema to the local server.
-schema:
-    uv run python -c "import asyncio; from examples.chat_agent import connect; \
-        asyncio.run(connect()); print('schema applied')"
+schema *ARGS:
+    uv run python -m surrealfs.schema {{ARGS}}
 
 test:
     uv run pytest

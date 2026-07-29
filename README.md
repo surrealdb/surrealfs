@@ -62,7 +62,7 @@ from surrealfs import SurrealFs, apply_schema
 db = AsyncSurreal("ws://localhost:8000/rpc")
 await db.signin({"username": "root", "password": "root"})
 await db.use("surrealfs", "demo")
-await apply_schema(db)               # defines the `file` table; safe to re-run
+await apply_schema(db)  # defines the `file` table; safe to re-run
 
 fs = SurrealFs(db)
 await fs.write_text("/notes/today.md", "# Today\n- ship the refactor")
@@ -96,8 +96,7 @@ from pydantic_ai import Agent
 from surrealfs.integrations.pydantic_ai import build_fs_toolset
 from surrealfs.tools import ToolContext
 
-agent = Agent("claude-sonnet-5", deps_type=ToolContext,
-              toolsets=[build_fs_toolset()])
+agent = Agent("claude-sonnet-5", deps_type=ToolContext, toolsets=[build_fs_toolset()])
 
 await agent.run("Tidy up my notes", deps=ToolContext(fs=SurrealFs(db)))
 ```
@@ -114,7 +113,7 @@ from surrealfs.integrations.json_tools import call_tool, tool_definitions
 from surrealfs.tools import ToolContext
 
 ctx = ToolContext(fs=SurrealFs(db))
-tools = tool_definitions(flavor="anthropic")     # or flavor="openai"
+tools = tool_definitions(flavor="anthropic")  # or flavor="openai"
 
 # inside your tool-use loop:
 result = await call_tool(ctx, block.name, block.input)
@@ -162,13 +161,23 @@ HNSW and BM25 indexes for the two search modes.
 `apply_schema(db, include_user=True)` also defines the optional `user` table and
 record access that the `owner` permissions need for real multi-tenancy.
 
+You can apply it without writing any code:
+
+```bash
+python -m surrealfs.schema                     # uses SURREALDB_* env vars
+python -m surrealfs.schema --include-user
+python -m surrealfs.schema --print             # dump the DDL, connect to nothing
+```
+
 ## Development
 
 ```bash
 just db        # start SurrealDB in one terminal
-just test      # run the suite against it (starts its own server if needed)
+just schema    # apply the file table to it
+just test      # run the suite (starts its own server if needed)
 just check     # lint + test
 just agent     # the note-taking chat agent on :7932
+just loop "…"  # the framework-free Anthropic tool-use loop
 ```
 
 Tests start a throwaway `surreal` server; set `SURREALFS_TEST_URL` to reuse one

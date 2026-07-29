@@ -101,9 +101,7 @@ async def write_bytes(ctx: ToolContext, args: WriteBytesArgs) -> str:
         data = base64.b64decode(args.data_base64, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise SurrealFsError(f"data_base64 is not valid base64: {exc}") from exc
-    entry = await ctx.fs.write_bytes(
-        args.path, data, content_type=args.content_type
-    )
+    entry = await ctx.fs.write_bytes(args.path, data, content_type=args.content_type)
     return f"Wrote {entry.size} bytes to {entry.path}"
 
 
@@ -149,9 +147,7 @@ async def search_text(ctx: ToolContext, args: SearchTextArgs) -> str:
 
 async def search_semantic(ctx: ToolContext, args: SearchSemanticArgs) -> str:
     if ctx.embed is None:
-        raise SurrealFsError(
-            "Semantic search is not configured on this filesystem."
-        )
+        raise SurrealFsError("Semantic search is not configured on this filesystem.")
     vector = await ctx.embed(args.query)
     hits = await ctx.fs.search_semantic(vector, k=args.limit)
     if not hits:

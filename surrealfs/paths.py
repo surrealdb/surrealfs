@@ -10,8 +10,15 @@ import re
 
 from .errors import InvalidPath
 
-__all__ = ["normalize", "split", "join", "parent_of", "basename", "glob_to_regex",
-           "literal_prefix"]
+__all__ = [
+    "normalize",
+    "split",
+    "join",
+    "parent_of",
+    "basename",
+    "glob_to_regex",
+    "literal_prefix",
+]
 
 
 def normalize(path: str) -> str:

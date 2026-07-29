@@ -45,12 +45,17 @@ with Surreal("ws://localhost:8000/rpc") as db:
 
     print(db.select("person"))
 
-    print(db.update("person", {
-        "user": "you",
-        "password": "very_safe",
-        "marketing": False,
-        "tags": ["Awesome"],
-    }))
+    print(
+        db.update(
+            "person",
+            {
+                "user": "you",
+                "password": "very_safe",
+                "marketing": False,
+                "tags": ["Awesome"],
+            },
+        )
+    )
 
     print(db.delete("person"))
 
@@ -64,13 +69,15 @@ with Surreal("ws://localhost:8000/rpc") as db:
 
     print(db.query("select * from person"))
 
-    print(db.query("""
+    print(
+        db.query("""
     update person content {
         user: 'you',
         password: 'more_safe',
         tags: ['awesome']
     };
-    """))
+    """)
+    )
 
     print(db.query("delete person"))
 ```
