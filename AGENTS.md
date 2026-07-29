@@ -17,6 +17,7 @@ surrealfs/
   models.py         FileEntry, SearchHit
   errors.py         exception hierarchy (dual-inherits builtin OSErrors)
   paths.py          normalisation + glob->regex
+  embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
   schema/           file.surql, user.surql, apply_schema()
   tools/            args.py, handlers.py, registry, docs/*.md
   integrations/     pydantic_ai.py, json_tools.py

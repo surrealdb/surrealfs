@@ -21,6 +21,8 @@ dependencies = [
 
 [project.optional-dependencies]
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
+# What `surrealfs.embed` needs, without the rest of the demo stack.
+embed = ["openai>=2.0"]
 demo = [
     "pydantic-ai-slim[web,anthropic]>=2.0",
     "anthropic>=0.40",

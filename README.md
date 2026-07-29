@@ -144,6 +144,16 @@ since they were embedded. To offer it as a tool, pass the embedder in the
 context and opt in — `build_fs_toolset(semantic=True)` with
 `ToolContext(fs=fs, embed=embed)`. See `examples/semantic_search.py`.
 
+An OpenAI embedder ships in `surrealfs.embed` (`make_embedder`,
+`text-embedding-3-small`, the 1536 dimensions the HNSW index expects), along with
+a daemon that keeps every vector current no matter what wrote the row:
+
+```bash
+just embed              # poll every 5s; --once for a single pass
+```
+
+It needs `OPENAI_API_KEY` and an already-applied schema (`just schema`).
+
 ## The schema
 
 `surrealfs/schema/file.surql` is the whole data model, and it is worth reading.

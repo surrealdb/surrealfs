@@ -1234,6 +1234,9 @@ demo = [
     { name = "pydantic-ai-slim", extra = ["anthropic", "web"] },
     { name = "uvicorn" },
 ]
+embed = [
+    { name = "openai" },
+]
 pydantic-ai = [
     { name = "pydantic-ai-slim" },
 ]
@@ -1251,13 +1254,14 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'demo'", specifier = ">=0.40" },
     { name = "logfire", marker = "extra == 'demo'", specifier = ">=4.20" },
     { name = "openai", marker = "extra == 'demo'", specifier = ">=2.0" },
+    { name = "openai", marker = "extra == 'embed'", specifier = ">=2.0" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-ai-slim", marker = "extra == 'pydantic-ai'", specifier = ">=2.0" },
     { name = "pydantic-ai-slim", extras = ["web", "anthropic"], marker = "extra == 'demo'", specifier = ">=2.0" },
     { name = "surrealdb", specifier = ">=3.0.0a4" },
     { name = "uvicorn", marker = "extra == 'demo'", specifier = ">=0.30" },
 ]
-provides-extras = ["pydantic-ai", "demo"]
+provides-extras = ["pydantic-ai", "embed", "demo"]
 
 [package.metadata.requires-dev]
 dev = [

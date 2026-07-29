@@ -13,32 +13,13 @@ from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Awaitable, Callable
 
-from openai import AsyncOpenAI
 from surrealdb import AsyncSurreal
 
 from surrealfs import SurrealFs, apply_schema
+from surrealfs.embed import INDEXER_VERSION, make_embedder
 from surrealfs.integrations.pydantic_ai import build_fs_toolset  # noqa: F401
 from surrealfs.tools import ToolContext
-
-EMBED_MODEL = "text-embedding-3-small"  # 1536 dimensions
-INDEXER_VERSION = f"openai:{EMBED_MODEL}"
-
-
-def make_embedder() -> Callable[[str], Awaitable[list[float]]]:
-    """Build the embedding function.
-
-    The client is constructed here rather than at import time so that importing
-    this module does not require an API key.
-    """
-    client = AsyncOpenAI()
-
-    async def embed(text: str) -> list[float]:
-        response = await client.embeddings.create(model=EMBED_MODEL, input=text)
-        return response.data[0].embedding
-
-    return embed
 
 
 async def main() -> None:

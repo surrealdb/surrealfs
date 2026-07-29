@@ -15,6 +15,10 @@ db-persist:
 schema *ARGS:
     uv run python -m surrealfs.schema {{ARGS}}
 
+# Embed new and changed files, then keep polling for more. `--once` for a single pass.
+embed *ARGS:
+    uv run --extra embed python -m surrealfs.embed {{ARGS}}
+
 test:
     uv run pytest
 
