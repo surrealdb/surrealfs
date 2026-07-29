@@ -313,7 +313,8 @@ async def test_parent_key_follows_a_move(fs, db):
     await fs.write_text("/a.md", "x")
     await fs.mkdir("/d")
     moved = await fs.mv("/a.md", "/d/a.md")
-    rows = await db.query(
+    # query() returns one entry per statement, each holding that statement's rows.
+    (rows,) = await db.query(
         "SELECT parent_key FROM file WHERE id = $id", {"id": moved.id}
     )
     assert rows[0]["parent_key"] == str((await fs.stat("/d")).id)

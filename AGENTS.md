@@ -36,15 +36,23 @@ just check   # ruff + pytest
 
 ## Non-obvious things that will bite you
 
-**SurrealDB 3.x is required.** `COMPUTED` fields and `FULLTEXT` indexes do not
-exist in 2.x. The Python SDK's embedded engine (`mem://`, `file://`) is a 2.0.0
-core, so it cannot run this schema. Tests use a real `surreal` subprocess.
+**A SurrealDB 3.x server is required, and `mem://` will not do.** `COMPUTED`
+fields and `FULLTEXT` indexes do not exist in 2.x. The embedded engine in
+`surrealdb[embedded]` 3.0.0a4 does parse them, but its 3.0.0-alpha core returns
+`null` for computed fields on any **indexed** read — so `path` and `is_folder`
+come back empty from `ls`, path resolution, and full-text search, while a plain
+table scan is fine. Isolated to the engine: the same SDK against a 3.2.x server
+is correct. Tests use a `surreal` subprocess; re-check `mem://` when a newer
+`surrealdb-embedded` ships.
 
-**Never call `db.query()` for multi-statement SurrealQL.** It returns the
-*first* statement's result and silently swallows per-statement errors —
-`LET $x = 1; THROW 'boom'` returns `None` with no exception. Use
-`SurrealFs._query`, which goes through `query_raw()`, checks every statement's
-status, and returns the last result.
+**`SurrealFs._query` goes through `query_raw()`, not `query()`.** The envelope is
+what carries each statement's error *kind*, which is how we tell a retryable
+transaction conflict from a real failure. It is also version-tolerant: on
+surrealdb-py 2.x, `query()` returned only the *first* statement's result and
+silently swallowed later failures (`LET $x = 1; THROW 'boom'` returned `None`).
+On 3.x `query()` returns one entry per statement and raises — so anything
+outside the library reading `query()` results must index per statement first,
+which is what bit `test_parent_key_follows_a_move`.
 
 **`path` is COMPUTED, so it cannot be indexed.** `WHERE path = $p` is a table
 scan that recomputes every row's ancestry. Resolve paths by walking segments
@@ -75,9 +83,11 @@ resolve to `/a.md`.
 matches in SurrealQL and then ranks and snippets in Python. Revisit if a later
 release fixes the functions.
 
-**HNSW needs `<|k,ef|>`, not `<|k,COSINE|>`.** The latter compiles to a brute
-force `KnnTopK` over a table scan and ignores the index. `k` and `ef` cannot be
-bound parameters, so they are interpolated after an `int()` cast.
+**HNSW needs `<|k,ef|>` with literal integers.** `<|k,COSINE|>` compiles to a
+brute-force `KnnTopK` over a table scan and ignores the index. And `k`/`ef` must
+be *literals*: binding them as parameters looks fine — it parses and returns the
+right rows — but the planner silently drops to a brute-force scan. Confirmed with
+`EXPLAIN` on both engines. They are interpolated after an `int()` cast.
 
 **`touch` must write `content = ""`, not NONE.** `is_folder` is computed as "no
 content, no bytes, no symlink", so a NONE-content row comes back as a directory.

@@ -1,16 +1,21 @@
 """Test fixtures.
 
-These tests need a real SurrealDB **3.x** server. The embedded engine bundled
-with the Python SDK (``mem://``) is a 2.0.0 core and supports neither COMPUTED
-fields nor FULLTEXT indexes, both of which the schema depends on — so we start a
-throwaway in-memory server instead.
+These tests need a real SurrealDB server, so we start a throwaway in-memory one.
+
+The embedded engine (``mem://``, via ``surrealdb[embedded]``) is *not* usable,
+even though as of surrealdb-py 3.0.0a4 it does parse the schema. The engine it
+bundles is 3.0.0-alpha.4, which returns ``null`` for COMPUTED fields whenever a
+row is reached through an index — and `path` and `is_folder` are both computed.
+Every indexed read (`ls`, path resolution, full-text search) would silently come
+back with no path. Verified against the same SDK talking to a 3.2.x server, where
+the identical query is correct, so it is an engine bug rather than an SDK one.
+Re-test when a newer ``surrealdb-embedded`` ships.
 
 Set ``SURREALFS_TEST_URL`` to reuse a server you already have running.
 """
 
 from __future__ import annotations
 
-import asyncio
 import contextlib
 import os
 import shutil
@@ -37,7 +42,8 @@ def _free_port() -> int:
 def surreal_url() -> str:
     """URL of a running SurrealDB 3.x server, starting one if needed."""
     if url := os.environ.get("SURREALFS_TEST_URL"):
-        return url
+        yield url
+        return
 
     binary = shutil.which("surreal")
     if binary is None:
@@ -73,13 +79,6 @@ def surreal_url() -> str:
         process.wait(timeout=10)
 
 
-@pytest.fixture(scope="session")
-def event_loop():
-    loop = asyncio.new_event_loop()
-    yield loop
-    loop.close()
-
-
 @pytest.fixture
 async def db(surreal_url, request):
     """A connection to a namespace unique to this test, with the schema applied."""
@@ -87,14 +86,14 @@ async def db(surreal_url, request):
     await connection.signin(ROOT)
     # A fresh namespace per test keeps them isolated and order-independent.
     name = "t" + str(abs(hash(request.node.nodeid)))[:12]
-    await connection.query(
+    await connection.query_raw(
         f"REMOVE NAMESPACE IF EXISTS {name}; DEFINE NAMESPACE {name};"
     )
     await connection.use(name, "test")
     await apply_schema(connection)
     yield connection
     with contextlib.suppress(Exception):
-        await connection.query(f"REMOVE NAMESPACE IF EXISTS {name}")
+        await connection.query_raw(f"REMOVE NAMESPACE IF EXISTS {name}")
     await connection.close()
 
 

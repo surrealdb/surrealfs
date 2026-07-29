@@ -35,10 +35,14 @@ Here is a tree one agent built for its user over a few conversations:
 ## Requirements
 
 - Python 3.12+
-- **SurrealDB 3.x.** The schema uses `COMPUTED` fields and `FULLTEXT` indexes,
-  neither of which exists in 2.x. The embedded engine bundled with the Python
-  SDK (`mem://`, `file://`) is a 2.0.0 core and *cannot* run this schema — use a
-  real server.
+- **A SurrealDB 3.x server.** The schema uses `COMPUTED` fields and `FULLTEXT`
+  indexes, neither of which exists in 2.x.
+
+  The embedded engine (`mem://`, `file://` via `surrealdb[embedded]`) is not
+  usable yet. As of `surrealdb-embedded` 3.0.0a4 it parses the schema, but its
+  3.0.0-alpha core returns `null` for computed fields on any read that goes
+  through an index — so `path` and `is_folder` come back empty from `ls`, path
+  resolution, and search. The same query is correct against a 3.2.x server.
 
 ## Install
 

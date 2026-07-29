@@ -80,6 +80,15 @@ async def test_search_semantic_rejects_bad_k(fs):
         await fs.search_semantic(_unit_vector(0), k=0)
 
 
+async def test_search_semantic_actually_uses_the_hnsw_index(fs):
+    """`<|k,COSINE|>`, or binding k/ef, silently degrades to a table scan."""
+    plan = await fs._query(
+        f"SELECT id FROM {fs.table} WHERE embedding <|5,40|> $vector EXPLAIN",
+        {"vector": _unit_vector(0)},
+    )
+    assert "KnnScan" in str(plan), f"KNN query is not index-backed: {plan}"
+
+
 async def test_reindex_embeddings_only_touches_stale_rows(fs):
     calls: list[str] = []
 

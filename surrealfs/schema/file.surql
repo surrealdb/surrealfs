@@ -4,9 +4,10 @@
 -- stored, so renaming or moving a folder updates every descendant's path for
 -- free -- a rename is a single UPDATE of `filename`.
 --
--- REQUIRES SurrealDB 3.x: COMPUTED fields and FULLTEXT indexes do not exist in
--- 2.x. In particular the embedded engine bundled with the Python SDK (`mem://`,
--- `file://`) is a 2.0.0 core and cannot run this schema -- use a real server.
+-- REQUIRES a SurrealDB 3.x *server*. COMPUTED fields and FULLTEXT indexes do
+-- not exist in 2.x at all, and the engine in `surrealdb[embedded]` 3.0.0a4
+-- (`mem://`, `file://`) parses them but returns NULL for computed fields on any
+-- indexed read -- which is most of them. See tests/conftest.py.
 
 DEFINE TABLE OVERWRITE file SCHEMAFULL
     PERMISSIONS

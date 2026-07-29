@@ -59,10 +59,11 @@ _FIELDS_WITH_CONTENT = f"{_FIELDS}, content, file"
 def raise_for_status(raw: Any) -> list[Any]:
     """Validate a ``query_raw`` envelope and return each statement's result.
 
-    The SDK's ``query()`` returns only the *first* statement's result and
-    silently discards later statements that failed -- ``LET $x = 1; THROW 'boom'``
-    returns ``None`` with no exception. Anything issuing more than one statement
-    must go through here instead.
+    We use ``query_raw`` rather than ``query`` because the envelope carries each
+    statement's error *kind*, which is what tells us whether a failure is a
+    retryable transaction conflict. It is also version-tolerant: on surrealdb-py
+    2.x, ``query()`` returned only the first statement's result and silently
+    discarded later failures (``LET $x = 1; THROW 'boom'`` returned ``None``).
     """
     results = raw.get("result", raw) if isinstance(raw, dict) else raw
     if not isinstance(results, list):
@@ -70,7 +71,11 @@ def raise_for_status(raw: Any) -> list[Any]:
     for statement in results:
         if isinstance(statement, dict) and statement.get("status") == "ERR":
             message = str(statement.get("result", "unknown query error"))
-            kind = (statement.get("details") or {}).get("kind")
+            # The kind sits at the top level on some versions and under
+            # `details` on others, so check both.
+            kind = statement.get("kind") or (statement.get("details") or {}).get(
+                "kind"
+            )
             raise QueryError(
                 message,
                 retryable=kind == "TransactionConflict"
@@ -564,9 +569,11 @@ class SurrealFs:
         Takes a pre-computed embedding -- the library does not call an embedding
         model. Use :meth:`reindex_embeddings` to populate the vectors.
         """
-        # k and ef are part of the operator syntax and cannot be bound as
-        # parameters ("expected an unsigned integer"), so they are interpolated
-        # after an int() cast, which makes injection impossible.
+        # k and ef must be *literals* in the query text. Binding them as
+        # parameters looks like it works -- it parses and returns correct rows --
+        # but the planner silently drops to a brute-force scan instead of the
+        # HNSW index (verified with EXPLAIN). The int() cast makes interpolation
+        # injection-proof.
         k_literal, ef_literal = int(k), int(ef)
         if k_literal <= 0 or ef_literal <= 0:
             raise ValueError("k and ef must be positive")
