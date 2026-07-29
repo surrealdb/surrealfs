@@ -25,8 +25,7 @@ from .args import (
     MvArgs,
     ReadBytesArgs,
     RmArgs,
-    SearchSemanticArgs,
-    SearchTextArgs,
+    SearchArgs,
     TailArgs,
     TouchArgs,
     WriteBytesArgs,
@@ -44,8 +43,9 @@ class ToolContext:
 
     Args:
         fs: The filesystem to operate on.
-        embed: Turns a query string into a vector. Required only by
-            ``search_semantic``; when omitted that tool is not offered.
+        embed: Turns a query string into a vector. Used only by ``search``, to
+            add a match-by-meaning arm to its ranking; when omitted that tool
+            stays full-text only.
     """
 
     fs: SurrealFs
@@ -138,18 +138,13 @@ async def rm(ctx: ToolContext, args: RmArgs) -> str:
     return f"Deleted {count} {noun} at {args.path}"
 
 
-async def search_text(ctx: ToolContext, args: SearchTextArgs) -> str:
-    hits = await ctx.fs.search_text(args.query, limit=args.limit)
+async def search(ctx: ToolContext, args: SearchArgs, *, semantic: bool = False) -> str:
+    # No embedder means no vector arm: full-text only, and never an error. The
+    # model cannot conjure an embedder by retrying, so failing here would just
+    # burn turns -- and under pydantic-ai it raised ModelRetry, which did exactly
+    # that until the retry budget ran out.
+    vector = await ctx.embed(args.query) if semantic and ctx.embed else None
+    hits = await ctx.fs.search(args.query, vector=vector, limit=args.limit)
     if not hits:
-        return f"No files contain {args.query!r}"
+        return f"Nothing matches {args.query!r}"
     return "\n".join(f"{h.path}\n    {h.snippet}" for h in hits)
-
-
-async def search_semantic(ctx: ToolContext, args: SearchSemanticArgs) -> str:
-    if ctx.embed is None:
-        raise SurrealFsError("Semantic search is not configured on this filesystem.")
-    vector = await ctx.embed(args.query)
-    hits = await ctx.fs.search_semantic(vector, k=args.limit)
-    if not hits:
-        return f"Nothing related to {args.query!r} has been indexed"
-    return "\n".join(f"{h.path} (distance {h.score:.4f})" for h in hits)

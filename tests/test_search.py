@@ -6,6 +6,8 @@ import math
 
 import pytest
 
+from surrealfs.fs import _rrf
+
 
 async def test_search_text_finds_and_ranks(fs):
     await fs.write_text("/a.md", "the lazy dog sleeps")
@@ -87,6 +89,53 @@ async def test_search_semantic_actually_uses_the_hnsw_index(fs):
         {"vector": _unit_vector(0)},
     )
     assert "KnnScan" in str(plan), f"KNN query is not index-backed: {plan}"
+
+
+async def test_search_semantic_carries_a_snippet(fs, db):
+    """A vector-only hit with no snippet renders as a bare path to the model."""
+    entry = await fs.write_text("/v.md", "invoicing and getting paid")
+    await db.query(
+        "UPDATE $id SET embedding = $v", {"id": entry.id, "v": _unit_vector(0)}
+    )
+    assert "invoicing" in (await fs.search_semantic(_unit_vector(0), k=1))[0].snippet
+
+
+def test_rrf_lets_agreement_beat_a_single_top_hit():
+    fused = _rrf(["text-only", "both", "x"], ["vector-only", "both", "y"])
+    assert next(iter(fused)) == "both"
+    assert set(fused) == {"text-only", "vector-only", "both", "x", "y"}
+
+
+def test_rrf_degrades_to_the_single_arm():
+    assert list(_rrf(["a", "b"], [])) == ["a", "b"]
+    assert _rrf() == {}
+
+
+async def test_search_fuses_both_arms(fs, db):
+    """The vector arm finds what shares no words with the query."""
+    text = await fs.write_text("/text.md", "the keyword appears here")
+    vector = await fs.write_text("/vector.md", "utterly different prose")
+    for entry, index in ((text, 5), (vector, 0)):
+        await db.query(
+            "UPDATE $id SET embedding = $v", {"id": entry.id, "v": _unit_vector(index)}
+        )
+
+    assert [h.path for h in await fs.search("keyword")] == ["/text.md"]
+
+    fused = await fs.search("keyword", vector=_unit_vector(0))
+    assert {h.path for h in fused} == {"/text.md", "/vector.md"}
+    # Fused scores, not arm scores: comparable, and every hit describes itself.
+    assert all(hit.score > 0 for hit in fused)
+    assert all(hit.snippet for hit in fused)
+
+
+async def test_search_respects_limit_across_both_arms(fs, db):
+    for i in range(4):
+        entry = await fs.write_text(f"/f{i}.md", "shared keyword")
+        await db.query(
+            "UPDATE $id SET embedding = $v", {"id": entry.id, "v": _unit_vector(i)}
+        )
+    assert len(await fs.search("keyword", vector=_unit_vector(0), limit=2)) == 2
 
 
 async def test_reindex_embeddings_only_touches_stale_rows(fs):

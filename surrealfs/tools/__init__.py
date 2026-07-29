@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 from typing import Any
 
@@ -36,7 +36,6 @@ class ToolSpec:
     name: str
     args_model: type[BaseModel]
     handler: Handler
-    requires_embedder: bool = False
 
     @cached_property
     def description(self) -> str:
@@ -68,32 +67,39 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("cp", _args.CpArgs, _handlers.cp),
     ToolSpec("mv", _args.MvArgs, _handlers.mv),
     ToolSpec("rm", _args.RmArgs, _handlers.rm),
-    ToolSpec("search_text", _args.SearchTextArgs, _handlers.search_text),
-    ToolSpec(
-        "search_semantic",
-        _args.SearchSemanticArgs,
-        _handlers.search_semantic,
-        requires_embedder=True,
-    ),
+    ToolSpec("search", _args.SearchArgs, _handlers.search),
+)
+
+# Same name, so the same `docs/search.md` describes both -- the description is
+# written to hold either way, and one tool the model always reaches for beats two
+# it has to choose between.
+_HYBRID_SEARCH = ToolSpec(
+    "search", _args.SearchArgs, partial(_handlers.search, semantic=True)
 )
 
 
 def select_tools(*, semantic: bool = False) -> tuple[ToolSpec, ...]:
     """The tools to expose.
 
-    ``search_semantic`` needs an embedding function, so it is left out unless
-    ``semantic=True`` — offering a model a tool that always errors is worse than
-    not offering it.
+    ``semantic=True`` lets `search` fuse vector results into its full-text
+    ranking. That needs a ``ToolContext.embed``; without one the tool is still
+    offered and still works, full-text only.
     """
-    if semantic:
+    if not semantic:
         return TOOLS
-    return tuple(spec for spec in TOOLS if not spec.requires_embedder)
+    return tuple(_HYBRID_SEARCH if spec.name == "search" else spec for spec in TOOLS)
 
 
-def get_tool(name: str) -> ToolSpec:
-    """Look up a tool by name."""
-    for spec in TOOLS:
+def get_tool(name: str, *, semantic: bool = False) -> ToolSpec:
+    """Look up a tool by name.
+
+    Pass the same ``semantic`` you passed when listing the tools: it selects
+    which `search` the model gets, and advertising the hybrid one while
+    dispatching to the full-text one is a silent downgrade.
+    """
+    specs = select_tools(semantic=semantic)
+    for spec in specs:
         if spec.name == name:
             return spec
-    known = ", ".join(spec.name for spec in TOOLS)
+    known = ", ".join(spec.name for spec in specs)
     raise KeyError(f"Unknown tool {name!r}. Available tools: {known}")

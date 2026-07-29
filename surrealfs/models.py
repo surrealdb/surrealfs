@@ -67,7 +67,7 @@ class FileEntry:
 
 @dataclass(frozen=True, slots=True)
 class SearchHit:
-    """One result from :meth:`SurrealFs.search_text` or ``search_semantic``."""
+    """One result from :meth:`SurrealFs.search` or either arm it fuses."""
 
     entry: FileEntry
     score: float

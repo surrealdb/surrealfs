@@ -89,9 +89,9 @@ def build_fs_toolset(
     """Build a ``FunctionToolset`` exposing the filesystem to an agent.
 
     Args:
-        semantic: Also offer ``search_semantic``. Requires the run's
-            :class:`~surrealfs.tools.ToolContext` to carry an ``embed``
-            function, so it is off by default.
+        semantic: Let ``search`` fuse match-by-meaning results into its ranking.
+            Requires the run's :class:`~surrealfs.tools.ToolContext` to carry an
+            ``embed`` function, so it is off by default.
         get_context: Extract a ``ToolContext`` from the agent's deps. The
             default accepts a ``ToolContext`` directly, or any deps object with
             an ``.fs_context`` attribute.

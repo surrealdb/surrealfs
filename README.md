@@ -87,7 +87,7 @@ pre-formatted strings. Build whatever integration you like on top.
 | Read | `read_text` `read_bytes` `tail` `ls` `glob` `stat` `exists` |
 | Write | `write_text` `write_bytes` `edit` `touch` `mkdir` |
 | Organise | `mv` `cp` `rm` |
-| Search | `search_text` `search_semantic` `reindex_embeddings` |
+| Search | `search` `search_text` `search_semantic` `reindex_embeddings` |
 
 ### 2. pydantic-ai
 
@@ -136,13 +136,19 @@ the provider:
 
 ```python
 count = await fs.reindex_embeddings(embed, version="openai:text-embedding-3-small")
-hits = await fs.search_semantic(await embed("how do I get paid"), k=5)
+hits = await fs.search("how do I get paid", vector=await embed("how do I get paid"))
 ```
 
+`fs.search` runs both arms and fuses them by rank — full-text scores are term
+counts and vector scores are distances, so there is nothing sane to normalise.
+Without a `vector` it is full-text only. `search_text` and `search_semantic`
+remain available if you want one arm on its own.
+
 Re-running the indexer is cheap: it skips files whose content has not changed
-since they were embedded. To offer it as a tool, pass the embedder in the
-context and opt in — `build_fs_toolset(semantic=True)` with
-`ToolContext(fs=fs, embed=embed)`. See `examples/semantic_search.py`.
+since they were embedded. Agents get one `search` tool either way; pass the
+embedder in the context and opt in to make it hybrid —
+`build_fs_toolset(semantic=True)` with `ToolContext(fs=fs, embed=embed)`. See
+`examples/semantic_search.py`.
 
 An OpenAI embedder ships in `surrealfs.embed` (`make_embedder`,
 `text-embedding-3-small`, the 1536 dimensions the HNSW index expects), along with

@@ -74,20 +74,6 @@ STATUS = {
 }
 
 
-def rrf(*ranked: list[str], k: int = 60) -> list[str]:
-    """Reciprocal rank fusion: merge ranked path lists into one ranking.
-
-    The two search arms produce incomparable numbers -- full-text scores are term
-    counts (higher is better), semantic scores are cosine distances (lower is
-    better). Fusing on rank instead of score sidesteps normalising them.
-    """
-    scores: dict[str, float] = {}
-    for lst in ranked:
-        for rank, path in enumerate(lst):
-            scores[path] = scores.get(path, 0.0) + 1 / (k + rank)
-    return sorted(scores, key=lambda p: -scores[p])
-
-
 def _line(payload: dict[str, Any]) -> bytes:
     """One NDJSON frame for the chat stream."""
     return (json.dumps(payload) + "\n").encode()
@@ -108,12 +94,7 @@ def _stream_event(event: Any) -> dict[str, Any] | None:
 
 
 def demo() -> None:
-    """Self-check: a path ranked mid-list by both arms beats one that tops only one."""
-    both = rrf(["a", "both", "b"], ["c", "both", "d"])
-    assert both[0] == "both", both
-    assert rrf(["x"], []) == ["x"]
-    assert rrf() == []
-
+    """Self-check: the chat stream maps agent events to what the page renders."""
     delta = PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi"))
     assert _stream_event(delta) == {"delta": "hi"}
     start = PartStartEvent(index=0, part=TextPart(content="hi"))
@@ -224,24 +205,10 @@ class Browser:
         if not query:
             return JSONResponse({"hybrid": self.embed is not None, "results": []})
 
-        text_hits = await self.fs.search_text(query, limit=20)
-        by_path = {h.path: h for h in text_hits}
-        ranked = [[h.path for h in text_hits]]
-
-        vector = await self._embed(query)
-        if vector is not None:
-            vector_hits = await self.fs.search_semantic(vector, k=10)
-            ranked.append([h.path for h in vector_hits])
-            for hit in vector_hits:
-                by_path.setdefault(hit.path, hit)
-
-        results = [
-            {
-                **_entry_json(by_path[path].entry),
-                "snippet": by_path[path].snippet,
-            }
-            for path in rrf(*ranked)
-        ]
+        # The fusion lives in the library, so the agent's `search` tool and this
+        # box rank identically.
+        hits = await self.fs.search(query, vector=await self._embed(query), limit=20)
+        results = [{**_entry_json(hit.entry), "snippet": hit.snippet} for hit in hits]
         return JSONResponse({"hybrid": self.embed is not None, "results": results})
 
     async def chat(self, request: Request) -> Response:
@@ -262,7 +229,9 @@ class Browser:
             try:
                 async with self.agent.run_stream_events(
                     message,
-                    deps=ToolContext(fs=self.fs),
+                    # Read `self.embed` per turn: it is set to None if the
+                    # provider ever fails, and the tool must follow.
+                    deps=ToolContext(fs=self.fs, embed=self.embed),
                     message_history=self.history,
                 ) as events:
                     async for event in events:
@@ -355,7 +324,12 @@ async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
     if embed is None:
         print("OPENAI_API_KEY unset -- search will be full-text only.")
 
-    agent = build_chat_agent() if os.environ.get("ANTHROPIC_API_KEY") else None
+    # This process has an embedder, so hand the agent the hybrid `search` too.
+    agent = (
+        build_chat_agent(semantic=embed is not None)
+        if os.environ.get("ANTHROPIC_API_KEY")
+        else None
+    )
     if agent is None:
         print("ANTHROPIC_API_KEY unset -- the chat panel will refuse to send.")
 

@@ -33,8 +33,9 @@ def tool_definitions(
     Args:
         flavor: ``"anthropic"`` produces ``{name, description, input_schema}``;
             ``"openai"`` produces ``{type: "function", function: {...}}``.
-        semantic: Include ``search_semantic``. Only set this if the matching
-            :class:`~surrealfs.tools.ToolContext` has an ``embed`` function.
+        semantic: Let ``search`` fuse in match-by-meaning results. Only set this
+            if the matching :class:`~surrealfs.tools.ToolContext` has an
+            ``embed`` function.
     """
     specs = select_tools(semantic=semantic)
     if flavor == "anthropic":
@@ -61,15 +62,20 @@ def tool_definitions(
     raise ValueError(f"Unknown flavor {flavor!r}; expected 'anthropic' or 'openai'")
 
 
-async def call_tool(ctx: ToolContext, name: str, arguments: dict[str, Any]) -> str:
+async def call_tool(
+    ctx: ToolContext, name: str, arguments: dict[str, Any], *, semantic: bool = False
+) -> str:
     """Run a tool by name and return its result as text.
 
     Errors are returned as text rather than raised, since a tool-calling loop
     needs to hand the model something it can recover from. Genuine bugs (a
     dropped connection, a schema mismatch) still propagate.
+
+    Pass the same ``semantic`` used for :func:`tool_definitions`, or `search`
+    quietly runs full-text after being advertised as hybrid.
     """
     try:
-        spec = get_tool(name)
+        spec = get_tool(name, semantic=semantic)
     except KeyError as exc:
         return f"Error: {exc}"
     try:

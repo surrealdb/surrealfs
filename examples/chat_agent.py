@@ -42,7 +42,9 @@ search before you create — the note you want may already exist.
 
 
 def build_chat_agent(
-    model: str = "anthropic:claude-opus-5", enable_web_tools: bool = True
+    model: str = "anthropic:claude-opus-5",
+    enable_web_tools: bool = True,
+    semantic: bool = False,
 ) -> Agent[ToolContext, str]:
     """Build the agent.
 
@@ -50,10 +52,13 @@ def build_chat_agent(
     strings against its own list of known models, so a plain ``claude-opus-5``
     raises ``UserError: Unknown model``. The prefix selects the provider
     explicitly and passes the ID straight through.
+
+    ``semantic=True`` makes the `search` tool hybrid, which only pays off if the
+    deps carry an embedder: ``ToolContext(fs=fs, embed=embed)``.
     """
     return Agent(
         model,
-        toolsets=[build_fs_toolset()],
+        toolsets=[build_fs_toolset(semantic=semantic)],
         instructions=INSTRUCTIONS,
         deps_type=ToolContext,
         # Server-side tools are `capabilities` in pydantic-ai 2.x (`builtin_tools`

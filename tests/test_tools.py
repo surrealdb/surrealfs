@@ -24,11 +24,13 @@ def test_tool_names_are_unique():
     assert len(names) == len(set(names))
 
 
-def test_semantic_search_is_opt_in():
-    """A tool that always errors is worse than one that is not offered."""
+def test_search_is_one_tool_either_way():
+    """`semantic` changes what `search` does, not which tools exist."""
     default = {spec.name for spec in select_tools()}
-    assert "search_semantic" not in default
-    assert "search_semantic" in {spec.name for spec in select_tools(semantic=True)}
+    hybrid = {spec.name for spec in select_tools(semantic=True)}
+    assert default == hybrid
+    assert "search" in default
+    assert not {"search_text", "search_semantic"} & default
 
 
 def test_surfaces_expose_the_same_tools():
@@ -76,7 +78,7 @@ async def test_tools_round_trip_through_dispatch(ctx):
     assert "/notes/deep/a.md" in await call_tool(
         ctx, "glob", {"pattern": "/notes/**/*.md"}
     )
-    assert "/notes/deep/a.md" in await call_tool(ctx, "search_text", {"query": "bye"})
+    assert "/notes/deep/a.md" in await call_tool(ctx, "search", {"query": "bye"})
     assert "Moved" in await call_tool(ctx, "mv", {"src": "/notes", "dst": "/n2"})
     assert "Deleted 3 items" in await call_tool(
         ctx, "rm", {"path": "/n2", "recursive": True}
@@ -108,24 +110,29 @@ async def test_dispatch_returns_recoverable_errors_as_text(ctx):
     assert (await call_tool(ctx, "nosuchtool", {})).startswith("Error:")
 
 
-async def test_semantic_tool_without_an_embedder_reports_clearly(ctx):
-    result = await call_tool(ctx, "search_semantic", {"query": "anything"})
-    assert result.startswith("Error:")
-    assert "not configured" in result
+async def test_hybrid_search_without_an_embedder_degrades_quietly(fs):
+    """No embedder is not an error: the model cannot fix that by retrying."""
+    await fs.write_text("/target.md", "the answer")
+    ctx = ToolContext(fs=fs)  # semantic=True, but nothing to embed with
+    result = await call_tool(ctx, "search", {"query": "answer"}, semantic=True)
+    assert not result.startswith("Error:")
+    assert "/target.md" in result
 
 
-async def test_semantic_tool_with_an_embedder(fs, db):
+async def test_hybrid_search_finds_what_words_cannot(fs, db):
     async def embed(text: str) -> list[float]:
         vector = [0.0] * 1536
         vector[3] = 1.0
         return vector
 
-    entry = await fs.write_text("/target.md", "the answer")
+    entry = await fs.write_text("/target.md", "invoicing and getting paid")
     await db.query(
         "UPDATE $id SET embedding = $v", {"id": entry.id, "v": await embed("")}
     )
     ctx = ToolContext(fs=fs, embed=embed)
-    assert "/target.md" in await call_tool(ctx, "search_semantic", {"query": "answer"})
+    args = {"query": "remuneration"}  # shares no words with the file
+    assert "/target.md" not in await call_tool(ctx, "search", args)
+    assert "/target.md" in await call_tool(ctx, "search", args, semantic=True)
 
 
 async def test_pydantic_ai_tools_run(ctx):

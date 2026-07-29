@@ -19,8 +19,7 @@ __all__ = [
     "MvArgs",
     "ReadBytesArgs",
     "RmArgs",
-    "SearchSemanticArgs",
-    "SearchTextArgs",
+    "SearchArgs",
     "TailArgs",
     "TouchArgs",
     "WriteBytesArgs",
@@ -106,13 +105,10 @@ class RmArgs(_Args):
     recursive: bool = Field(False, description="Delete a folder and its contents")
 
 
-class SearchTextArgs(_Args):
-    query: str = Field(..., description="Words to search for", min_length=1)
-    limit: int = Field(20, description="Maximum results", ge=1, le=100)
-
-
-class SearchSemanticArgs(_Args):
+class SearchArgs(_Args):
     query: str = Field(
-        ..., description="What you are looking for, in plain language", min_length=1
+        ...,
+        description="What you are looking for, in words or plain language",
+        min_length=1,
     )
-    limit: int = Field(10, description="Maximum results", ge=1, le=100)
+    limit: int = Field(20, description="Maximum results", ge=1, le=100)

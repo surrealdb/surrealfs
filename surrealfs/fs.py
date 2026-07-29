@@ -12,6 +12,7 @@ import asyncio
 import difflib
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from typing import Any
 
 from surrealdb import RecordID
@@ -575,16 +576,52 @@ class SurrealFs:
         if k_literal <= 0 or ef_literal <= 0:
             raise ValueError("k and ef must be positive")
         rows = await self._query(
-            f"SELECT {_FIELDS}, vector::distance::knn() AS distance "
+            f"SELECT {_FIELDS_WITH_CONTENT}, vector::distance::knn() AS distance "
             f"FROM {self.table} "
             f"WHERE embedding <|{k_literal},{ef_literal}|> $vector "
             "ORDER BY distance ASC",
             {"vector": list(vector)},
         )
-        return [
-            SearchHit(entry=FileEntry.from_row(row), score=float(row["distance"]))
-            for row in (rows or [])
-        ]
+        hits: list[SearchHit] = []
+        for row in rows or []:
+            entry = FileEntry.from_row(row)
+            hits.append(
+                SearchHit(
+                    entry=entry,
+                    score=float(row["distance"]),
+                    # A match by meaning shares no terms with the query, so
+                    # there is nothing to centre a snippet on: show the opening.
+                    snippet=_snippet(entry.content or "", ()),
+                )
+            )
+        return hits
+
+    async def search(
+        self, query: str, *, vector: Sequence[float] | None = None, limit: int = 20
+    ) -> list[SearchHit]:
+        """Full-text search, with vector results fused in when given a vector.
+
+        Takes a pre-computed embedding for the same reason :meth:`search_semantic`
+        does -- the library never calls an embedding model. Without one this is
+        :meth:`search_text` under another name.
+
+        ``score`` on the returned hits is the fused rank score, not either arm's
+        own score, so it is comparable across the whole result set.
+        """
+        text_hits = await self.search_text(query, limit=limit)
+        by_path = {hit.path: hit for hit in text_hits}
+        ranked = [[hit.path for hit in text_hits]]
+
+        if vector is not None:
+            vector_hits = await self.search_semantic(vector, k=limit)
+            ranked.append([hit.path for hit in vector_hits])
+            for hit in vector_hits:
+                # A path both arms found keeps the text hit: its snippet is
+                # centred on the query terms, which the vector arm cannot do.
+                by_path.setdefault(hit.path, hit)
+
+        fused = list(_rrf(*ranked).items())[:limit]
+        return [replace(by_path[path], score=score) for path, score in fused]
 
     async def reindex_embeddings(
         self,
@@ -674,6 +711,20 @@ def _unified_diff(before: str, after: str, path: str) -> str:
         lineterm="",
     )
     return "\n".join(diff) or f"(no textual change in {path})"
+
+
+def _rrf(*ranked: Sequence[str], k: int = 60) -> dict[str, float]:
+    """Reciprocal rank fusion: merge ranked path lists into one ranking.
+
+    The two search arms produce incomparable numbers -- full-text scores are term
+    counts (higher is better), semantic scores are cosine distances (lower is
+    better). Fusing on rank instead of score sidesteps normalising them.
+    """
+    scores: dict[str, float] = {}
+    for arm in ranked:
+        for rank, path in enumerate(arm):
+            scores[path] = scores.get(path, 0.0) + 1 / (k + rank)
+    return dict(sorted(scores.items(), key=lambda kv: -kv[1]))
 
 
 def _snippet(content: str, terms: Sequence[str], *, width: int = 160) -> str:
