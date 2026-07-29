@@ -1,5 +1,3 @@
-target/
-
 # Python-generated files
 __pycache__/
 *.py[oc]
@@ -19,3 +17,7 @@ wheels/
 
 # DB
 /demo-db
+
+# Test caches
+.pytest_cache/
+.ruff_cache/

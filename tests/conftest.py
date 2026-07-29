@@ -1,0 +1,108 @@
+"""Test fixtures.
+
+These tests need a real SurrealDB **3.x** server. The embedded engine bundled
+with the Python SDK (``mem://``) is a 2.0.0 core and supports neither COMPUTED
+fields nor FULLTEXT indexes, both of which the schema depends on — so we start a
+throwaway in-memory server instead.
+
+Set ``SURREALFS_TEST_URL`` to reuse a server you already have running.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import os
+import shutil
+import socket
+import subprocess
+import time
+
+import pytest
+from surrealdb import AsyncSurreal
+
+from surrealfs import SurrealFs, apply_schema
+from surrealfs.tools import ToolContext
+
+ROOT = {"username": "root", "password": "root"}
+
+
+def _free_port() -> int:
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@pytest.fixture(scope="session")
+def surreal_url() -> str:
+    """URL of a running SurrealDB 3.x server, starting one if needed."""
+    if url := os.environ.get("SURREALFS_TEST_URL"):
+        return url
+
+    binary = shutil.which("surreal")
+    if binary is None:
+        pytest.skip(
+            "the `surreal` binary is not on PATH; install SurrealDB 3.x or set "
+            "SURREALFS_TEST_URL to point at a running server"
+        )
+
+    port = _free_port()
+    process = subprocess.Popen(
+        [binary, "start", "--allow-all", "-u", "root", "-p", "root",
+         "--bind", f"127.0.0.1:{port}", "memory"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            pytest.fail("surreal server exited during startup")
+        with contextlib.suppress(OSError), socket.create_connection(
+            ("127.0.0.1", port), timeout=0.5
+        ):
+            break
+        time.sleep(0.1)
+    else:
+        process.kill()
+        pytest.fail("surreal server did not start within 30s")
+
+    yield f"ws://127.0.0.1:{port}/rpc"
+
+    process.terminate()
+    with contextlib.suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=10)
+
+
+@pytest.fixture(scope="session")
+def event_loop():
+    loop = asyncio.new_event_loop()
+    yield loop
+    loop.close()
+
+
+@pytest.fixture
+async def db(surreal_url, request):
+    """A connection to a namespace unique to this test, with the schema applied."""
+    connection = AsyncSurreal(surreal_url)
+    await connection.signin(ROOT)
+    # A fresh namespace per test keeps them isolated and order-independent.
+    name = "t" + str(abs(hash(request.node.nodeid)))[:12]
+    await connection.query(
+        f"REMOVE NAMESPACE IF EXISTS {name}; DEFINE NAMESPACE {name};"
+    )
+    await connection.use(name, "test")
+    await apply_schema(connection)
+    yield connection
+    with contextlib.suppress(Exception):
+        await connection.query(f"REMOVE NAMESPACE IF EXISTS {name}")
+    await connection.close()
+
+
+@pytest.fixture
+def fs(db) -> SurrealFs:
+    return SurrealFs(db)
+
+
+@pytest.fixture
+def ctx(fs) -> ToolContext:
+    return ToolContext(fs=fs)
