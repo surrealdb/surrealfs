@@ -1,148 +1,122 @@
-AGENTS PLAYBOOK (surrealfs)
-Version: 2026-01-26
+# AGENTS.md
 
-Purpose
-- Field guide for coding agents in this repo: commands, style, guardrails, and Cursor rules. Treat as the source of truth when automating work.
+Guidance for agents working on this repository.
 
-Repository Snapshot
-- Language: Rust (edition 2024); single crate with library + async demo bin.
-- Key deps: surrealdb (=2.4.1; features kv-mem, kv-rocksdb), tokio, regex, reqwest 0.12 (rustls), serde, thiserror, similar.
-- Demo REPL in src/main.rs; primary API in src/lib.rs. No workspace members. No CI; run checks locally.
-- Justfile present (wraps cargo run). No Copilot instructions. Cursor rules live in .cursor/rules/.
+## What this is
 
-Build / Lint / Test
-- Check: `cargo check`
-- Format: `cargo fmt`
-- Lint (opt-in): `cargo clippy -- -D warnings`
-- Full test suite: `cargo test`
-- Single test: `cargo test <name>` (e.g., `cargo test cd_and_pwd` or `cargo test ls_and_grep_recursive`)
-- Run demo: `cargo run` or `just run` (loads .env if present)
-- Clean (rare): `cargo clean` (prefer incremental builds)
+`surrealfs` is a pure-Python library: a SurrealDB `file` table schema plus three
+ways to expose it to an AI agent. There is no Rust here any more — the crate,
+the REPL, and the `surrealfs_py` pyo3 extension were removed in the 0.2 refactor
+(see commit history for the last version that had them).
 
-Runtime / Environment
-- Tokio multi-thread runtime; avoid blocking std IO in async contexts.
-- Backend selection via `SURREALFS_REMOTE`:
-  - Unset: RocksDB at ./demo-db (auto-created).
-  - Set: remote ws://127.0.0.1:8000 with auth root/root, ns=surrealfs, db=demo.
-- CLI handles prints and flushes; library stays silent (no logging by default).
-- `.env` optional; only read by demo run wrapper.
+## Layout
 
-Source Layout
-- src/lib.rs: SurrealFs API (ls, cat, tail, nl, grep, touch, mkdir, write_file, edit, cp, cd, pwd), path helpers, error types, public structs.
-- src/main.rs: REPL loop, cwd tracking, arg parsing, curl command, ls flags, cd/pwd handling.
-- .cursor/rules/: surrealql.mdc and surrealdb-rust.mdc (must honor). No .github/copilot-instructions.md.
-- Justfile: shortcut `just run`.
+```
+surrealfs/
+  fs.py             SurrealFs — the async core. Everything else wraps this.
+  models.py         FileEntry, SearchHit
+  errors.py         exception hierarchy (dual-inherits builtin OSErrors)
+  paths.py          normalisation + glob->regex
+  embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
+  schema/           file.surql, user.surql, apply_schema()
+  tools/            args.py, handlers.py, registry, docs/*.md
+  integrations/     pydantic_ai.py, json_tools.py
+examples/           chat_agent.py, anthropic_loop.py, semantic_search.py
+tests/
+```
 
-Imports / Modules
-- Order imports: std :: third-party :: crate. Keep `use crate::{...}` small and explicit.
-- Avoid glob imports; remove unused imports to keep builds warning-free.
+## Build / test
 
-Formatting / Style
-- Use rustfmt defaults (~100 cols). Prefer early returns over deep nesting when clearer.
-- Comments only for non-obvious intent. Default to ASCII unless the file already uses non-ASCII.
-- Keep control flow straightforward; avoid clever macro indirection.
+```bash
+just db      # SurrealDB 3.x on :8000 (in-memory)
+just test    # pytest; starts its own throwaway server if needed
+just check   # ruff + pytest
+```
 
-Naming / Types
-- Functions snake_case; structs/enums PascalCase; constants SCREAMING_SNAKE. CLI commands mirror Unix names (ls, cat, etc.).
-- Public structs (Entry, NumberedLine, GrepMatch) keep serde-friendly snake_case fields.
-- Use `type Result<T> = std::result::Result<T, FsError>` throughout.
-- Prefer `&str`/`String` internally; path logic lives in helpers (PathBuf rarely needed outside them).
+`SURREALFS_TEST_URL` reuses an already-running server.
 
-Error Handling
-- FsError variants: NotFound, AlreadyExists, NotAFile, NotADirectory, InvalidPath, Http, Surreal.
-- Map external errors explicitly: reqwest -> FsError::Http in CLI; surrealdb errors via From. Provide concise context (path/status), no panics for recoverable cases.
-- CLI should surface help errors via help_error() with usage when args are invalid.
+## Non-obvious things that will bite you
 
-Async Patterns
-- Everything async; await directly. Avoid blocking IO; use tokio IO (BufReader for stdin).
-- Prefer in-line execution; spawn tasks only when concurrency is required.
-- Maintain REPL responsiveness; flush prompts to stdout explicitly.
+**A SurrealDB 3.x server is required, and `mem://` will not do.** `COMPUTED`
+fields and `FULLTEXT` indexes do not exist in 2.x. The embedded engine in
+`surrealdb[embedded]` 3.0.0a4 does parse them, but its 3.0.0-alpha core returns
+`null` for computed fields on any **indexed** read — so `path` and `is_folder`
+come back empty from `ls`, path resolution, and full-text search, while a plain
+table scan is fine. Isolated to the engine: the same SDK against a 3.2.x server
+is correct. Tests use a `surreal` subprocess; re-check `mem://` when a newer
+`surrealdb-embedded` ships.
 
-Path & Filesystem Rules
-- Always normalize via `normalize_path` + `resolve_relative`; forbid escaping root (`..` cannot climb past `/`).
-- `/` is never a file; root ops either noop or return NotAFile/NotADirectory appropriately.
-- Ensure parent dirs exist before writes/touch/mkdir; cd targets must exist. cp/edit respect file vs dir and trailing semantics.
+**`SurrealFs._query` goes through `query_raw()`, not `query()`.** The envelope is
+what carries each statement's error *kind*, which is how we tell a retryable
+transaction conflict from a real failure. It is also version-tolerant: on
+surrealdb-py 2.x, `query()` returned only the *first* statement's result and
+silently swallowed later failures (`LET $x = 1; THROW 'boom'` returned `None`).
+On 3.x `query()` returns one entry per statement and raises — so anything
+outside the library reading `query()` results must index per statement first,
+which is what bit `test_parent_key_follows_a_move`.
 
-SurrealDB Usage
-- Build clients with Surreal::new::<RocksDb>/Mem or Any (remote). Immediately set namespace/db. Embedded needs no auth; remote requires Root signin (root/root).
-- Default table `fs_entry`; `with_table` exists for alternates. Handle missing entries gracefully (ls on `/` may return empty vec).
-- Prefer parameter binding; never interpolate user input into queries.
+**`path` is COMPUTED, so it cannot be indexed.** `WHERE path = $p` is a table
+scan that recomputes every row's ancestry. Resolve paths by walking segments
+through the `(parent, filename)` index instead — `SurrealFs._resolve` does this
+in one round trip with chained `LET`s.
 
-Cursor Rule Highlights: SurrealQL (.cursor/rules/surrealql.mdc)
-- SurrealQL is not ANSI SQL. Record IDs use `table:id`; relationships use `->`, `<-`, `<->`.
-- Use parameterized selects with `type::table($table)` and user bindings; avoid raw concatenation.
-- Update modes: replace (default), MERGE, PATCH. Prefer MERGE/PATCH to preserve existing data.
-- Use RELATE to create graph edges. Favor specific record IDs when known. Live queries exist but are unused here.
+**Lookups go through `parent_key`, not `parent`.** A composite UNIQUE index
+skips any row where one indexed field is NONE, so indexing `(parent, filename)`
+would leave every root-level file unprotected — two `/notes.md` would both be
+accepted. `parent_key` is a stored `VALUE` field mirroring `parent` with the root
+spelled `'root'`. It cannot be COMPUTED: SurrealDB rejects indexes on computed
+fields outright ("Computed fields cannot be indexed"). `_parent_key()` in
+`fs.py` must keep matching the schema's `VALUE` clause.
 
-Cursor Rule Highlights: SurrealDB Rust (.cursor/rules/surrealdb-rust.mdc)
-- Remote example: Any client to ws://localhost:8000, signin Root { username: "root", password: "root" }, then use_ns/use_db.
-- Embedded example: `Surreal::new::<Mem>(()).await?; db.use_ns("namespace").use_db("database").await?;`.
-- Schema snippet SCHEMA_SQL shows overwrite fields/time defaults; use RecordId helpers. PatchOp supports replace/remove (e.g., time.deleted_at). Chrono datetimes serialize via helpers into surrealdb::sql::Datetime.
+**`child_unique` is ordered `(parent_key, filename)` on purpose.** The reverse
+order still enforces uniqueness but cannot serve `WHERE parent_key = $k`, which
+is the hottest query here (`ls`, path resolution, recursive `rm`/`cp`). Verified
+with `EXPLAIN`; do not "tidy" the field order.
 
-HTTP / Curl Behavior
-- Default method GET; `-d` without `-X` implies POST. Follow redirects only with `-L`.
-- Headers parsed as `Key: Value`. Non-2xx -> FsError::Http with status/message; print body when appropriate.
+**In `_resolve`, a missing intermediate segment must dead-end.** The descent
+chains `LET $k = <string>$p`, and `<string>NONE` is the literal `"NONE"`, which
+matches no row. Substituting `'root'` as a fallback would make `/ghost/a.md`
+resolve to `/a.md`.
 
-CLI Extension Tips
-- Adding commands: update REPL match arms, help text, and `resolve_cli_path` to honor cwd.
-- Keep arg parsing simple; on invalid args, return help_error() and print usage.
-- Preserve output formatting: ls -h uses base 1024 sizes; nl right-align numbers width 4.
+**FTS scoring is broken upstream.** On 3.2.x `search::score` returns `0.0`,
+`search::highlight` returns the content unchanged, and `search::offsets` returns
+`null`. The match operator itself works and is index-backed, so `search_text`
+matches in SurrealQL and then ranks and snippets in Python. Revisit if a later
+release fixes the functions.
 
-Testing Guidance
-- Tests live in src/lib.rs; use in-memory engine `Surreal::new::<Mem>(())` with ns/db "test". Avoid network.
-- Exercise library functions directly rather than REPL stdin parsing for behavior coverage.
-- Keep tests deterministic; avoid ambient time/env dependence unless explicitly set. Example targeted test: `cargo test ls_and_grep_recursive`.
+**HNSW needs `<|k,ef|>` with literal integers.** `<|k,COSINE|>` compiles to a
+brute-force `KnnTopK` over a table scan and ignores the index. And `k`/`ef` must
+be *literals*: binding them as parameters looks fine — it parses and returns the
+right rows — but the planner silently drops to a brute-force scan. Confirmed with
+`EXPLAIN` on both engines. They are interpolated after an `int()` cast.
 
-Tooling / CI
-- No enforced CI. Before commits run `cargo fmt && cargo test`; optionally add `cargo clippy -- -D warnings`.
-- If introducing clippy config or other tools, document commands here and treat warnings as errors for consistency.
+**`touch` must write `content = ""`, not NONE.** `is_folder` is computed as "no
+content, no bytes, no symlink", so a NONE-content row comes back as a directory.
 
-Security / Secrets
-- No real secrets tracked. Demo remote creds root/root only; do not commit real credentials or tokens. Prefer env vars for integrations.
-- Do not write secrets to repo; scrub outputs that could leak sensitive data.
+**`rm` is a hard DELETE.** Soft-deleting via `deleted_at` cannot work: the
+UNIQUE index on `(parent, filename)` means a tombstone permanently blocks
+recreating a file with that name.
 
-Performance Notes
-- Surreal queries are simple create/select/update; no pagination yet—consider streaming if large results appear.
-- Recursive ls uses DFS stack; be mindful of deep trees (no cycles expected). Avoid unnecessary cloning of large strings.
+**Embedding staleness keys on `embedded_hash`, not `embedded_at`.** `updated_at`
+has `VALUE time::now()`, so it is bumped by *every* write including the
+indexer's own — a timestamp comparison marks every row stale forever and
+`reindex_embeddings` never terminates.
 
-Dependency Hygiene
-- Maintain pinned versions; if bumping surrealdb/reqwest, ensure features (kv-mem, kv-rocksdb, rustls) remain correct.
-- After `cargo update -p <crate>`, re-check imports/types in main.rs and lib.rs for breaking changes.
+**Transaction conflicts are expected and retried.** The `evt_file_hash` event
+updates a row shortly after its content changes, so writing twice in quick
+succession races it. `_query` retries anything the store marks retryable.
 
-Release / Versioning
-- Crate version 0.1.0. No formal release process; tag manually if needed.
+## Conventions
 
-Behavioral Guardrails
-- Avoid destructive git commands; never reset user changes. Do not amend commits unless explicitly asked.
-- Keep outputs concise; library avoids prints, CLI owns stdout/stderr. Stick to ASCII unless file already uses otherwise.
-- Honor cwd semantics and path resolvers for all file operations.
-
-Git / Workflow
-- Assume worktree may be dirty; never revert user edits. Stage only relevant changes; avoid force pushes.
-- Respect import ordering and rustfmt before commits. Keep diffs minimal; do not auto-format unrelated files.
-- When adding tests, prefer focused cases in src/lib.rs using Mem engine and ns/db "test".
-
-Logging / IO
-- Library should stay quiet; CLI handles user-facing output. Avoid println! in lib except tests.
-- Flush stdout after prompts to keep REPL usable. Use stderr for errors in CLI paths when needed.
-
-Examples / Snippets
-- Embedded client:
-  ```rust
-  let db = Surreal::new::<surrealdb::engine::local::Mem>(()).await?;
-  db.use_ns("demo").use_db("demo").await?;
-  let fs = SurrealFs::new(db);
-  ```
-- Run REPL against remote: `SURREALFS_REMOTE=1 cargo run`
-- Single test run: `cargo test ls_and_grep_recursive`
-
-Common Pitfalls
-- Forgetting to set namespace/database on Surreal connection -> runtime errors.
-- Allowing `..` to escape root -> reject via normalize_path.
-- Treating `/` like a file -> should error/ignore appropriately.
-- curl without -o/-O prints body; may be large. Missing flush on prompts hides REPL prompt; always flush stdout.
-
-Help / Docs
-- REPL help lists commands/flags; update when adding features. Keep this file current with new commands/dependencies/tooling.
-
-End of AGENTS.md
+- Async throughout. The library never owns a connection — the caller passes a
+  connected `AsyncSurreal` handle.
+- No working directory. Every path is absolute; `cd`/`pwd` do not exist.
+- The core returns dataclasses; only `tools/handlers.py` formats strings for a
+  model.
+- Adding a tool means one entry in `surrealfs/tools/__init__.py`, an args model,
+  a handler, and a `docs/<kebab-name>.md`. Both integration surfaces pick it up
+  automatically, and `tests/test_tools.py` asserts they stay in sync.
+- Tool descriptions live in markdown, not docstrings. They are prompt text —
+  write them for a model that has never seen this filesystem.
+- Bind every value with parameters. The only interpolation is the table name
+  (validated as an identifier) and KNN's `k`/`ef` (cast to `int`).
