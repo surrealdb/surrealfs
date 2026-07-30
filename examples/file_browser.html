@@ -314,6 +314,24 @@ function make(tag, props = {}, ...kids) {
   return node;
 }
 
+// The only way markdown from the server reaches the DOM. It is rendered with
+// html=False so raw HTML arrives escaped, but the sink does not get to depend on
+// that: parse inert, drop anything executable, then adopt the nodes.
+const UNSAFE_URL = /^\s*(?:javascript|vbscript|data):/i;
+function setMarkdown(el, html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  for (const node of doc.querySelectorAll('script,style,iframe,object,embed,link,meta,base,form')) node.remove();
+  for (const node of doc.querySelectorAll('*')) {
+    for (const { name, value } of [...node.attributes]) {
+      const url = /^(?:href|src|xlink:href|formaction|action|srcset)$/i.test(name);
+      // data:image is what markdown-it itself permits for inline images.
+      if (name.toLowerCase().startsWith('on')
+        || (url && UNSAFE_URL.test(value) && !/^\s*data:image\//i.test(value))) node.removeAttribute(name);
+    }
+  }
+  el.replaceChildren(...doc.body.childNodes);
+}
+
 async function api(url, options) {
   const res = await fetch(url, options);
   if (!res.ok) {
@@ -472,7 +490,9 @@ async function renderViewer() {
   } else if (ct === 'text/markdown') {
     const html = await api(`/api/markdown?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
     view.className = 'pad';
-    view.replaceChildren(make('div', { className: 'md', innerHTML: html }));
+    const pane = make('div', { className: 'md' });
+    setMarkdown(pane, html);
+    view.replaceChildren(pane);
   } else if (ct === 'text/html') {
     // No allow-same-origin: the frame gets an opaque origin and cannot reach
     // this page. /raw also sends `Content-Security-Policy: sandbox`, so the
@@ -628,9 +648,9 @@ const send = guard(async () => {
         if (event.delta) { reply += event.delta; body.textContent = reply.trimStart(); }
         else if (event.tool) tools.textContent += `▸ ${event.tool}  `;
         else if (event.error) throw new Error(event.error);
-        // Streaming deltas land as text; the finished reply is markdown the
-        // server rendered with html=False, so innerHTML is safe here.
-        else if (event.done) { body.innerHTML = event.html; body.classList.add('done'); }
+        // Streaming deltas land as text; the finished reply is rendered markdown
+        // and goes through the scrubber -- the model's output is untrusted input.
+        else if (event.done) { setMarkdown(body, event.html); body.classList.add('done'); }
         scrollChat();
       }
       if (done) break;
