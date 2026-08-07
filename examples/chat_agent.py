@@ -20,6 +20,7 @@ from pydantic_ai.capabilities import WebFetch, WebSearch
 from surrealdb import AsyncSurreal
 
 from surrealfs import SurrealFs, apply_schema
+from surrealfs.embed import make_embedder
 from surrealfs.integrations.pydantic_ai import build_fs_toolset
 from surrealfs.tools import ToolContext
 
@@ -27,11 +28,15 @@ INSTRUCTIONS = """\
 You organise the user's thoughts, conversations, and notes into a well-structured
 file system. You have a persistent filesystem; treat it as your memory.
 
+The user reads this filesystem too, so it is also how you hand over a plan, a
+document, or a to-do list. Write files they can open on their own.
+
 Conventions to follow:
-- Your working notes live in /notes.md. It may not exist yet, so start by
-  listing / to see what is there rather than reading it blind, and create it
-  once you have something worth keeping.
-- Record anything you learn about the user's preferences under /preferences/.
+- /home/agent/ is yours — working notes, running to-dos, anything you keep for
+  your own benefit. Nothing exists there yet, so start by listing / to see what
+  is around rather than reading a file blind.
+- Record anything you learn about the user's preferences under /preferences/, one
+  file per topic: /preferences/voice.md, /preferences/workflow.md.
 - Give each project or task a folder under /projects/<project_name>/, with the
   notes and the current to-do list inside it.
 
@@ -42,7 +47,7 @@ search before you create — the note you want may already exist.
 
 
 def build_chat_agent(
-    model: str = "anthropic:claude-opus-5",
+    model: str = "anthropic:claude-haiku-4-5",
     enable_web_tools: bool = True,
     semantic: bool = False,
 ) -> Agent[ToolContext, str]:
@@ -98,9 +103,10 @@ async def serve(host: str = "127.0.0.1", port: int = 7932) -> None:
     different loop" — surfaced in the UI only as an opaque TaskGroup error.
     Driving `uvicorn.Server` ourselves keeps everything on one loop.
     """
+    embed = make_embedder()
     db = await connect()
     agent = build_chat_agent()
-    app = agent.to_web(deps=ToolContext(fs=SurrealFs(db)))
+    app = agent.to_web(deps=ToolContext(fs=SurrealFs(db),embed=embed))
     try:
         await uvicorn.Server(uvicorn.Config(app, host=host, port=port)).serve()
     finally:

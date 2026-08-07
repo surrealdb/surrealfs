@@ -15,12 +15,13 @@ write, organise, and search files:
     await fs.write_text("/notes/today.md", "# Today\\n")
     await fs.ls("/notes")
 
-Three integration surfaces are built on that core:
+Three integration surfaces are built on the shared tool registry:
 
-* :mod:`surrealfs.tools` -- the tool registry, shared by both surfaces below.
+* :mod:`surrealfs.tools` -- the tool registry, shared by the surfaces below.
 * :mod:`surrealfs.integrations.pydantic_ai` -- a pydantic-ai ``FunctionToolset``.
 * :mod:`surrealfs.integrations.json_tools` -- plain JSON Schema tool definitions
   and a dispatcher, for raw Anthropic or OpenAI tool-calling loops.
+* :mod:`surrealfs.integrations.hermes` -- a Hermes plugin.
 """
 
 from __future__ import annotations

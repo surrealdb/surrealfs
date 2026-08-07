@@ -1,4 +1,7 @@
-Write text to a path, creating the file or replacing it entirely.
+Write text to a path in SurrealFS, creating the file or replacing it entirely.
+
+SurrealFS is a filesystem stored in a SurrealDB table, not the machine's local
+disk — this never touches local files.
 
 Missing parent folders are created automatically. The media type is inferred
 from the file extension unless you pass `content_type`.

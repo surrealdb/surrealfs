@@ -47,7 +47,7 @@ Here is a tree one agent built for its user over a few conversations:
 ## Install
 
 ```bash
-pip install surrealfs                    # core
+pip install surrealfs                    # core, and the Hermes plugin
 pip install "surrealfs[pydantic-ai]"     # + the pydantic-ai toolset
 ```
 
@@ -75,7 +75,7 @@ You create and own the connection. SurrealFS never connects, signs in, or
 selects a namespace — so the `file` table's `owner = $auth.id` permissions key
 off *your* auth context.
 
-## Three ways to give it to an agent
+## Five ways to give it to an agent
 
 ### 1. The plain async API
 
@@ -125,7 +125,73 @@ result = await call_tool(ctx, block.name, block.input)
 
 See `examples/anthropic_loop.py` for a complete loop in ~40 lines.
 
-All three surfaces are generated from one registry in `surrealfs/tools/`, so
+### 4. Hermes
+
+The package ships a [Hermes](https://hermes-agent.nousresearch.com) plugin,
+registered through the `hermes_agent.plugins` entry point. Hermes runs from its
+own virtualenv, so install it there rather than into your project:
+
+```bash
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python \
+  "surrealfs @ git+https://github.com/surrealdb/surrealfs.git"
+hermes plugins enable surrealfs
+hermes chat --toolsets surrealfs
+```
+
+The tools arrive prefixed — `surrealfs_ls`, `surrealfs_cat`,
+`surrealfs_write_file` — because Hermes keeps one flat tool namespace that its own
+`read_file`/`write_file` already sit in. The prefix also tells the model which
+filesystem it is addressing: Hermes' file tools are the local disk, `surrealfs_*`
+is the shared one in SurrealDB. The tool descriptions say so too, on every
+surface — see `surrealfs/tools/docs/ls.md`.
+
+The plugin opens its own connection per call, reading the same `SURREALDB_*`
+environment variables as everything else here and defaulting to a local server;
+set `SURREALFS_SEMANTIC=1` for hybrid search. Handlers are registered
+`is_async=True`, so Hermes awaits them on whichever loop it is using, and every
+result — errors included — comes back as JSON.
+
+It also bundles a skill, `surrealfs:notes`
+(`surrealfs/integrations/hermes/skills/notes/SKILL.md`), which teaches the agent to
+keep its notes and memories here and how to lay them out — `/home/<agent>/` for its
+own working files, `/preferences/` for what it learns about the user,
+`/projects/<name>/` per project. Hermes advertises plugin skills nowhere, though:
+they are absent from the system prompt's `<available_skills>` index *and* from
+`skills_list()`, and resolve only by exact qualified name. So the plugin also
+registers a `pre_llm_call` hook that names the skill on the first turn of each
+session. Hermes appends that to the user message and never persists it, so the
+system prompt stays byte-stable and the prompt cache holds. Remove the hook and the
+skill becomes unreachable.
+
+To run from a checkout instead, symlink the plugin directory into Hermes' plugin
+folder. The package still has to be importable by Hermes' interpreter:
+
+```bash
+ln -s "$PWD/surrealfs/integrations/hermes" ~/.hermes/plugins/surrealfs
+```
+
+### 5. Hermes memory provider
+
+The tools above are memory the agent *chooses* to write. A second, independent
+plugin closes the loop: Hermes hands it every completed turn, and asks it for
+context before every turn.
+
+```bash
+ln -s "$PWD/surrealfs/integrations/hermes_memory" ~/.hermes/plugins/surrealfs-memory
+# then in ~/.hermes/config.yaml:
+#   memory:
+#     provider: surrealfs-memory
+```
+
+The symlink is not an alternative to installing — Hermes discovers memory providers
+by scanning `$HERMES_HOME/plugins/<name>/`, never the entry point, and the directory
+name *is* the provider name. Each turn is filed as its own file under `/memory/`
+(`/memory/2026-08-06/<session>-004.md`), skipping ones whose prompt carries no signal.
+Recall searches the whole filesystem rather than just `/memory/`, so the agent's own
+`/preferences/` and `/projects/` notes come back too — they are the strongest signal
+in there. See `surrealfs/integrations/hermes_memory/README.md`.
+
+All four tool surfaces are generated from one registry in `surrealfs/tools/`, so
 they cannot drift apart. Tool descriptions are markdown in
 `surrealfs/tools/docs/` — edit them as prose; they are prompt text.
 
@@ -139,10 +205,32 @@ count = await fs.reindex_embeddings(embed, version="openai:text-embedding-3-smal
 hits = await fs.search("how do I get paid", vector=await embed("how do I get paid"))
 ```
 
-`fs.search` runs both arms and fuses them by rank — full-text scores are term
-counts and vector scores are distances, so there is nothing sane to normalise.
-Without a `vector` it is full-text only. `search_text` and `search_semantic`
-remain available if you want one arm on its own.
+`fs.search` runs both arms and fuses them by rank — full-text scores are BM25 and
+vector scores are distances, so there is nothing sane to normalise. Without a
+`vector` it is full-text only. `search_text` and `search_semantic` remain
+available if you want one arm on its own.
+
+The full-text arm matches a file that shares **any** term with the query, so
+`"how do I get paid"` returns candidates even without embeddings — the vector arm is
+what makes it rank the invoicing note by *meaning* rather than by shared words. That
+default favours recall because the caller sees a ranked list of snippets and can
+dismiss a weak hit at a glance, but cannot dismiss one it never saw.
+
+Ranking is Okapi BM25, computed in Python over the tokens SurrealDB's own analyzer
+produces for the query and each matching file — the same stemming the index matched
+with, so a file saying "Prefers" scores for a query of "prefer" instead of scoring
+zero. Rare words count for more than common ones, repetition saturates, and long
+files are not rewarded for sprawl. Stopwords still match; they just get no vote.
+
+What it cannot do is read intent: a query word that is beside the point still pulls
+in files dense with it. That is the vector arm's job.
+
+Pass `match="all"` when you want a precise filter and an empty result is a real
+answer:
+
+```python
+hits = await fs.search("invoice 2026", match="all")   # both terms must appear
+```
 
 Re-running the indexer is cheap: it skips files whose content has not changed
 since they were embedded. Agents get one `search` tool either way; pass the

@@ -1,4 +1,4 @@
-Move or rename a file or folder.
+Move or rename a file or folder within SurrealFS.
 
 Moving a folder brings its entire contents along. Fails if the destination
 already exists.

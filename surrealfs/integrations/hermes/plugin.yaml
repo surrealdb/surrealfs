@@ -1,0 +1,30 @@
+name: surrealfs
+version: 0.2.0
+description: >-
+  A filesystem backed by SurrealDB — read, write, organise, and search files that
+  persist across sessions. Connection details come from the SURREALDB_* env vars
+  (defaults target a local server); set SURREALFS_SEMANTIC=1 for hybrid search.
+author: Martin Schaer
+# No requires_env: this field gates loading, and the SURREALDB_* defaults already
+# work against a local `surreal start` server.
+# Prefixed: Hermes has one flat tool namespace, and its built-in `write_file`
+# already owns that name. See PREFIX in __init__.py.
+provides_tools:
+  - surrealfs_ls
+  - surrealfs_glob
+  - surrealfs_cat
+  - surrealfs_read_bytes
+  - surrealfs_tail
+  - surrealfs_write_file
+  - surrealfs_write_bytes
+  - surrealfs_edit
+  - surrealfs_touch
+  - surrealfs_mkdir
+  - surrealfs_cp
+  - surrealfs_mv
+  - surrealfs_rm
+  - surrealfs_search
+# Points the agent at the bundled `notes` skill on the first turn of a session.
+# Hermes lists plugin skills nowhere, so without this the skill is unreachable.
+provides_hooks:
+  - pre_llm_call

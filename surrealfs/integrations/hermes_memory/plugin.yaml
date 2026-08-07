@@ -1,0 +1,12 @@
+name: surrealfs-memory
+version: 0.2.0
+description: >-
+  Memory backed by SurrealFS — files every turn under /memory in a SurrealDB-backed
+  filesystem, and recalls context by searching the whole tree, the agent's own notes
+  included. Connection details come from the SURREALDB_* env vars.
+author: Martin Schaer
+# Routes this directory to Hermes' memory-provider discovery rather than the general
+# plugin manager. Without it, `hermes_cli/plugins.py` infers the same thing by
+# scanning this __init__.py for the string "MemoryProvider" — declaring it is
+# cheaper than depending on that heuristic.
+kind: exclusive

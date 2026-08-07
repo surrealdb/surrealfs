@@ -1,13 +1,39 @@
-"""The tool registry and both integration surfaces."""
+"""The tool registry and every integration surface."""
 
 from __future__ import annotations
 
 import base64
+import json
+from pathlib import Path
 
 import pytest
 
 from surrealfs.integrations.json_tools import call_tool, tool_definitions
 from surrealfs.tools import TOOLS, ToolContext, get_tool, select_tools
+
+
+class _FakeHermesCtx:
+    """Just enough of Hermes' plugin context to capture what `register` wires up."""
+
+    def __init__(self) -> None:
+        self.schemas: list[dict] = []
+        self.handlers: dict = {}
+        self.toolsets: set[str] = set()
+        self.is_async: set[bool] = set()
+        self.skills: dict = {}
+        self.hooks: dict = {}
+
+    def register_tool(self, *, name, toolset, schema, handler, **kwargs) -> None:
+        self.schemas.append(schema)
+        self.handlers[name] = handler
+        self.toolsets.add(toolset)
+        self.is_async.add(kwargs.get("is_async", False))
+
+    def register_skill(self, name, path, description="") -> None:
+        self.skills[name] = (path, description)
+
+    def register_hook(self, event, callback) -> None:
+        self.hooks[event] = callback
 
 
 def test_every_tool_has_a_description_and_schema():
@@ -34,16 +60,48 @@ def test_search_is_one_tool_either_way():
 
 
 def test_surfaces_expose_the_same_tools():
-    """The guard against the two integrations drifting apart."""
+    """The guard against the integrations drifting apart."""
     registry = [spec.name for spec in select_tools()]
     anthropic = [t["name"] for t in tool_definitions()]
     openai = [t["function"]["name"] for t in tool_definitions(flavor="openai")]
     assert registry == anthropic == openai
 
+    from surrealfs.integrations import hermes
+
+    hermes_ctx = _FakeHermesCtx()
+    hermes.register(hermes_ctx)
+    prefixed = [hermes.PREFIX + name for name in registry]
+    assert [schema["name"] for schema in hermes_ctx.schemas] == prefixed
+    assert hermes_ctx.toolsets == {hermes.TOOLSET}
+
+    # Hermes names the argument schema `parameters`, unlike either JSON flavour.
+    ls = next(s for s in hermes_ctx.schemas if s["name"] == "surrealfs_ls")
+    assert ls["parameters"] == get_tool("ls").json_schema
+
+    # `provides_tools` is hand-written, so it is the one place that can drift.
+    manifest = (Path(hermes.__file__).parent / "plugin.yaml").read_text(
+        encoding="utf-8"
+    )
+    for name in prefixed:
+        assert f"- {name}\n" in manifest, f"plugin.yaml omits {name}"
+
     pytest.importorskip("pydantic_ai")
     from surrealfs.integrations.pydantic_ai import fs_tools
 
     assert [t.name for t in fs_tools()] == registry
+
+
+def test_hermes_descriptions_point_at_the_prefixed_names():
+    """The shared markdown names sibling tools; unprefixed they do not exist."""
+    from surrealfs.integrations import hermes
+
+    assert "`read_bytes`" in get_tool("cat").description
+    ctx = _FakeHermesCtx()
+    hermes.register(ctx)
+    cat = next(s for s in ctx.schemas if s["name"] == "surrealfs_cat")
+    assert "`surrealfs_read_bytes`" in cat["description"]
+    stripped = cat["description"].replace("`surrealfs_read_bytes`", "")
+    assert "`read_bytes`" not in stripped
 
 
 def test_definitions_carry_the_markdown_descriptions():
@@ -133,6 +191,77 @@ async def test_hybrid_search_finds_what_words_cannot(fs, db):
     args = {"query": "remuneration"}  # shares no words with the file
     assert "/target.md" not in await call_tool(ctx, "search", args)
     assert "/target.md" in await call_tool(ctx, "search", args, semantic=True)
+
+
+def test_hermes_bundles_the_notes_skill():
+    """The skill has to be on disk where `register` says it is, docs and all."""
+    from surrealfs.integrations import hermes
+
+    ctx = _FakeHermesCtx()
+    hermes.register(ctx)
+
+    path, description = ctx.skills["notes"]
+    assert path == hermes.SKILL
+    assert description, "Hermes shows this when a skill name misses"
+
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    assert "\nname: notes\n" in text
+    assert "\ndescription: " in text
+    # The conventions the agent is meant to follow.
+    for folder in ("/home/hermes/", "/preferences/", "/projects/"):
+        assert folder in text
+
+    # Hermes logs a prompt-injection warning on every load if any of these appear
+    # (`_INJECTION_PATTERNS` in its tools/skills_tool.py).
+    for phrase in ("ignore previous instructions", "you are now", "new instructions:"):
+        assert phrase not in text.lower()
+
+
+def test_hermes_nudges_once_per_session():
+    """Plugin skills are advertised nowhere, so the hook is the only way in."""
+    from surrealfs.integrations import hermes
+
+    ctx = _FakeHermesCtx()
+    hermes.register(ctx)
+    nudge = ctx.hooks["pre_llm_call"]
+
+    first = nudge(session_id="s1", user_message="hi", is_first_turn=True, model="m")
+    assert "surrealfs:notes" in first["context"]
+    assert "surrealfs_" in first["context"]
+
+    # Every later turn stays out of the prompt.
+    assert nudge(session_id="s1", user_message="and again", is_first_turn=False) is None
+    assert nudge() is None, "a caller omitting is_first_turn must not be nudged"
+
+
+async def test_hermes_handlers_round_trip(surreal_url, monkeypatch):
+    """Exercise the Hermes handlers, including the connection they own."""
+    from surrealfs.integrations import _connect, hermes
+
+    monkeypatch.setenv("SURREALDB_URL", surreal_url)
+    monkeypatch.setenv("SURREALDB_NAMESPACE", "hermes_plugin_test")
+    monkeypatch.setenv("SURREALDB_DATABASE", "test")
+    monkeypatch.setattr(_connect, "_schema_applied", False)
+
+    ctx = _FakeHermesCtx()
+    hermes.register(ctx)
+    assert ctx.is_async == {True}, "Hermes must await these, not call them"
+
+    write = ctx.handlers["surrealfs_write_file"]
+    written = json.loads(await write({"path": "/a.md", "content": "hi"}))
+    assert "/a.md" in written["result"]
+    read = json.loads(await ctx.handlers["surrealfs_cat"]({"path": "/a.md"}))
+    assert read["result"] == "hi"
+
+    # Failures the model can fix stay in `result` as text, same as any other
+    # dispatch; Hermes only ever sees JSON.
+    missing = json.loads(await ctx.handlers["surrealfs_cat"]({"path": "/missing.md"}))
+    assert missing["result"].startswith("Error:")
+
+    # And a dead connection is reported rather than raised.
+    monkeypatch.setenv("SURREALDB_URL", "ws://127.0.0.1:1/rpc")
+    assert "error" in json.loads(await ctx.handlers["surrealfs_ls"]({"path": "/"}))
 
 
 async def test_pydantic_ai_tools_run(ctx):

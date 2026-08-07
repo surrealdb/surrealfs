@@ -4,10 +4,8 @@ Guidance for agents working on this repository.
 
 ## What this is
 
-`surrealfs` is a pure-Python library: a SurrealDB `file` table schema plus three
-ways to expose it to an AI agent. There is no Rust here any more — the crate,
-the REPL, and the `surrealfs_py` pyo3 extension were removed in the 0.2 refactor
-(see commit history for the last version that had them).
+`surrealfs` is a pure-Python library: a SurrealDB `file` table schema plus five
+ways to expose it to an AI agent — four tool surfaces and a Hermes memory provider.
 
 ## Layout
 
@@ -20,7 +18,8 @@ surrealfs/
   embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
   schema/           file.surql, user.surql, apply_schema()
   tools/            args.py, handlers.py, registry, docs/*.md
-  integrations/     pydantic_ai.py, json_tools.py
+  integrations/     pydantic_ai.py, json_tools.py, _connect.py,
+                    hermes/ (plugin + bundled skill), hermes_memory/ (memory provider)
 examples/           chat_agent.py, anthropic_loop.py, semantic_search.py
 tests/
 ```
@@ -45,6 +44,93 @@ come back empty from `ls`, path resolution, and full-text search, while a plain
 table scan is fine. Isolated to the engine: the same SDK against a 3.2.x server
 is correct. Tests use a `surreal` subprocess; re-check `mem://` when a newer
 `surrealdb-embedded` ships.
+
+**The Hermes plugin's tool names are prefixed, and the prefix is load-bearing.**
+Hermes has one flat tool namespace, and `tools/registry.py` rejects a name
+already owned by another toolset by *logging an error and returning* — no
+exception. Registering `write_file` would therefore lose to Hermes' built-in
+disk one, silently, and the model would go on calling that instead. `PREFIX` in
+`integrations/hermes/__init__.py` keeps all fourteen and disambiguates the two
+filesystems for the model; `_describe` rewrites the cross-references inside the
+shared `docs/*.md` text to match, since `cat.md` telling the model to use
+`read_bytes` is a dead end when the tool is `surrealfs_read_bytes`.
+
+**That plugin registers `is_async=True` rather than bridging to async itself.**
+Hermes calls sync handlers straight from `registry.dispatch`, and the gateways
+(Telegram, Discord) dispatch from inside a running loop — an `asyncio.run` in the
+handler would raise there and break every call. Hermes' own `_run_async` handles
+all three cases, and picks a *different* loop depending on the call site, which
+is also why the connection cannot be cached across calls: a SurrealDB WebSocket
+belongs to the loop it was opened on.
+
+**The bundled `surrealfs:notes` skill is only reachable because of the
+`pre_llm_call` hook.** Hermes does not advertise plugin skills: `register_skill`'s
+own docstring says they never enter the `~/.hermes/skills/` tree and are absent from
+the system prompt's `<available_skills>` index, and `skills_list()` builds its answer
+by scanning that directory, so it does not list them either. `skill_view` resolves
+them only by exact qualified name — which nothing would ever tell the agent. Hence
+the hook, which injects that name on the first turn of a session. Delete it and the
+skill is dead weight, with nothing failing to say so.
+
+**Never let `integrations/hermes/__init__.py` mention `MemoryProvider`.**
+`hermes_cli/plugins.py` decides what kind of plugin a directory is by *text-scanning*
+the first 8KB of its `__init__.py`: find `MemoryProvider` or
+`register_memory_provider` and it coerces the plugin to `kind="exclusive"`, routing it
+to memory-provider discovery instead of the plugin manager. A mention in a mere
+comment would therefore stop the tools and the skill from loading for anyone who
+installs by symlink, silently. That is why the memory provider lives in its own
+`hermes_memory/` directory, and why `tests/test_memory_provider.py` guards the string.
+
+**Memory providers are found by directory, never by entry point.** Hermes scans
+`$HERMES_HOME/plugins/<name>/` and matches the directory name against
+`memory.provider` in `config.yaml`, so `pip install surrealfs` cannot deliver one —
+it has to be symlinked, and the tool plugin and the provider install separately. Note
+`PluginContext` has no `register_memory_provider` despite what the plugin docs claim;
+the provider's `register()` is called with the memory loader's own collector, which
+also has no `register_skill` — hence two independent `register()` functions rather
+than one shared entry point.
+
+**`search_text` defaults to `match="any"` (`@1,OR@`), not AND.** With `@1@`,
+`'what tone does the user prefer'` finds nothing while `'prefer'` finds the note —
+and a caller that hands the model an empty result has cost it a turn, or worse: the
+bundled skill tells the agent to search before it writes, so a false empty produces a
+duplicate note. Since this surface returns a ranked list of snippets, a weak hit is
+cheap to dismiss and an unseen one is not. `match="all"` is there for callers that
+want a precise filter and read empty as a real answer.
+
+**Scoring must run on `search::analyze` output, or stemmed matches score zero.**
+This was the real defect behind a long detour. The index analyzes with
+`snowball(english)`, so a query for `prefer` matches a file saying "Prefers" — but the
+Python scorer counted *raw words*, found no literal "prefer", scored the file `0.000`,
+and sorted it below files that did not answer the question. Hence
+`search::analyze($analyzer, content) AS tokens` in the query, `$terms` for the
+analyzed query, and `ANALYZER` in `fs.py` kept in step with `schema/file.surql`.
+Ranking is Okapi BM25 (`_bm25`) over those tokens: `df` from the matched rows only,
+stopwords dropped from scoring but never from matching (`_scoring_terms`).
+
+Measured on `test_ranking_quality_over_a_realistic_corpus`, which exists to keep this
+honest: raw term counts scored **MRR 0.591**, BM25 on analyzer tokens **0.823**.
+
+Three things that look like fixes and measurably were not:
+
+- *Stripping stopwords from the query* changes which rows match, not how they rank —
+  byte-identical ordering on the same corpus.
+- *BM25 alone*, while still counting raw words, ranked no better than term counts. It
+  was the stemming mismatch doing the damage, not the formula.
+- *Renaming the memory turn headers* (`## User` → `## Asked`) to stop every turn file
+  matching "user" made things **worse** overall, 0.823 → 0.750: it helps a query where
+  "user" is incidental and hurts one that is genuinely about what the user said.
+
+What remains, and is inherent to lexical search: a query word that is incidental to
+the question still pulls in files dense with it — "what does the user prefer" ranks a
+`user`-heavy note above the preferences file, because lexically "user" is the rarer
+term. That is what the vector arm is for. Do not tune BM25 to paper over it; a test
+asserting the opposite was deleted rather than have the scorer chase it.
+
+Related ceiling: `limit` is applied after Python ranking, so `search_text` fetches
+the content of every matching row and now asks the server to tokenise each one.
+Fine for notes; a corpus where one common term matches thousands of files needs
+server-side scoring before a SQL `LIMIT` can be trusted not to wreck the order.
 
 **`SurrealFs._query` goes through `query_raw()`, not `query()`.** The envelope is
 what carries each statement's error *kind*, which is how we tell a retryable
@@ -109,13 +195,17 @@ succession races it. `_query` retries anything the store marks retryable.
 ## Conventions
 
 - Async throughout. The library never owns a connection — the caller passes a
-  connected `AsyncSurreal` handle.
+  connected `AsyncSurreal` handle. The one exception is the Hermes plugin, which
+  has no caller to pass it one: Hermes hands a plugin sync handlers and no
+  lifecycle hooks, so it connects per tool call from the `SURREALDB_*` env vars.
 - No working directory. Every path is absolute; `cd`/`pwd` do not exist.
 - The core returns dataclasses; only `tools/handlers.py` formats strings for a
   model.
 - Adding a tool means one entry in `surrealfs/tools/__init__.py`, an args model,
-  a handler, and a `docs/<kebab-name>.md`. Both integration surfaces pick it up
-  automatically, and `tests/test_tools.py` asserts they stay in sync.
+  a handler, and a `docs/<kebab-name>.md`. All three integration surfaces pick it
+  up automatically — the only hand-written list is `provides_tools` in
+  `integrations/hermes/plugin.yaml`. `tests/test_tools.py` asserts every surface,
+  that manifest included, stays in sync.
 - Tool descriptions live in markdown, not docstrings. They are prompt text —
   write them for a model that has never seen this filesystem.
 - Bind every value with parameters. The only interpolation is the table name

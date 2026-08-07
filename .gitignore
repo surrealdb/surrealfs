@@ -17,6 +17,7 @@ wheels/
 
 # DB
 /demo-db
+/hermes-demo-db
 
 # Test caches
 .pytest_cache/
