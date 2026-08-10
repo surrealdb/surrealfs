@@ -5,6 +5,13 @@ description: >-
   filesystem, and recalls context by searching the whole tree, the agent's own notes
   included. Connection details come from the SURREALDB_* env vars.
 author: Martin Schaer
+# Everything the provider implements beyond the required lifecycle. Nothing in
+# Hermes reads this — memory discovery only takes `description` out of here — but
+# the plugin docs ask for it, and it is the only place the set is written down.
+hooks:
+  - system_prompt_block
+  - prefetch
+  - sync_turn
 # Routes this directory to Hermes' memory-provider discovery rather than the general
 # plugin manager. Without it, `hermes_cli/plugins.py` infers the same thing by
 # scanning this __init__.py for the string "MemoryProvider" — declaring it is

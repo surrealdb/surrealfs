@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from surrealfs import NotFound, SurrealFs
+from surrealfs import SurrealFs
 from surrealfs.integrations import _connect
 from surrealfs.integrations.hermes_memory import SurrealFsMemory, register
 
@@ -47,12 +47,21 @@ def memory(surreal_url, request, monkeypatch) -> SurrealFsMemory:
     return provider
 
 
-def _read(path: str) -> str:
-    """Read a file back the way any other client would."""
+def _filed(prefix: str = "/memory") -> dict[str, str]:
+    """Every turn filed under *prefix*, as ``{path: body}``.
 
-    async def go() -> str:
+    Filenames carry a wall-clock stamp rather than a turn number, so tests find
+    them by listing rather than by predicting one.
+    """
+
+    async def go() -> dict[str, str]:
         async with _connect.connected() as db:
-            return await SurrealFs(db).read_text(path)
+            fs = SurrealFs(db)
+            # `glob` does not return content, so read each hit back.
+            return {
+                e.path: await fs.read_text(e.path)
+                for e in await fs.glob(f"{prefix}/**/*.md")
+            }
 
     return asyncio.run(go())
 
@@ -93,33 +102,77 @@ def test_config_schema_is_env_vars_only():
 def test_sync_turn_files_the_exchange(memory):
     memory.sync_turn("how do I get paid", "You invoice monthly.", session_id="sess-1")
 
-    path = memory.path_for("sess-1", 1)
-    body = _read(path)
-    assert "/memory/" in path and path.endswith("-001.md")
-    assert "# Turn 1 —" in body
+    ((path, body),) = _filed().items()
+    assert path.startswith("/memory/default/") and "/sess-1-" in path
     assert "session: sess-1" in body
     assert "how do I get paid" in body
     assert "You invoice monthly." in body
 
 
-def test_turns_are_numbered_per_session(memory):
+def test_every_turn_gets_its_own_file(memory):
     memory.sync_turn("first question", "first answer", session_id="sess-1")
     memory.sync_turn("second question", "second answer", session_id="sess-1")
-    # A concurrent gateway session counts independently.
+    # A concurrent gateway session is filed under its own name.
     memory.sync_turn("other question", "other answer", session_id="sess-2")
 
-    assert "first question" in _read(memory.path_for("sess-1", 1))
-    assert "second question" in _read(memory.path_for("sess-1", 2))
-    assert "other question" in _read(memory.path_for("sess-2", 1))
+    filed = _filed()
+    assert len(filed) == 3, filed
+    assert sorted(p.rsplit("/", 1)[1].rsplit("-", 1)[0] for p in filed) == [
+        "sess-1",
+        "sess-1",
+        "sess-2",
+    ]
+
+
+def test_resuming_a_session_does_not_overwrite_its_earlier_turns(memory, surreal_url):
+    """`hermes --resume` starts a second process on the same session id.
+
+    A turn counter held in memory restarts at one there, and `write_text`
+    replaces, so the original turn one used to disappear. Names carry a wall-clock
+    stamp instead.
+    """
+    memory.sync_turn("first question of the day", "answer one", session_id="sess-9")
+
+    resumed = SurrealFsMemory()
+    resumed.initialize("sess-9", hermes_home="/tmp", platform="cli")
+    resumed.sync_turn("a totally different question", "answer two", session_id="sess-9")
+
+    bodies = "\n".join(_filed().values())
+    assert "first question of the day" in bodies
+    assert "a totally different question" in bodies
 
 
 def test_trivial_turns_are_not_filed(memory):
     memory.sync_turn("thanks", "You're welcome.", session_id="sess-1")
     memory.sync_turn("/reset", "Done.", session_id="sess-1")
 
-    # Nothing was written, so the turn counter never left zero.
-    with pytest.raises(NotFound):
-        _read(memory.path_for("sess-1", 1))
+    assert _filed() == {}
+
+
+def test_only_primary_agents_write(surreal_url, memory):
+    """The ABC: a cron or subagent turn filed as a memory corrupts the user model."""
+    for context in ("cron", "subagent", "flush"):
+        provider = SurrealFsMemory()
+        provider.initialize(
+            "sess-1", hermes_home="/tmp", platform="cron", agent_context=context
+        )
+        provider.sync_turn("run the nightly report", "Done.", session_id="sess-1")
+
+    assert _filed() == {}
+
+
+def test_profiles_do_not_read_each_others_turns(memory):
+    """Two profiles sharing one database still get separate memories."""
+    work = SurrealFsMemory()
+    work.initialize("sess-1", hermes_home="/root/.hermes/profiles/work", platform="cli")
+    work.sync_turn("the deploy key rotates monthly", "Noted.", session_id="sess-1")
+
+    assert work.root() == "/memory/work"
+    assert list(_filed("/memory/work"))
+    # `memory` is the default profile: it can see that a subtree exists, but the
+    # turns in it never ride on one of its own turns.
+    assert "deploy key" not in memory.prefetch("when does the deploy key rotate")
+    assert "deploy key" in work.prefetch("when does the deploy key rotate")
 
 
 def test_prefetch_recalls_from_the_whole_filesystem(memory):

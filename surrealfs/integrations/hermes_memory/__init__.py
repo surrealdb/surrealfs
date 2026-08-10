@@ -4,8 +4,9 @@ See https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-p
 
 The tool plugin in ``surrealfs.integrations.hermes`` gives the agent tools it chooses
 to call. This closes the loop: Hermes hands every completed turn to :meth:`sync_turn`,
-which files it under ``/memory``, and asks :meth:`prefetch` for context before each
-API call, which searches the whole filesystem — the agent's own notes included.
+which files it under ``/memory/<profile>``, and asks :meth:`prefetch` for context
+before each API call, which searches the whole filesystem — the agent's own notes
+included, another profile's transcripts not.
 
 Memory providers are found by directory, not by entry point, so this has to be
 installed on its own::
@@ -21,6 +22,10 @@ The directory name is the provider name Hermes matches that setting against.
 Connection details come from the usual ``SURREALDB_*`` variables; set
 ``SURREALFS_MEMORY_DIR`` to file turns somewhere other than ``/memory``, and
 ``SURREALFS_SEMANTIC=1`` to have recall match on meaning as well as wording.
+
+Those variables are read from ``$HERMES_HOME/.env``, so pointing two profiles at
+different databases is already a matter of configuring each one — see
+:func:`_profile` for what happens when they share.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ import asyncio
 import os
 import re
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from surrealfs import SurrealFs
@@ -84,6 +90,33 @@ def _semantic() -> bool:
     }
 
 
+DEFAULT_PROFILE = "default"
+
+
+def _profile(hermes_home: str) -> str:
+    """The profile ``hermes_home`` belongs to.
+
+    Hermes puts a named profile's home at ``<root>/profiles/<name>`` and the
+    default profile's at the root itself (``~/.hermes``), so the parent directory
+    is what distinguishes them — not the name, which could be anything. An absent
+    ``hermes_home`` (older Hermes, a direct caller) counts as the default.
+
+    Every profile gets a subtree, the default one included. Leaving the default
+    unprefixed would have been less churn but only isolates in one direction: the
+    default profile would still recall every named profile's transcripts.
+
+    This scopes *turns*, not the database. The ``SURREALDB_*`` variables come from
+    ``$HERMES_HOME/.env``, which is already per-profile, so a user who wants two
+    profiles in separate databases has that today. What they cannot configure away
+    is one profile recalling another's raw transcripts out of a database they
+    deliberately share, which is what the subtree and :meth:`_is_mine` prevent.
+    """
+    path = Path(hermes_home)
+    if not hermes_home or path.parent.name != "profiles":
+        return DEFAULT_PROFILE
+    return _slug(path.name)
+
+
 class SurrealFsMemory(_Base):
     """Files each turn into SurrealFS, and recalls from it by search.
 
@@ -95,9 +128,8 @@ class SurrealFsMemory(_Base):
 
     def __init__(self) -> None:
         self._session_id = ""
-        # Keyed by session: gateways serve several at once, and `sync_turn` is
-        # told which one a turn belongs to.
-        self._turns: dict[str, int] = {}
+        self._profile = DEFAULT_PROFILE
+        self._context = "primary"
 
     @property
     def name(self) -> str:
@@ -108,8 +140,14 @@ class SurrealFsMemory(_Base):
         return True
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
-        """Note the session. Deliberately does no I/O — the first write connects."""
+        """Note the session, profile, and context. No I/O — the first write connects."""
         self._session_id = session_id or ""
+        self._profile = _profile(str(kwargs.get("hermes_home") or ""))
+        # Absent on older Hermes, which only ran primary agents. Anything else —
+        # a subagent, a cron run, a flush — is not the user talking, and the ABC
+        # says not to write it: a cron system prompt filed as a memory and
+        # recalled later corrupts what the agent believes about the user.
+        self._context = str(kwargs.get("agent_context") or "primary")
 
     def get_tool_schemas(self) -> list[dict[str, Any]]:
         """None. The `surrealfs_*` tools already cover explicit reads and writes."""
@@ -117,7 +155,7 @@ class SurrealFsMemory(_Base):
 
     def system_prompt_block(self) -> str:
         return (
-            f"Memory: this conversation is filed under {_memory_dir()}/ in SurrealFS, "
+            f"Memory: this conversation is filed under {self.root()}/ in SurrealFS, "
             "and relevant notes are recalled automatically. Use the `surrealfs_*` "
             "tools to read or curate any of it."
         )
@@ -131,12 +169,11 @@ class SurrealFsMemory(_Base):
         messages: list[dict[str, Any]] | None = None,
     ) -> None:
         """File one completed turn, unless the prompt carries no signal."""
-        if is_trivial_prompt(user_content):
+        if self._context != "primary" or is_trivial_prompt(user_content):
             return
-        session = session_id or self._session_id
-        turn = self._turns.get(session, 0) + 1
-        self._turns[session] = turn
-        asyncio.run(self._write(session, turn, user_content, assistant_content))
+        asyncio.run(
+            self._write(session_id or self._session_id, user_content, assistant_content)
+        )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         """Recall context for the upcoming turn, or "" if nothing matches."""
@@ -183,26 +220,39 @@ class SurrealFsMemory(_Base):
             },
         ]
 
+    def root(self) -> str:
+        """The folder this profile's turns are filed under."""
+        return f"{_memory_dir()}/{self._profile}"
+
+    def path_for(self, session: str, when: datetime) -> str:
+        """Where one turn is filed. Public so tests and callers can predict it.
+
+        Named by wall clock rather than a turn counter. A counter has to live
+        somewhere, and in-process is the one place it cannot: `hermes --resume`
+        starts a second process on the same session id, restarts counting at one,
+        and `write_text` replaces — so turn one of the resumed conversation
+        silently overwrote turn one of the original. Milliseconds are in there
+        because seconds alone are not obviously enough, and a filename is cheaper
+        than reasoning about how fast two turns can arrive.
+        """
+        day = when.strftime("%Y-%m-%d")
+        stamp = when.strftime("%H%M%S%f")[:-3]
+        return f"{self.root()}/{day}/{_slug(session)}-{stamp}.md"
+
     # -- the async half ------------------------------------------------------
 
-    def path_for(self, session: str, turn: int, when: datetime | None = None) -> str:
-        """Where one turn is filed. Public so tests and callers can predict it."""
-        when = when or datetime.now(UTC)
-        day = when.strftime("%Y-%m-%d")
-        return f"{_memory_dir()}/{day}/{_slug(session)}-{turn:03d}.md"
-
     async def _write(
-        self, session: str, turn: int, user_content: str, assistant_content: str
+        self, session: str, user_content: str, assistant_content: str
     ) -> None:
         when = datetime.now(UTC)
         body = (
-            f"# Turn {turn} — {when.strftime('%Y-%m-%d %H:%M')} UTC\n\n"
+            f"# {when.strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
             f"session: {session or 'unknown'}\n\n"
             f"## User\n\n{user_content.strip()}\n\n"
             f"## Assistant\n\n{assistant_content.strip()}\n"
         )
         async with connected() as db:
-            await SurrealFs(db).write_text(self.path_for(session, turn, when), body)
+            await SurrealFs(db).write_text(self.path_for(session, when), body)
 
     async def _recall(self, query: str) -> str:
         # The same call the `surrealfs_search` tool makes, deliberately: recall
@@ -218,11 +268,27 @@ class SurrealFsMemory(_Base):
             # signal in here. The vector is built from the whole sentence, since
             # reading one is the single thing that arm does better.
             vector = await make_embedder()(query) if _semantic() else None
-            hits = await fs.search(query, vector=vector, limit=RECALL_LIMIT)
+            # Over-fetch so the filter below cannot cost a slot. `search_text`
+            # reads every matching row's content whatever the limit, so a wider
+            # one is close to free.
+            hits = await fs.search(query, vector=vector, limit=RECALL_LIMIT * 2)
+        hits = [hit for hit in hits if self._is_mine(hit.path)][:RECALL_LIMIT]
         if not hits:
             return ""
         lines = "\n".join(f"{hit.path}\n    {hit.snippet}" for hit in hits)
         return f"Recalled from SurrealFS:\n{lines}"
+
+    def _is_mine(self, path: str) -> bool:
+        """Keep everything except another profile's filed turns.
+
+        Notes written with the `surrealfs_*` tools stay shared: they are the
+        user's own curated files, in a database the user chose, and hiding them
+        per profile would defeat the point of recalling them. Raw transcripts are
+        the part that must not cross over.
+        """
+        return not path.startswith(f"{_memory_dir()}/") or path.startswith(
+            f"{self.root()}/"
+        )
 
 
 def _slug(session: str) -> str:

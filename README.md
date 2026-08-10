@@ -185,11 +185,13 @@ ln -s "$PWD/surrealfs/integrations/hermes_memory" ~/.hermes/plugins/surrealfs-me
 
 The symlink is not an alternative to installing — Hermes discovers memory providers
 by scanning `$HERMES_HOME/plugins/<name>/`, never the entry point, and the directory
-name *is* the provider name. Each turn is filed as its own file under `/memory/`
-(`/memory/2026-08-06/<session>-004.md`), skipping ones whose prompt carries no signal.
-Recall searches the whole filesystem rather than just `/memory/`, so the agent's own
+name *is* the provider name. Each turn is filed as its own file under
+`/memory/<profile>/` (`/memory/default/2026-08-06/<session>-142251003.md`), skipping
+ones whose prompt carries no signal and anything that is not a primary agent. Recall
+searches the whole filesystem rather than just that folder, so the agent's own
 `/preferences/` and `/projects/` notes come back too — they are the strongest signal
-in there. See `surrealfs/integrations/hermes_memory/README.md`.
+in there — while another profile's transcripts do not. See
+`surrealfs/integrations/hermes_memory/README.md`.
 
 All four tool surfaces are generated from one registry in `surrealfs/tools/`, so
 they cannot drift apart. Tool descriptions are markdown in
