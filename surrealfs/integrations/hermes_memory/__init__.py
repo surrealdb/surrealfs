@@ -130,6 +130,8 @@ class SurrealFsMemory(_Base):
         self._session_id = ""
         self._profile = DEFAULT_PROFILE
         self._context = "primary"
+        # One recall, warmed by `queue_prefetch` and consumed by `prefetch`.
+        self._warm = ""
 
     @property
     def name(self) -> str:
@@ -181,18 +183,138 @@ class SurrealFsMemory(_Base):
             self._write(session_id or self._session_id, user_content, assistant_content)
         )
 
+    def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
+        """Warm the next turn's recall, on the serialized background worker.
+
+        Hermes calls this with the turn that just *finished*, so what it warms
+        answers the previous question — see :meth:`prefetch` for why that trade
+        is worth taking.
+        """
+        # Cleared first, so a failed recall leaves nothing warm rather than
+        # leaving whatever the turn before that put there.
+        self._warm = ""
+        if not is_trivial_prompt(query):
+            self._warm = asyncio.run(self._recall(query))
+
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Recall context for the upcoming turn, or "" if nothing matches."""
+        """Recall context for the upcoming turn, or "" if nothing matches.
+
+        Serves what :meth:`queue_prefetch` warmed, and searches inline when
+        there is nothing warm. Two things that costs, both of which Hermes
+        hides badly:
+
+        `MemoryManager._prefetch_provider` runs this on a daemon thread it
+        joins for 8s, and if a previous call is *still* running it skips recall
+        for the whole turn without telling anyone. And with
+        ``SURREALFS_SEMANTIC=1`` the query has to be embedded first, which puts
+        a third-party API round-trip on the critical path of every turn — so
+        "a local search answers in milliseconds" only ever held for half the
+        configurations.
+
+        The warm result is one turn behind, because Hermes warms with the
+        finished turn's message and asks here with the new one. On a
+        conversation that stays on topic that is free; on a topic switch it
+        recalls the previous subject for one turn. Upstream's own providers
+        make the same trade. Staleness needs no turn counter: the cache holds
+        one entry, reading clears it, and `on_session_switch` clears it too.
+        """
         if is_trivial_prompt(query):
             return ""
-        # ponytail: searches on the spot rather than serving a cached result.
-        # Hermes already threads this call and gives it 8s, and a local search
-        # answers in milliseconds. If that stops holding, do the work in
-        # `queue_prefetch` after each turn and return the cached text here.
-        return asyncio.run(self._recall(query))
+        warm, self._warm = self._warm, ""
+        return warm or asyncio.run(self._recall(query))
+
+    def on_session_switch(self, new_session_id: str, **kwargs: Any) -> None:
+        """Follow `/resume`, `/branch`, `/reset`, `/new` and compression.
+
+        Turn files are named by wall clock rather than a counter, so
+        `_session_id` — the fallback for a `sync_turn` that arrives without one
+        — is the only per-session state there is to rebind. The warm recall goes
+        with it: it was keyed on a conversation this one is no longer having.
+
+        `**kwargs` is not decoration. `MemoryManager` forwards `reason` and
+        `parent_session_id` always, `rewound` only when true, and has added
+        keywords before.
+        """
+        self._session_id = new_session_id or ""
+        self._warm = ""
+
+    def on_memory_write(
+        self,
+        action: str,
+        target: str,
+        content: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Mirror a built-in memory tool write into SurrealFS.
+
+        Without this, Hermes' own `MEMORY.md` / `USER.md` and SurrealFS diverge
+        permanently and recall never sees what that tool wrote.
+
+        What gets mirrored is the *state*, not the events: Hermes hands over
+        deltas (`add` / `replace` / `remove`), and applying them to one file per
+        target reproduces the file the user could otherwise only read inside
+        Hermes. An append-only log of the events was the alternative and is
+        worse on both counts — it is not what `MEMORY.md` says, and a batched
+        `operations:` call would file several entries inside one millisecond,
+        which is exactly the filename collision :meth:`path_for` exists to avoid.
+
+        The `metadata` parameter must keep that name: Hermes inspects this
+        signature to decide how to call it, and falls back to a three-argument
+        legacy call for anything it does not recognise.
+        """
+        meta = metadata or {}
+        # Same rule as `sync_turn`, read per-write because the memory tool can
+        # run inside a subagent while this provider was initialized as primary.
+        if str(meta.get("execution_context") or self._context) != "primary":
+            return
+        if action not in {"add", "replace", "remove"} or not content.strip():
+            return
+        # ponytail: one connection per write, and Hermes calls this inline on
+        # the conversation thread, once per op — so a batched write is N
+        # connects on the turn. Buffer them if that ever shows up in a trace.
+        asyncio.run(
+            self._mirror(target, action, content, str(meta.get("old_text") or ""))
+        )
+
+    def on_pre_compress(self, messages: list[dict[str, Any]]) -> str:
+        """File the messages compression is about to discard, and say where.
+
+        The one hook a filesystem-shaped memory is strictly better at than a
+        cloud one: everybody else can only summarise what is being thrown away,
+        and summarising is what the compressor is already doing. So keep the
+        text verbatim and hand the compressor a pointer instead — the detail
+        survives at full fidelity, and the agent can go read it.
+
+        Returns the pointer, which Hermes folds into the compression summary
+        prompt. Must stay a single write: the whole compression pass runs under
+        a host timeout, and work still in flight when it expires is discarded.
+        """
+        if self._context != "primary" or not messages:
+            return ""
+        session = self._session_id or "unknown"
+        when = datetime.now(UTC)
+        path = self.path_for(f"{session}-compressed", when)
+        asyncio.run(self._write_transcript(path, session, when, messages))
+        return (
+            f"The messages being compressed out of this conversation are preserved "
+            f"verbatim at {path} in SurrealFS. Say so in the summary, so the detail "
+            f"can be read back with the `surrealfs_read` tool instead of guessed at."
+        )
 
     def get_config_schema(self) -> list[dict[str, Any]]:
-        """Env-var only, so `save_config` can stay the ABC's no-op."""
+        """Every setting this provider reads from the environment, in one list.
+
+        Env-var only, so `save_config` can stay the ABC's no-op — `hermes memory
+        setup` writes any field carrying an `env_var` to `.env` itself.
+
+        The upstream advice is to prompt only for what the user *must* set and
+        document the rest. That is aimed at providers with many options; seven
+        is not many, and this list is load-bearing elsewhere — `hermes
+        surrealfs-memory status` builds its report by walking it, so a field
+        demoted to README-only silently vanishes from the one command whose job
+        is diagnosing a bad install. One rule: if the code reads it from the
+        environment, it is here.
+        """
         return [
             {
                 "key": "url",
@@ -213,9 +335,16 @@ class SurrealFsMemory(_Base):
                 "env_var": "SURREALDB_DATABASE",
             },
             {
+                "key": "user",
+                "description": "SurrealDB user",
+                "default": "root",
+                "env_var": "SURREALDB_USER",
+            },
+            {
                 "key": "password",
-                "description": "SurrealDB root password",
+                "description": "SurrealDB password",
                 "secret": True,
+                "required": True,
                 "env_var": "SURREALDB_PASS",
             },
             {
@@ -223,6 +352,16 @@ class SurrealFsMemory(_Base):
                 "description": "Folder in SurrealFS to file turns under",
                 "default": "/memory",
                 "env_var": "SURREALFS_MEMORY_DIR",
+            },
+            {
+                "key": "semantic",
+                "description": (
+                    "Match recall on meaning as well as wording "
+                    "(needs OPENAI_API_KEY and the `embed` extra)"
+                ),
+                "default": "0",
+                "choices": ["0", "1"],
+                "env_var": "SURREALFS_SEMANTIC",
             },
         ]
 
@@ -266,6 +405,50 @@ class SurrealFsMemory(_Base):
         )
         async with connected() as db:
             await SurrealFs(db).write_text(self.path_for(session, when), body)
+
+    async def _mirror(
+        self, target: str, action: str, content: str, old_text: str
+    ) -> None:
+        """Apply one built-in memory delta to this profile's copy of the file."""
+        from surrealfs import SurrealFs  # deferred — see `_write`
+        from surrealfs.errors import NotFound
+        from surrealfs.integrations._connect import connected
+
+        path = f"{self.root()}/builtin/{_slug(target)}.md"
+        entry = content.strip()
+        async with connected() as db:
+            fs = SurrealFs(db)
+            if action == "add":
+                current = await fs.read_text(path) if await fs.exists(path) else ""
+                await fs.write_text(path, f"{current}{entry}\n")
+                return
+            try:
+                # `replace` names what it is replacing in `old_text`; `remove`
+                # names the entry itself in `content`.
+                await fs.edit(path, old_text or entry, entry if old_text else "")
+            except NotFound:
+                # The mirror never saw the entry — a write from before this hook
+                # existed, or a profile whose file was curated by hand. Dropping
+                # it is right: there is nothing to edit, and re-adding it would
+                # resurrect text the user just removed.
+                return
+
+    async def _write_transcript(
+        self, path: str, session: str, when: datetime, messages: list[dict[str, Any]]
+    ) -> None:
+        """Write `messages` out as markdown. The only place `messages` is used."""
+        from surrealfs import SurrealFs  # deferred — see `_write`
+        from surrealfs.integrations._connect import connected
+
+        parts = [
+            f"# Compressed out of {session} at "
+            f"{when.strftime('%Y-%m-%d %H:%M:%S')} UTC\n"
+        ]
+        for message in messages:
+            role = str(message.get("role") or "unknown")
+            parts.append(f"## {role}\n\n{_render(message)}\n")
+        async with connected() as db:
+            await SurrealFs(db).write_text(path, "\n".join(parts))
 
     async def _recall(self, query: str) -> str:
         from surrealfs import SurrealFs  # deferred — see `_write`
@@ -311,3 +494,22 @@ class SurrealFsMemory(_Base):
 def _slug(session: str) -> str:
     """Make a session id safe to use as a filename."""
     return _UNSAFE.sub("-", session).strip("-") or "session"
+
+
+def _render(message: dict[str, Any]) -> str:
+    """One OpenAI-style message as text, tool calls included.
+
+    The calls are in here because they are frequently the substance of a turn —
+    which files were read, which commands ran — and a transcript that drops them
+    preserves the conversation about the work but not the work.
+    """
+    content = message.get("content")
+    if isinstance(content, list):  # Multimodal turns carry typed parts.
+        content = "\n".join(
+            str(part.get("text") or "") for part in content if isinstance(part, dict)
+        )
+    lines = [str(content or "").strip()]
+    for call in message.get("tool_calls") or []:
+        function = call.get("function") or {} if isinstance(call, dict) else {}
+        lines.append(f"→ {function.get('name') or 'tool'}({function.get('arguments')})")
+    return "\n".join(line for line in lines if line) or "(empty)"

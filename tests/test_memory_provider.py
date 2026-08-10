@@ -11,6 +11,9 @@ from __future__ import annotations
 import argparse
 import ast
 import asyncio
+import importlib.util
+import inspect
+import os
 from pathlib import Path
 
 import pytest
@@ -151,6 +154,29 @@ def test_config_schema_is_env_vars_only():
         assert field["env_var"], field
 
 
+def test_config_schema_covers_every_setting_the_provider_reads():
+    """One rule: read it from the environment, declare it here.
+
+    `hermes surrealfs-memory status` walks this list to report what resolved, so
+    a setting demoted to README-only disappears from the command that exists to
+    diagnose a bad install. Pinned as a set so adding a variable without a field
+    fails here rather than silently.
+    """
+    schema = SurrealFsMemory().get_config_schema()
+    assert {field["env_var"] for field in schema} == {
+        "SURREALDB_URL",
+        "SURREALDB_NAMESPACE",
+        "SURREALDB_DATABASE",
+        "SURREALDB_USER",
+        "SURREALDB_PASS",
+        "SURREALFS_MEMORY_DIR",
+        "SURREALFS_SEMANTIC",
+    }
+    # The one field with neither a default nor anything to fall back on.
+    (password,) = [f for f in schema if f["env_var"] == "SURREALDB_PASS"]
+    assert password["required"] and password["secret"]
+
+
 def test_sync_turn_files_the_exchange(memory):
     memory.sync_turn("how do I get paid", "You invoice monthly.", session_id="sess-1")
 
@@ -279,3 +305,267 @@ def test_prefetch_is_quiet_when_nothing_matches(memory):
     assert memory.prefetch("xylophone quarantine zeppelin") == ""
     # And never bothers searching for a bare acknowledgement.
     assert memory.prefetch("ok") == ""
+
+
+# -- session switching -------------------------------------------------------
+
+
+def test_a_session_switch_rebinds_the_fallback_session_id(memory):
+    """`/resume`, `/branch`, `/reset` and compression all land here.
+
+    `sync_turn` may arrive with no session id at all, and falls back to the one
+    `initialize` recorded — which goes stale the moment Hermes rotates it.
+    """
+    memory.on_session_switch("sess-branched", parent_session_id="sess-1", reset=False)
+    memory.sync_turn("a question after branching", "An answer.")
+
+    ((path, _),) = _filed().items()
+    assert "/sess-branched-" in path
+
+
+def test_a_session_switch_tolerates_keywords_it_has_not_seen(memory):
+    """Hermes forwards `reason`, and only injects `rewound` when it is true."""
+    memory.on_session_switch("sess-2", reason="rewind", rewound=True, whatever=1)
+
+    assert memory._session_id == "sess-2"
+
+
+# -- the warm recall ---------------------------------------------------------
+
+
+def _seed(path: str, body: str) -> None:
+    async def go() -> None:
+        async with _connect.connected() as db:
+            await SurrealFs(db).write_text(path, body)
+
+    asyncio.run(go())
+
+
+def test_a_queued_recall_is_served_on_the_next_turn(memory):
+    """The point of `queue_prefetch`: the search is over before the turn starts.
+
+    Deleting the note between the two calls is what proves it — a `prefetch`
+    that searched inline could not possibly still find it.
+    """
+    _seed("/preferences/voice.md", "Prefers terse replies, no preamble.")
+    memory.queue_prefetch("what tone does the user prefer")
+
+    async def drop() -> None:
+        async with _connect.connected() as db:
+            await SurrealFs(db).rm("/preferences/voice.md")
+
+    asyncio.run(drop())
+
+    assert "/preferences/voice.md" in memory.prefetch("and what about formatting")
+
+
+def test_the_warm_recall_is_served_once(memory):
+    """It is one turn behind already; serving it twice would make it two."""
+    _seed("/preferences/voice.md", "Prefers terse replies, no preamble.")
+    memory.queue_prefetch("what tone does the user prefer")
+
+    assert memory.prefetch("first turn after the queue")
+    # Nothing warm left, so this one searches — and this query matches nothing.
+    assert memory.prefetch("xylophone quarantine zeppelin") == ""
+
+
+def test_a_session_switch_drops_the_warm_recall(memory):
+    """It was warmed for a conversation this process is no longer having."""
+    _seed("/preferences/voice.md", "Prefers terse replies, no preamble.")
+    memory.queue_prefetch("what tone does the user prefer")
+    memory.on_session_switch("sess-fresh", reset=True)
+
+    assert memory.prefetch("xylophone quarantine zeppelin") == ""
+
+
+def test_queueing_a_trivial_prompt_warms_nothing(memory):
+    _seed("/preferences/voice.md", "Prefers terse replies, no preamble.")
+    memory.queue_prefetch("what tone does the user prefer")
+    memory.queue_prefetch("thanks")
+
+    assert memory.prefetch("xylophone quarantine zeppelin") == ""
+
+
+# -- mirroring the built-in memory tool --------------------------------------
+
+
+def test_built_in_memory_writes_are_mirrored(memory):
+    """State, not events: the mirror is what `MEMORY.md` currently says."""
+    memory.on_memory_write("add", "memory", "Deploys go out on Thursdays.")
+    memory.on_memory_write("add", "memory", "The staging database resets nightly.")
+    memory.on_memory_write(
+        "replace",
+        "memory",
+        "Deploys go out on Fridays.",
+        metadata={"old_text": "Deploys go out on Thursdays."},
+    )
+    memory.on_memory_write("remove", "memory", "The staging database resets nightly.")
+    memory.on_memory_write("add", "user", "Prefers metric units.")
+
+    filed = _filed()
+    assert filed["/memory/default/builtin/memory.md"].strip() == (
+        "Deploys go out on Fridays."
+    )
+    assert filed["/memory/default/builtin/user.md"].strip() == "Prefers metric units."
+
+
+def test_a_mirror_edit_for_text_that_was_never_seen_is_dropped(memory):
+    """Writes from before this hook existed leave nothing to edit."""
+    memory.on_memory_write("remove", "memory", "something nobody ever filed")
+
+    assert _filed() == {}
+
+
+def test_memory_writes_from_a_subagent_are_not_mirrored(memory):
+    """Same rule as `sync_turn`, read per-write — the tool can run in a subagent.
+
+    The provider itself was initialized as primary; only the metadata says
+    otherwise.
+    """
+    memory.on_memory_write(
+        "add",
+        "memory",
+        "A cron job noticed this.",
+        metadata={"execution_context": "cron"},
+    )
+
+    assert _filed() == {}
+
+
+def test_mirrored_memory_is_recalled(memory):
+    """The whole reason to mirror: recall could not see this before."""
+    memory.on_memory_write("add", "memory", "The deploy key rotates every month.")
+
+    assert "builtin/memory.md" in memory.prefetch("when does the deploy key rotate")
+
+
+# -- compression -------------------------------------------------------------
+
+
+MESSAGES = [
+    {"role": "user", "content": "which file holds the retry policy"},
+    {
+        "role": "assistant",
+        "content": "Let me look.",
+        "tool_calls": [
+            {"function": {"name": "surrealfs_search", "arguments": '{"q": "retry"}'}}
+        ],
+    },
+    {"role": "assistant", "content": [{"type": "text", "text": "It is in client.py."}]},
+]
+
+
+def test_pre_compress_files_the_messages_and_points_at_them(memory):
+    """Everyone else can only summarise what is discarded. This keeps it."""
+    pointer = memory.on_pre_compress(MESSAGES)
+
+    ((path, body),) = _filed().items()
+    assert path in pointer and "surrealfs_read" in pointer
+    assert "which file holds the retry policy" in body
+    # Tool calls are the substance of a turn as often as the prose is.
+    assert "surrealfs_search" in body
+    # Multimodal turns carry typed parts rather than a string.
+    assert "It is in client.py." in body
+
+
+def test_pre_compress_is_quiet_when_there_is_nothing_to_keep(memory):
+    assert memory.on_pre_compress([]) == ""
+    assert _filed() == {}
+
+
+def test_only_primary_agents_keep_compressed_messages(surreal_url, memory):
+    provider = SurrealFsMemory()
+    provider.initialize(
+        "sess-1", hermes_home="/tmp", platform="cron", agent_context="cron"
+    )
+
+    assert provider.on_pre_compress(MESSAGES) == ""
+    assert _filed() == {}
+
+
+# -- the real ABC ------------------------------------------------------------
+
+
+def _hermes_abc():
+    """Hermes' `MemoryProvider`, loaded from the checkout rather than imported.
+
+    `_Base` is a plain `object` everywhere but inside Hermes, so nothing else in
+    this suite checks a single signature against the contract — a rename or a new
+    required parameter upstream passes green. Loading it by path keeps that check
+    honest without putting Hermes on `sys.path`; the module imports stdlib only,
+    so there is nothing else to satisfy.
+    """
+    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    path = home / "hermes-agent" / "agent" / "memory_provider.py"
+    if not path.exists():
+        pytest.skip(f"Hermes is not installed at {path}")
+    spec = importlib.util.spec_from_file_location("_hermes_memory_provider", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.MemoryProvider
+
+
+def test_every_abstract_method_is_implemented():
+    abc = _hermes_abc()
+
+    assert set(abc.__abstractmethods__) <= set(dir(SurrealFsMemory))
+
+
+def test_every_implemented_hook_takes_the_calls_the_abc_permits():
+    """Not signature equality — that would fail on things that are fine.
+
+    Annotations legitimately differ (upstream is on `Optional[List[...]]`, this
+    file on `list[...] | None`), and `on_session_switch` deliberately absorbs
+    upstream's named keywords into `**kwargs` so the next one it adds is not a
+    crash. What has to hold is narrower and is the actual contract: every call
+    Hermes is allowed to make, this signature accepts.
+    """
+    abc = _hermes_abc()
+    checked = []
+    for attribute in dir(abc):
+        ours = getattr(SurrealFsMemory, attribute, None)
+        theirs = getattr(abc, attribute, None)
+        # `ours is None` is a hook left at the ABC's default: `_Base` is a plain
+        # `object` here, so an unimplemented hook is absent rather than inherited.
+        if attribute.startswith("_") or ours is None or not callable(theirs):
+            continue
+        checked.append(attribute)
+        _assert_accepts(ours, theirs, attribute)
+    # Pinned, because a rename upstream shortens this list rather than failing an
+    # assertion above — the loop would simply stop checking the renamed hook.
+    assert set(checked) == {
+        "get_config_schema",
+        "get_tool_schemas",
+        "initialize",
+        "is_available",
+        "on_memory_write",
+        "on_pre_compress",
+        "on_session_switch",
+        "prefetch",
+        "queue_prefetch",
+        "sync_turn",
+        "system_prompt_block",
+    }
+
+
+def _assert_accepts(ours, theirs, name: str) -> None:
+    """Both the fullest and the barest call the ABC permits must bind."""
+    signature = inspect.signature(ours)
+    for omit_optional in (False, True):
+        args, kwargs = [], {}
+        for p in inspect.signature(theirs).parameters.values():
+            if p.kind in (p.VAR_POSITIONAL, p.VAR_KEYWORD):
+                continue
+            if omit_optional and p.default is not p.empty:
+                continue
+            value = None if p.default is p.empty else p.default
+            if p.kind is p.KEYWORD_ONLY:
+                kwargs[p.name] = value
+            else:
+                args.append(value)
+        try:
+            signature.bind(*args, **kwargs)
+        except TypeError as exc:
+            raise AssertionError(
+                f"{name}{signature} rejects {args}, {kwargs}: {exc}"
+            ) from None

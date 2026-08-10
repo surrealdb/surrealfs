@@ -1,5 +1,5 @@
 name: surrealfs-memory
-version: 0.2.0
+version: 0.3.0
 description: >-
   Memory backed by SurrealFS — files every turn under /memory in a SurrealDB-backed
   filesystem, and recalls context by searching the whole tree, the agent's own notes
@@ -18,7 +18,11 @@ pip_dependencies:
 hooks:
   - system_prompt_block
   - prefetch
+  - queue_prefetch
   - sync_turn
+  - on_session_switch
+  - on_memory_write
+  - on_pre_compress
 # Routes this directory to Hermes' memory-provider discovery rather than the general
 # plugin manager. Without it, `hermes_cli/plugins.py` infers the same thing by
 # scanning this __init__.py for the string "MemoryProvider" — declaring it is

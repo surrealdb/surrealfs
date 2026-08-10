@@ -85,10 +85,30 @@ to live somewhere, and in-process is the one place it cannot: `hermes --resume` 
 a second process on the same session id, restarts counting at one, and a write
 replaces — so turn one of the resumed conversation overwrote turn one of the original.
 
+Two other things get filed, both under the same profile subtree:
+
+- **Hermes' own memory.** When the built-in memory tool writes to `MEMORY.md` or
+  `USER.md`, the same change is applied to `/memory/<profile>/builtin/memory.md` or
+  `.../user.md`. That is a mirror of what those files *say*, not a log of the writes,
+  so recall reads the current state. Without it, Hermes' memory and SurrealFS would
+  diverge permanently and recall would never see either file.
+- **Messages about to be compressed away.** Before Hermes compresses a long
+  conversation it asks each provider what to preserve; everyone else can only
+  summarise, which is what the compressor is already doing. This writes the doomed
+  messages out verbatim — tool calls included — and hands the compressor a pointer to
+  the file, so the detail survives at full fidelity and the agent can read it back
+  with `surrealfs_read`.
+
 **Recall.** Before each turn, the provider searches the **whole** filesystem, not just
 its own folder. The notes the agent wrote itself under `/preferences/` and `/projects/`
 are the highest-signal memories present, and excluding them would mean the bundled
 `surrealfs:notes` skill and this provider ignored each other's work.
+
+The search runs after the *previous* turn rather than during this one — Hermes' own
+`queue_prefetch` / `prefetch` pair — so nothing waits on it, in particular not the
+embedding round-trip `SURREALFS_SEMANTIC=1` adds. The cost is that a recall is one turn
+behind: switch topic abruptly and the first turn on the new subject still carries
+context for the old one.
 
 ## Profiles
 
