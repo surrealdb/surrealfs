@@ -1,9 +1,8 @@
 # Hermes memory provider — what's missing
 
 Contract surfaces `surrealfs/integrations/hermes_memory/` does not implement, or
-declares incompletely. See also [wrong](hermes-memory-review-wrong.md),
-[improvements](hermes-memory-review-improvements.md) and
-[decisions](hermes-memory-decisions.md).
+declares incompletely. See also [improvements](hermes-memory-review-improvements.md)
+and [decisions](hermes-memory-decisions.md).
 
 Not everything here needs implementing. `handle_tool_call` (no tools),
 `save_config` (env-var-only), `shutdown` (no long-lived connection) and
@@ -19,16 +18,7 @@ provider down. The ABC asks providers caching per-session state to update it her
 and it goes stale. It is now the only per-session state left, so this is a one-line
 reassignment — see [decisions](hermes-memory-decisions.md).
 
-## 2. No `cli.py`
-
-The convention is `register_cli(subparser)` in `cli.py`, surfacing as
-`hermes <provider-name> <subcommand>` and gated on the provider being the active
-one. `hermes surrealfs-memory status` — connect, report the resolved
-namespace/database, count filed turns — is the natural home for the reachability
-check `is_available()` is forbidden from doing
-([wrong #2](hermes-memory-review-wrong.md)).
-
-## 3. Two hooks this backend is unusually well suited to
+## 2. Two hooks this backend is unusually well suited to
 
 - **`on_memory_write(action, target, content, metadata)`** — mirrors built-in
   `MEMORY.md` / `USER.md` writes into the backend. Without it, Hermes' own memory
@@ -42,14 +32,14 @@ check `is_available()` is forbidden from doing
 Both write turns, so both should go through `path_for` and inherit the profile
 subtree.
 
-## 4. `queue_prefetch` not implemented
+## 3. `queue_prefetch` not implemented
 
 The ABC pairs it with `prefetch`: queue the recall after each turn, serve the
 cached result on the next one. The provider does the whole retrieval inline in
 `prefetch` instead. See [improvements #1](hermes-memory-review-improvements.md) for
 why that costs more than the `ponytail:` note assumes.
 
-## 5. Config schema gaps
+## 4. Config schema gaps
 
 `get_config_schema()` covers url, namespace, database, password, memory_dir.
 Missing:
@@ -68,7 +58,7 @@ fields that carry an `env_var` to `.env` as well as `config.yaml`, so a no-op
 `save_config()` loses nothing. `tests/test_memory_provider.py` already pins that
 every field names an env var.
 
-## 6. No conformance test against the real ABC
+## 5. No conformance test against the real ABC
 
 Because `_Base = object` outside Hermes, the suite never checks a single signature
 against upstream; a rename or a new required method would pass green. An opt-in test

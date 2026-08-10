@@ -5,6 +5,13 @@ description: >-
   filesystem, and recalls context by searching the whole tree, the agent's own notes
   included. Connection details come from the SURREALDB_* env vars.
 author: Martin Schaer
+# Wiring, unlike `hooks:` below: `hermes memory setup` installs these into Hermes' own
+# virtualenv, and `hermes update` reinstalls them after a venv sync strips or downgrades
+# them. This is the whole bootstrap — which is also why the imports in __init__.py are
+# deferred into the methods that use them, so discovery can list a provider whose
+# dependency is not installed yet.
+pip_dependencies:
+  - surrealfs
 # Everything the provider implements beyond the required lifecycle. Nothing in
 # Hermes reads this — memory discovery only takes `description` out of here — but
 # the plugin docs ask for it, and it is the only place the set is written down.

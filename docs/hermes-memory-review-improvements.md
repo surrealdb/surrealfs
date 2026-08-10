@@ -1,8 +1,7 @@
 # Hermes memory provider — what can be improved
 
 Working behaviour in `surrealfs/integrations/hermes_memory/` with a known ceiling,
-in rough value order. See also [wrong](hermes-memory-review-wrong.md),
-[missing](hermes-memory-review-missing.md) and
+in rough value order. See also [missing](hermes-memory-review-missing.md) and
 [decisions](hermes-memory-decisions.md).
 
 ## 1. `prefetch` runs the whole retrieval inline, and the cost is understated

@@ -12,13 +12,21 @@ package is pip-installed. The directory name is the provider name.
 ```bash
 ln -s "$PWD/surrealfs/integrations/hermes_memory" \
   "${HERMES_HOME:-~/.hermes}/plugins/surrealfs-memory"
+hermes memory setup surrealfs-memory
 ```
 
-`surrealfs` also has to be importable by Hermes' own interpreter
-(`~/.hermes/hermes-agent/venv/bin/python`).
+`setup` installs `surrealfs` into Hermes' own virtualenv — it has to be importable by
+`~/.hermes/hermes-agent/venv/bin/python`, and `plugin.yaml` declares it as a
+`pip_dependencies` entry so `hermes update` reinstalls it after a venv rebuild. Running
+from a checkout is the one case to do by hand, since that installs the *published*
+package over your working copy:
 
-Then activate it in `~/.hermes/config.yaml` — only one memory provider can be active
-at a time:
+```bash
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python -e .
+```
+
+Setup also activates the provider in `~/.hermes/config.yaml` — only one memory provider
+can be active at a time, and the equivalent by hand is:
 
 ```yaml
 memory:
@@ -26,7 +34,8 @@ memory:
 ```
 
 Confirm with `hermes memory`, which lists discovered providers and whether each
-reports itself available.
+reports itself available, then `hermes surrealfs-memory status`, which actually connects
+— names the database it resolved and counts the turns filed there.
 
 ## Configuration
 

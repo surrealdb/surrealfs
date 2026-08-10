@@ -5,9 +5,13 @@ plausibly undo without realising what it was for. Rationale that fits in a docst
 lives in the docstring; this file is for the parts that span files, and for the
 alternatives that were considered and rejected.
 
-Open work is in [wrong](hermes-memory-review-wrong.md),
-[missing](hermes-memory-review-missing.md) and
-[improvements](hermes-memory-review-improvements.md).
+Open work is in [missing](hermes-memory-review-missing.md) and
+[improvements](hermes-memory-review-improvements.md). All three files were written
+against
+[Building a Memory Provider Plugin](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/memory-provider-plugin.md)
+and the sources it describes — `agent/memory_provider.py`, `agent/memory_manager.py`,
+`plugins/memory/__init__.py`, `hermes_cli/memory_setup.py`, `hermes_cli/plugins.py` —
+which is where the line references below point.
 
 ## Turns are named by wall clock, not by a turn number
 
@@ -81,6 +85,38 @@ all writes.
 
 `prefetch` is deliberately *not* gated. The ABC's instruction is about writes, and
 recalling context for a cron run is useful rather than harmful.
+
+## The `surrealfs` imports are deferred into the methods that use them
+
+`__init__.py` and `cli.py` import nothing from `surrealfs` at module level. That reads
+like a tidiness lapse and is the reverse — it is what makes the provider installable at
+all.
+
+Bootstrap runs entirely through `pip_dependencies: [surrealfs]` in `plugin.yaml`:
+`hermes memory setup` installs it into Hermes' own virtualenv
+(`memory_setup.py:_install_dependencies`), and `hermes update` reinstalls it with
+`force=True` after a venv sync strips or downgrades it (#53272, #70636). But the user
+only reaches that install by picking this provider out of a list that
+`_get_available_providers()` builds by *importing* each candidate and dropping the ones
+that raise. A module-level `surrealfs` import therefore hides the provider from the
+wizard on exactly the machines where the wizard was the point — and the README's old
+manual `uv pip install --python ~/.hermes/hermes-agent/venv/bin/python` step existed
+only to paper over that. `cli.py` is stricter still: Hermes imports it during argparse
+setup, before the provider loads, inside a bare `except Exception`, so an import error
+there deletes `hermes surrealfs-memory status` — the subcommand whose whole job is to
+diagnose a broken install.
+
+Moving the imports back to the top would pass every test that touches behaviour, which
+is why `test_the_plugin_imports_without_surrealfs_installed` parses both files instead.
+
+`is_available()` is the runtime half of the same decision. It reports whether those
+deferred imports will resolve — `find_spec` on `surrealfs` **and** `surrealdb`, both,
+because the `force=True` path above exists precisely for venvs left holding one of the
+two. A constant `True` is worse than useless: `hermes memory` prints it verbatim as
+`Status: available ✓` while every turn dies in a `logger.warning` nobody reads, since
+`memory_manager.py` catches everything from `sync_turn` and `prefetch`. The reachability
+probe the ABC forbids `is_available()` from making lives in `hermes surrealfs-memory
+status` instead.
 
 ## `hooks:` in `plugin.yaml` is documentation, not wiring
 

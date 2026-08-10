@@ -8,14 +8,17 @@ blocking there is the intended shape — see the class docstring.
 
 from __future__ import annotations
 
+import argparse
+import ast
 import asyncio
 from pathlib import Path
 
 import pytest
 
 from surrealfs import SurrealFs
-from surrealfs.integrations import _connect
+from surrealfs.integrations import _connect, hermes_memory
 from surrealfs.integrations.hermes_memory import SurrealFsMemory, register
+from surrealfs.integrations.hermes_memory import cli as memory_cli
 
 
 class _FakeMemoryCtx:
@@ -78,6 +81,55 @@ def test_the_tool_plugin_never_mentions_the_provider_base_class():
     scanned = Path(hermes.__file__).read_text(encoding="utf-8")[:8192]
     assert "MemoryProvider" not in scanned
     assert "register_memory_provider" not in scanned
+
+
+def _module_level_imports(path: Path) -> set[str]:
+    """Every module imported at import time — anything not inside a function body."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    deferred = {
+        node
+        for fn in ast.walk(tree)
+        if isinstance(fn, ast.FunctionDef | ast.AsyncFunctionDef)
+        for node in ast.walk(fn)
+    }
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if node in deferred:
+            continue
+        if isinstance(node, ast.Import):
+            names.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.add(node.module or "")
+    return names
+
+
+def test_the_plugin_imports_without_surrealfs_installed():
+    """`hermes memory setup` is the only thing that installs `surrealfs` for Hermes.
+
+    It can only run once the user picks this provider out of a list built by
+    `_get_available_providers`, which imports each candidate's `__init__.py` and drops
+    the ones that raise — so a module-level `surrealfs` import hides the provider from
+    the wizard that would have installed it. `cli.py` is loaded even earlier, during
+    argparse setup, inside a bare `except Exception`.
+    """
+    for module in (hermes_memory, memory_cli):
+        imported = _module_level_imports(Path(module.__file__))
+        eager = [n for n in imported if n.split(".")[0] == "surrealfs"]
+        assert not eager, f"{module.__name__} imports {eager} at module level"
+
+
+def test_register_cli_dispatches_status():
+    """Hermes can't find our handler by name, so `register_cli` has to set `func`.
+
+    It looks for `getattr(cli_mod, f"{provider_name}_command")`, and
+    `surrealfs-memory_command` is not a valid identifier.
+    """
+    parser = argparse.ArgumentParser()
+    memory_cli.register_cli(parser)
+
+    args = parser.parse_args(["status"])
+    assert args.surrealfs_memory_command == "status"
+    assert callable(args.func)
 
 
 def test_register_hands_over_a_provider():

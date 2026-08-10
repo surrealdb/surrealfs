@@ -12,8 +12,11 @@ Memory providers are found by directory, not by entry point, so this has to be
 installed on its own::
 
     ln -s "$PWD/surrealfs/integrations/hermes_memory" ~/.hermes/plugins/surrealfs-memory
+    hermes memory setup surrealfs-memory
 
-and then activated in ``~/.hermes/config.yaml``::
+The second step installs ``surrealfs`` into Hermes' own virtualenv — the
+``pip_dependencies`` in ``plugin.yaml`` — and activates the provider in
+``~/.hermes/config.yaml``::
 
     memory:
       provider: surrealfs-memory
@@ -31,15 +34,12 @@ different databases is already a matter of configuring each one — see
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-from surrealfs import SurrealFs
-from surrealfs.embed import make_embedder
-from surrealfs.integrations._connect import connected
 
 try:  # Inside Hermes, subclass the real ABC so its isinstance checks hold.
     from agent.memory_provider import MemoryProvider as _Base
@@ -136,8 +136,14 @@ class SurrealFsMemory(_Base):
         return PROVIDER_NAME
 
     def is_available(self) -> bool:
-        """True whenever the library imported. No network, per the ABC."""
-        return True
+        """Whether the imports the async half defers will succeed. No network.
+
+        `surrealdb` as well as `surrealfs`, even though the first is a hard
+        dependency of the second: `hermes update` force-reinstalls a provider's
+        declared dependencies precisely because a venv sync can strip or downgrade
+        one bridge package and leave the rest (#53272, #70636).
+        """
+        return all(importlib.util.find_spec(mod) for mod in ("surrealfs", "surrealdb"))
 
     def initialize(self, session_id: str, **kwargs: Any) -> None:
         """Note the session, profile, and context. No I/O — the first write connects."""
@@ -244,6 +250,13 @@ class SurrealFsMemory(_Base):
     async def _write(
         self, session: str, user_content: str, assistant_content: str
     ) -> None:
+        # Imported here, not at module top: Hermes' discovery drops any provider
+        # whose `__init__.py` fails to import, so a module-level `surrealfs` import
+        # hides this one from `hermes memory setup` on the machines that most need
+        # it — the ones where setup would have installed the package.
+        from surrealfs import SurrealFs
+        from surrealfs.integrations._connect import connected
+
         when = datetime.now(UTC)
         body = (
             f"# {when.strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
@@ -255,6 +268,10 @@ class SurrealFsMemory(_Base):
             await SurrealFs(db).write_text(self.path_for(session, when), body)
 
     async def _recall(self, query: str) -> str:
+        from surrealfs import SurrealFs  # deferred — see `_write`
+        from surrealfs.embed import make_embedder
+        from surrealfs.integrations._connect import connected
+
         # The same call the `surrealfs_search` tool makes, deliberately: recall
         # used to run its own fan-out, one search per keyword rarest-first, which
         # measured marginally better (MRR 0.854 against 0.833 over eight queries)
