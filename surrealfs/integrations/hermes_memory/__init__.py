@@ -70,6 +70,23 @@ PROVIDER_NAME = "surrealfs-memory"
 
 RECALL_LIMIT = 5
 
+# How many of those slots filed turns may take. The rest belong to the notes
+# under /preferences/ and /projects/ — see `_rank`.
+MEMORY_SLOTS = 2
+
+# Terms the recall query is cut down to. A prompt is not a search box: every word
+# left in is another OR branch, and `search_text` reads the content of every row
+# that matches any of them.
+RECALL_TERMS = 12  # ponytail: flat cap, rarest-first if it ever measures short
+
+# A trivial prompt is filed anyway when the answer is at least this long: "go
+# ahead" followed by a design document is a turn worth keeping.
+TRIVIAL_ANSWER_CHARS = 400
+
+# Tool calls appended to a turn file, and how much of one call's arguments.
+TOOL_LINES = 10
+TOOL_LINE_CHARS = 200
+
 _UNSAFE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
@@ -176,11 +193,26 @@ class SurrealFsMemory(_Base):
         session_id: str = "",
         messages: list[dict[str, Any]] | None = None,
     ) -> None:
-        """File one completed turn, unless the prompt carries no signal."""
-        if self._context != "primary" or is_trivial_prompt(user_content):
+        """File one completed turn, unless the exchange carries no signal.
+
+        Both sides have to be trivial. Gating on the prompt alone dropped "go
+        ahead" followed by a 2000-word design document — the prompt is where the
+        signal usually is, but it is not where the content is.
+        """
+        if self._context != "primary":
+            return
+        if (
+            is_trivial_prompt(user_content)
+            and len(assistant_content.strip()) < TRIVIAL_ANSWER_CHARS
+        ):
             return
         asyncio.run(
-            self._write(session_id or self._session_id, user_content, assistant_content)
+            self._write(
+                session_id or self._session_id,
+                user_content,
+                assistant_content,
+                _tool_lines(messages),
+            )
         )
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
@@ -387,7 +419,7 @@ class SurrealFsMemory(_Base):
     # -- the async half ------------------------------------------------------
 
     async def _write(
-        self, session: str, user_content: str, assistant_content: str
+        self, session: str, user_content: str, assistant_content: str, tools: str = ""
     ) -> None:
         # Imported here, not at module top: Hermes' discovery drops any provider
         # whose `__init__.py` fails to import, so a module-level `surrealfs` import
@@ -403,6 +435,11 @@ class SurrealFsMemory(_Base):
             f"## User\n\n{user_content.strip()}\n\n"
             f"## Assistant\n\n{assistant_content.strip()}\n"
         )
+        # Which files were read, which commands ran. Frequently the substance of
+        # the turn, and invisible in either message's text. Omitted rather than
+        # left empty, so a turn with no tool calls reads as it always did.
+        if tools:
+            body += f"\n## Tools\n\n{tools}\n"
         async with connected() as db:
             await SurrealFs(db).write_text(self.path_for(session, when), body)
 
@@ -468,15 +505,42 @@ class SurrealFsMemory(_Base):
             # signal in here. The vector is built from the whole sentence, since
             # reading one is the single thing that arm does better.
             vector = await make_embedder()(query) if _semantic() else None
-            # Over-fetch so the filter below cannot cost a slot. `search_text`
-            # reads every matching row's content whatever the limit, so a wider
-            # one is close to free.
-            hits = await fs.search(query, vector=vector, limit=RECALL_LIMIT * 2)
-        hits = [hit for hit in hits if self._is_mine(hit.path)][:RECALL_LIMIT]
+            # Over-fetch so the filtering below cannot cost a slot — it drops
+            # whole classes of hit, not the odd one. `search_text` reads every
+            # matching row's content whatever the limit, so a wider one is close
+            # to free.
+            hits = await fs.search(
+                _recall_query(query), vector=vector, limit=RECALL_LIMIT * 4
+            )
+        hits = self._rank(hits)
         if not hits:
             return ""
         lines = "\n".join(f"{hit.path}\n    {hit.snippet}" for hit in hits)
         return f"Recalled from SurrealFS:\n{lines}"
+
+    def _rank(self, hits: list[Any]) -> list[Any]:
+        """The hits worth putting on a turn, curated notes first.
+
+        Recall reads the tree it writes, so without this it feeds on its own
+        output: one turn per file means short documents, which BM25 favours, and
+        after a few sessions the top five is verbatim transcript rather than the
+        `/preferences/` and `/projects/` notes that are the point. Worst case is
+        this session's own first turn outranking everything on the query that
+        produced it, which :meth:`_is_this_session` drops outright.
+
+        Filed turns keep :data:`MEMORY_SLOTS` of the five rather than being
+        excluded, because sometimes a past turn *is* the answer. Notes keep their
+        fused rank; turns are appended after them, never interleaved.
+        """
+        kept = [
+            hit
+            for hit in hits
+            if self._is_mine(hit.path) and not self._is_this_session(hit.path)
+        ]
+        tree = f"{_memory_dir()}/"
+        notes = [hit for hit in kept if not hit.path.startswith(tree)]
+        filed = [hit for hit in kept if hit.path.startswith(tree)]
+        return (notes + filed[:MEMORY_SLOTS])[:RECALL_LIMIT]
 
     def _is_mine(self, path: str) -> bool:
         """Keep everything except another profile's filed turns.
@@ -490,10 +554,70 @@ class SurrealFsMemory(_Base):
             f"{self.root()}/"
         )
 
+    def _is_this_session(self, path: str) -> bool:
+        """Whether `path` is a turn this very conversation filed.
+
+        Matched on the basename, not the whole path: `path_for` puts the session
+        in the filename and the date in the folder, so a conversation that runs
+        past midnight — or a resumed one — spans day folders under one id. The
+        `-compressed` transcripts match too, and should: same conversation.
+
+        An empty session id matches nothing. `_slug("")` is `"session"`, which
+        would otherwise quietly filter out every file literally named that.
+        """
+        if not self._session_id or not path.startswith(f"{self.root()}/"):
+            return False
+        return path.rsplit("/", 1)[-1].startswith(f"{_slug(self._session_id)}-")
+
 
 def _slug(session: str) -> str:
     """Make a session id safe to use as a filename."""
     return _UNSAFE.sub("-", session).strip("-") or "session"
+
+
+def _recall_query(query: str) -> str:
+    """A whole prompt cut down to something worth searching for.
+
+    `search_text` matches on `content @1,OR@ $query`, so every word left in is
+    another OR branch — and it reads the content of every row any branch matched
+    back into Python to rank it. A human types three words into the search tool;
+    recall gets a paragraph, on every turn, on the thread Hermes joins with an 8s
+    timeout.
+
+    Stopwords go first because they carry the branches that match everything, and
+    `search_text` already refuses to *score* them (see `_scoring_terms`, which
+    this borrows so the two lists cannot drift). Then a flat cap, since a long
+    prompt is long in content words too.
+    """
+    from surrealfs.fs import _scoring_terms  # deferred — see `_write`
+
+    return " ".join(_scoring_terms(query)[:RECALL_TERMS])
+
+
+def _tool_lines(messages: list[dict[str, Any]] | None) -> str:
+    """The tool calls of the turn that just finished, one per line.
+
+    `messages` is the whole conversation, not the turn — Hermes hands the same
+    list to every provider (`memory_manager.sync_all`) — so this walks back to
+    the last user message and reads only what came after it. Without that, every
+    turn file re-lists the entire session.
+
+    Same `→ name(args)` shape :func:`_render` writes, so a turn file and a
+    compressed transcript read alike. Truncated because a single `write_file`
+    argument can be an entire file, and this rides on every turn.
+    """
+    turn = list(messages or [])
+    for index in range(len(turn) - 1, -1, -1):
+        if turn[index].get("role") == "user":
+            turn = turn[index + 1 :]
+            break
+    lines = []
+    for message in turn:
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {} if isinstance(call, dict) else {}
+            line = f"→ {function.get('name') or 'tool'}({function.get('arguments')})"
+            lines.append(line[:TOOL_LINE_CHARS])
+    return "\n".join(lines[:TOOL_LINES])
 
 
 def _render(message: dict[str, Any]) -> str:

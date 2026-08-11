@@ -177,6 +177,21 @@ def test_config_schema_covers_every_setting_the_provider_reads():
     assert password["required"] and password["secret"]
 
 
+def test_the_recall_query_is_the_prompt_cut_down_to_terms():
+    """A prompt is not a search box — every word left in is another OR branch."""
+    assert hermes_memory._recall_query("what tone does the user prefer, please") == (
+        "tone user prefer"
+    )
+    # A long prompt is long in content words too, so stopwords alone are not a cap.
+    long_prompt = " ".join(f"word{n}" for n in range(40))
+    assert len(hermes_memory._recall_query(long_prompt).split()) == (
+        hermes_memory.RECALL_TERMS
+    )
+    # Borrowed from `_scoring_terms`, so a query of nothing but stopwords keeps
+    # them and still searches for something.
+    assert hermes_memory._recall_query("the who") == "the who"
+
+
 def test_sync_turn_files_the_exchange(memory):
     memory.sync_turn("how do I get paid", "You invoice monthly.", session_id="sess-1")
 
@@ -227,6 +242,45 @@ def test_trivial_turns_are_not_filed(memory):
     assert _filed() == {}
 
 
+def test_a_trivial_prompt_with_a_long_answer_is_still_filed(memory):
+    """The prompt is where the signal usually is, not where the content is."""
+    answer = "The retry policy lives in client.py. " * 20
+    memory.sync_turn("go ahead", answer, session_id="sess-1")
+
+    ((_, body),) = _filed().items()
+    assert "retry policy lives in client.py" in body
+
+
+def test_the_tool_calls_of_the_turn_are_filed_with_it(memory):
+    """Which files were read is invisible in either message's text."""
+    memory.sync_turn(
+        "which file holds the retry policy",
+        "It is in client.py.",
+        session_id="sess-1",
+        messages=[
+            # `messages` is the whole conversation: everything up to the last
+            # user message belongs to turns already filed.
+            {
+                "role": "assistant",
+                "tool_calls": [{"function": {"name": "an_earlier_turns_tool"}}],
+            },
+            *MESSAGES,
+        ],
+    )
+
+    ((_, body),) = _filed().items()
+    assert "## Tools" in body
+    assert "surrealfs_search" in body
+    assert "an_earlier_turns_tool" not in body
+
+
+def test_a_turn_with_no_tool_calls_reads_as_it_always_did(memory):
+    memory.sync_turn("how do I get paid", "You invoice monthly.", session_id="sess-1")
+
+    ((_, body),) = _filed().items()
+    assert "## Tools" not in body
+
+
 def test_only_primary_agents_write(surreal_url, memory):
     """The ABC: a cron or subagent turn filed as a memory corrupts the user model."""
     for context in ("cron", "subagent", "flush"):
@@ -243,7 +297,10 @@ def test_profiles_do_not_read_each_others_turns(memory):
     """Two profiles sharing one database still get separate memories."""
     work = SurrealFsMemory()
     work.initialize("sess-1", hermes_home="/root/.hermes/profiles/work", platform="cli")
-    work.sync_turn("the deploy key rotates monthly", "Noted.", session_id="sess-1")
+    # Filed under an earlier session, because recall drops the *current* one's
+    # own turns whatever the profile — see
+    # `test_recall_never_serves_this_conversation_back_to_itself`.
+    work.sync_turn("the deploy key rotates monthly", "Noted.", session_id="sess-old")
 
     assert work.root() == "/memory/work"
     assert list(_filed("/memory/work"))
@@ -299,6 +356,52 @@ def test_recall_finds_the_note_that_answers_the_question(memory):
     # only matches "prefer" after stemming, and counting raw words scored the
     # file 0.000 and sorted it last.
     assert len(paths) <= 5, "RECALL_LIMIT still caps what rides on the turn"
+
+
+def test_recall_never_serves_this_conversation_back_to_itself(memory):
+    """Worst case of reading the tree it writes: the turn that asked the question.
+
+    One turn per file means short documents, which BM25 favours, so the first
+    turn of a session outranks the notes on the query that produced it.
+    """
+    memory.sync_turn("the flywheel spins", "Noted.", session_id="sess-1")
+
+    async def seed() -> None:
+        async with _connect.connected() as db:
+            await SurrealFs(db).write_text("/projects/acme.md", "The flywheel spins.")
+
+    asyncio.run(seed())
+
+    recalled = memory.prefetch("flywheel")
+    assert "/projects/acme.md" in recalled
+    assert "/memory/" not in recalled
+
+
+def test_filed_turns_cannot_crowd_the_notes_out_of_recall(memory):
+    """Curated notes are the point; transcripts accumulate and would bury them."""
+
+    async def seed() -> None:
+        async with _connect.connected() as db:
+            fs = SurrealFs(db)
+            for n in range(6):
+                await fs.write_text(
+                    f"/memory/default/2026-01-0{n + 1}/older-sess-1200000{n}.md",
+                    f"## User\n\nthe flywheel spins, take {n}\n",
+                )
+            for name in ("voice", "tone", "style"):
+                await fs.write_text(
+                    f"/preferences/{name}.md", f"The flywheel spins ({name})."
+                )
+
+    asyncio.run(seed())
+
+    recalled = memory.prefetch("flywheel")
+    paths = [line for line in recalled.splitlines() if line.startswith("/")]
+    filed = [p for p in paths if p.startswith("/memory/")]
+    assert len(paths) == 5, paths
+    assert len(filed) <= hermes_memory.MEMORY_SLOTS, paths
+    # And they are appended after the notes rather than interleaved with them.
+    assert paths[: len(paths) - len(filed)] == [p for p in paths if p not in filed]
 
 
 def test_prefetch_is_quiet_when_nothing_matches(memory):

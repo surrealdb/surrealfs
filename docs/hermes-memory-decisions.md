@@ -5,8 +5,7 @@ plausibly undo without realising what it was for. Rationale that fits in a docst
 lives in the docstring; this file is for the parts that span files, and for the
 alternatives that were considered and rejected.
 
-Open work is in [improvements](hermes-memory-review-improvements.md). Both files were
-written against
+Written against
 [Building a Memory Provider Plugin](https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/memory-provider-plugin.md)
 and the sources it describes — `agent/memory_provider.py`, `agent/memory_manager.py`,
 `plugins/memory/__init__.py`, `hermes_cli/memory_setup.py`, `hermes_cli/plugins.py` —
@@ -66,19 +65,73 @@ isolates in one direction only: `/memory/<day>/` for the default and
 `/memory/<name>/<day>/` for the rest means the default profile still recalls every
 named profile's transcripts. Symmetry is worth the extra path segment.
 
-`_recall` over-fetches `RECALL_LIMIT * 2` so the filter cannot cost a result slot.
-Nearly free — `search_text` reads every matching row's content regardless of the
-limit (see `fs.py:586`).
+`_recall` over-fetches `RECALL_LIMIT * 4` so the filtering cannot cost a result slot —
+`_rank` below drops whole classes of hit, not the odd one. Nearly free — `search_text`
+reads every matching row's content regardless of the limit (see `fs.py:586`).
 
-`_is_mine` is also the natural home for
-[improvements #2](hermes-memory-review-improvements.md), down-weighting the memory
-tree against hand-written notes.
+## Recall reserves slots rather than excluding the memory tree
+
+`_rank` drops the current conversation's own turns outright, then lets filed turns take
+at most `MEMORY_SLOTS` (2) of `RECALL_LIMIT` (5). Notes keep their fused rank; turns are
+appended after them, never interleaved.
+
+The problem is that recall reads the tree it writes. One turn per file means short
+documents, which BM25 favours, so after a few sessions the top five is verbatim
+transcript rather than the `/preferences/` and `/projects/` notes the README calls the
+whole point. The worst case is a session's own first turn outranking everything on the
+query that produced it, which is why `_is_this_session` exists as a separate, absolute
+filter — a conversation quoting itself back is never useful, at any rank.
+
+It matches on the **basename**, not the path prefix: `path_for` puts the session in the
+filename and the date in the folder, so a conversation running past midnight, or a
+resumed one, spans day folders under a single id. It must also return `False` for an
+empty session id, since `_slug("")` is `"session"` and would filter unrelated files.
+
+Rejected: a **hard partition**, every note above every filed turn. With ten over-fetched
+hits, a note-rich tree would mean a past turn is never recalled at all — and sometimes a
+past turn is the answer. Also rejected: **excluding the current session only**, the cheap
+version. It fixes the worst case above and leaves the drift, which is the part that gets
+worse every session.
+
+Consequence worth knowing: the `-compressed` transcripts are caught by both filters —
+by the basename test while their session is live, by the slot cap afterwards. They used
+to rank low purely because BM25 penalises long documents, which was luck, not a design.
+
+## The recall query is trimmed, the search tool's is not
+
+`_recall_query` strips stopwords and caps at `RECALL_TERMS` (12) before searching;
+`search_text` still binds the raw string for callers that pass one. The asymmetry is
+the point: a human types three words into the search tool, while recall gets a whole
+prompt, on every turn, on the thread `MemoryManager` joins with an 8s timeout. Every
+word left in is another `OR` branch, and `search_text` reads the content of every row
+any branch matched back into Python to rank it (`fs.py:586`).
+
+It borrows `fs._scoring_terms` rather than keeping its own stopword list — that
+function already drops them in written order, and keeps them all when a query is
+nothing else, so `"the who"` still searches for something. Copying the list would be
+one import fewer and one more thing to drift.
+
+What this does **not** buy is much ranking change: BM25 already scores stopwords at
+zero. The win is fetch volume, latency, and a tail of zero-score matches that no longer
+exists. Worth stating, because the obvious next step — trimming inside `search_text`
+for everyone — would change the search tool's semantics and move
+`test_ranking_quality_over_a_realistic_corpus`, for a gain that was never the ranking.
+
+The embedding is still built from the whole sentence. Reading one is the single thing
+that arm does better.
 
 ## Only primary agents write
 
 `sync_turn` returns early unless `agent_context` is `"primary"`. Subagent, cron and
 flush turns are not the user talking, and the ABC is explicit that filing them
 corrupts what the agent believes about the user.
+
+The other gate is on the exchange, not the prompt: a trivial prompt is filed anyway
+when the answer runs past `TRIVIAL_ANSWER_CHARS` (400). Gating on
+`is_trivial_prompt(user_content)` alone dropped "go ahead" followed by a 2000-word
+design document — the prompt is where the signal usually is, but not where the content
+is. Length as a proxy for signal is crude and cheap; the alternative is classifying the
+answer, on the turn-completion path, for a decision that is already best-effort.
 
 The kwarg is absent on older Hermes, which only ran primary agents, so a missing
 value must default to `"primary"` — reading it as non-primary would silently stop
@@ -138,9 +191,8 @@ buffering is the upgrade if it ever shows up.
 
 Every other provider can only hand the compressor a summary, which is what the
 compressor is already doing. A filesystem-shaped memory can keep the text, so it does —
-verbatim, tool calls included (which is also the one place `messages` is used at all,
-see [improvements #4](hermes-memory-review-improvements.md)) — and returns a pointer to
-the file for the summary prompt.
+verbatim, tool calls included — and returns a pointer to the file for the summary
+prompt.
 
 Filed through `path_for` with a `-compressed` session suffix, so it inherits the profile
 subtree, the day folder and the collision-free stamp without a signature change. It must
@@ -148,11 +200,27 @@ stay a single write: the whole compression pass runs on a pooled daemon thread u
 host timeout, and work still in flight when it expires is discarded
 (`conversation_compression.py:29-45`).
 
-Consequence, worth knowing before it looks like a bug: these are long files inside the
-tree recall reads, which feeds
-[improvements #2](hermes-memory-review-improvements.md). BM25 favours short documents,
-so they rank low rather than dominating — that is the only thing holding it, and it is
-not a design.
+These are long files inside the tree recall reads; `_rank` above is what keeps them
+from dominating it, rather than the incidental fact that BM25 penalises long documents.
+
+## `sync_turn` takes the turn's tool calls out of `messages`
+
+`messages` is the **whole conversation**, not the turn — `turn_finalizer.py:707` →
+`run_agent.py:4075` → `memory_manager.py:675`, and Hermes only passes it because
+`_provider_sync_accepts_messages` inspects the signature and finds the parameter there.
+So `_tool_lines` walks back to the last `role == "user"` message and reads only what
+follows it; without that slice every turn file re-lists the entire session.
+
+It writes tool *calls*, not tool results: which files were read and which commands ran
+is frequently the substance of a turn and appears in neither message's text, while the
+results are the bulk of the tokens and mostly reproducible from the call. Same
+`→ name(args)` shape `_render` writes for compression, so the two file kinds read alike;
+capped at `TOOL_LINES` (10) and `TOOL_LINE_CHARS` (200) because a single write call's
+arguments can be an entire file, and this rides on every turn.
+
+The upstream doc asks providers to "document what parts of `messages` are sent
+off-device". Nothing is: it goes to the user's own SurrealDB. The README says so
+explicitly anyway, because "memory provider" reads as "cloud" to most people now.
 
 ## Every setting the provider reads is in the config schema
 
@@ -246,6 +314,19 @@ thread — and a SurrealDB WebSocket belongs to the event loop that opened it. A
 connection would be handed between loops that do not own it.
 
 This is also why `shutdown()` has nothing to do.
+
+## The fallback `_TRIVIAL_RE` is known drift, and stays
+
+`agent/memory_provider.py` says of `TRIVIAL_PROMPT_RE`: "Single source of truth shared
+by the core per-turn prefetch gate and provider-side classifiers so the two can never
+drift apart." The copy in the `ImportError` branch is a second one — but it only runs
+where the import fails, which is outside Hermes: tests, linting, a plain `pip install`.
+
+The trailing-punctuation class differs (`[\W_]*` against upstream's explicit set, so the
+local one is strictly wider), and no input has been found where they disagree. Accepted,
+because the alternative is skipping the gate entirely when the import fails, and a
+provider that files every "thanks" outside Hermes is worse than one whose regex is a
+shade loose there.
 
 ## Two verified facts that read like guesses
 

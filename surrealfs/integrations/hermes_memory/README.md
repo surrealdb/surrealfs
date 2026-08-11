@@ -72,13 +72,29 @@ how do I get paid for the consulting work
 ## Assistant
 
 You invoice monthly through ...
+
+## Tools
+
+→ surrealfs_search({"query": "invoice"})
+→ surrealfs_read({"path": "/projects/acme/contract.md"})
 ```
 
 One file per turn rather than one per session, because a search hit is then a single
-exchange with its snippet centred on the match. Turns whose prompt carries no signal
-— "ok", "thanks", slash commands — are skipped, as is anything that isn't a primary
-agent: a cron run's system prompt filed as a memory would corrupt what the agent
-believes about the user.
+exchange with its snippet centred on the match. The `## Tools` section — which files
+were read, which commands ran — is often the substance of the turn and appears in
+neither message's text; it is omitted when the turn made no tool calls.
+
+Turns where **both** sides carry no signal are skipped: a prompt like "ok", "thanks"
+or a slash command, answered briefly. A trivial prompt with a long answer is still
+filed, because "go ahead" followed by a design document is a turn worth keeping. So is
+nothing that isn't a primary agent: a cron run's system prompt filed as a memory would
+corrupt what the agent believes about the user.
+
+Everything written here goes to the SurrealDB in your `SURREALDB_URL` and nowhere
+else. That is worth saying out loud because "memory provider" now reads as "cloud" to
+most people, and because Hermes hands providers the turn's full message list: this one
+writes part of it (the tool calls above) to your own database, and it leaves your
+machine only if you pointed it at a remote server yourself.
 
 The name is a wall-clock stamp (`HHMMSSmmm`) rather than a turn number. A counter has
 to live somewhere, and in-process is the one place it cannot: `hermes --resume` starts
@@ -103,6 +119,16 @@ Two other things get filed, both under the same profile subtree:
 its own folder. The notes the agent wrote itself under `/preferences/` and `/projects/`
 are the highest-signal memories present, and excluding them would mean the bundled
 `surrealfs:notes` skill and this provider ignored each other's work.
+
+Which is also why filed turns are held to two of the five recalled slots, and why the
+current conversation's own turns are never recalled at all. Recall reads the tree it
+writes: one turn per file means short documents, which the ranking favours, so without
+a cap the top five drifts into verbatim transcript and the curated notes — the point of
+the whole thing — stop showing up.
+
+The prompt is cut down to search terms before it goes anywhere near the index —
+stopwords out, a dozen terms at most. A whole paragraph is not a query: every word in
+it is another `OR` branch, and matching rows are read back in full to be ranked.
 
 The search runs after the *previous* turn rather than during this one — Hermes' own
 `queue_prefetch` / `prefetch` pair — so nothing waits on it, in particular not the
