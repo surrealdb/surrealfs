@@ -2,7 +2,8 @@
 
 One list of :class:`ToolSpec`s drives every integration. A tool's name, argument
 schema, description, and implementation live together here, so adding a tool
-makes it appear in the pydantic-ai toolset and the raw JSON definitions at once.
+makes it appear in the pydantic-ai toolset, the raw JSON definitions, and the
+Hermes plugin at once.
 
 Descriptions are authored as markdown in ``surrealfs/tools/docs`` rather than in
 docstrings — they are prompt text, and worth editing as prose.

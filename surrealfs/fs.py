@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import math
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
-from typing import Any
+from typing import Any, Literal
 
 from surrealdb import RecordID
 
@@ -39,6 +40,32 @@ _RETRY_BACKOFF = 0.02  # seconds; doubles per attempt
 
 # How the schema's `parent_key` field spells "no parent". Must match file.surql.
 ROOT_KEY = "root"
+
+# Whether a multi-word full-text query needs just one term or every term.
+MatchMode = Literal["any", "all"]
+
+# BM25 knobs, matching `BM25(1.2,0.75)` on the index in schema/file.surql: ranking
+# happens in Python for now, and the two should not disagree about the parameters.
+_BM25_K1 = 1.2  # how fast term frequency saturates
+_BM25_B = 0.75  # how hard long documents are penalised
+
+# The analyzer the FULLTEXT index is built with. Must match schema/file.surql: it
+# is asked to tokenise queries and content for scoring, and scoring on anything
+# else would disagree with what the index matched.
+ANALYZER = "fts_simple"
+
+# Dropped when scoring a query, never when matching it. Not linguistics -- just the
+# words common enough that counting them buries the term that carries the question.
+_STOPWORDS = frozenset(
+    "a an and are as at be been being but by can could did do does doing for from "
+    "had has have having he her here hers him his how i if in into is it its me "
+    "might must my no nor not of off on once only or other our ours out over own "
+    "same she should so some such than that the their theirs then there these they "
+    "this those to too under until up us very was we were what when where which "
+    "while who whom why will with would you your yours "
+    "about after again all also any because before below get got just know like "
+    "made make need now please said say tell think use used using want".split()
+)
 
 
 def _parent_key(parent_id: RecordID | None) -> str:
@@ -529,33 +556,74 @@ class SurrealFs:
 
     # ------------------------------------------------------------------ search
 
-    async def search_text(self, query: str, *, limit: int = 20) -> list[SearchHit]:
+    async def search_text(
+        self, query: str, *, limit: int = 20, match: MatchMode = "any"
+    ) -> list[SearchHit]:
         """Full-text search over file contents.
 
-        Matching uses the BM25 full-text index. Ranking and snippets are computed
-        in Python: on SurrealDB 3.2.x ``search::score`` returns 0.0 and
-        ``search::highlight`` returns the content unchanged, so relying on them
-        would produce an arbitrary order.
+        Matching uses the full-text index; ranking is Okapi BM25 computed in
+        Python over the matched rows, because on SurrealDB 3.2.x
+        ``search::score`` returns 0.0 and ``search::highlight`` returns the
+        content unchanged. Stopwords match but do not score -- see
+        :func:`_scoring_terms`.
+
+        ``match`` picks how a multi-word query is treated:
+
+        ``"any"`` (the default)
+            One term is enough. This surface hands back a ranked list of
+            snippets, so a caller can dismiss a weak hit at a glance -- but it
+            cannot dismiss a result it never saw, and an agent told to "search
+            before you create" writes a duplicate when a real note comes back
+            empty. BM25 is what makes the wide net usable: a file that merely
+            repeats a common word does not outrank the short exact match.
+        ``"all"``
+            Every term must appear -- ``"what tone does the user prefer"`` finds
+            nothing while ``"prefer"`` finds the note. For callers that want a
+            precise filter and read an empty result as a real answer.
         """
         if not query.strip():
             return []
+        # ponytail: `limit` is applied after Python ranking, so this fetches the
+        # content of every matching row. Fine for a filesystem of notes; if one
+        # grows to where a common term matches thousands, ranking has to move
+        # into the query (server-side BM25) before a SQL LIMIT can be trusted.
+        operator = "@1,OR@" if match == "any" else "@1@"
+        words = _scoring_terms(query)
+        # Score on the analyzer's own tokens, on both sides. Counting raw words
+        # instead silently scored zero for every file that matched only through
+        # stemming -- the index turns "Prefers" into "prefer", so a query for
+        # "prefer" matched the file and then ranked it below files that did not
+        # answer the question at all. `LET` plus a `$terms` column keeps this to
+        # one round trip, since `_query` hands back the last statement.
         rows = await self._query(
-            f"SELECT {_FIELDS_WITH_CONTENT} FROM {self.table} WHERE content @1@ $query",
-            {"query": query},
+            "LET $terms = search::analyze($analyzer, $text);\n"
+            f"SELECT {_FIELDS_WITH_CONTENT}, "
+            "search::analyze($analyzer, content) AS tokens, $terms AS terms "
+            f"FROM {self.table} WHERE content {operator} $query",
+            {"query": query, "text": " ".join(words), "analyzer": ANALYZER},
         )
-        terms = [t for t in re.findall(r"\w+", query.lower()) if t]
-        hits: list[SearchHit] = []
-        for row in rows or []:
-            entry = FileEntry.from_row(row)
-            body = (entry.content or "").lower()
-            score = float(sum(body.count(term) for term in terms))
-            hits.append(
-                SearchHit(
-                    entry=entry,
-                    score=score,
-                    snippet=_snippet(entry.content or "", terms),
-                )
+        rows = rows or []
+        if not rows:
+            return []
+        tokens = {
+            row.get("path", ""): [
+                token
+                for token in row.get("tokens") or []
+                if any(char.isalnum() for char in token)
+            ]
+            for row in rows
+        }
+        scores = _bm25(tokens, rows[0].get("terms") or [])
+        hits = [
+            SearchHit(
+                entry=(entry := FileEntry.from_row(row)),
+                score=scores.get(entry.path, 0.0),
+                # The unstemmed words, so the window lands on the match in the
+                # original text rather than on a stem that may not appear in it.
+                snippet=_snippet(entry.content or "", words),
             )
+            for row in rows
+        ]
         hits.sort(key=lambda h: (-h.score, h.entry.path))
         return hits[:limit]
 
@@ -597,7 +665,12 @@ class SurrealFs:
         return hits
 
     async def search(
-        self, query: str, *, vector: Sequence[float] | None = None, limit: int = 20
+        self,
+        query: str,
+        *,
+        vector: Sequence[float] | None = None,
+        limit: int = 20,
+        match: MatchMode = "any",
     ) -> list[SearchHit]:
         """Full-text search, with vector results fused in when given a vector.
 
@@ -605,10 +678,13 @@ class SurrealFs:
         does -- the library never calls an embedding model. Without one this is
         :meth:`search_text` under another name.
 
+        ``match`` is passed to :meth:`search_text` and governs the full-text arm
+        only; the vector arm reads the whole query either way.
+
         ``score`` on the returned hits is the fused rank score, not either arm's
         own score, so it is comparable across the whole result set.
         """
-        text_hits = await self.search_text(query, limit=limit)
+        text_hits = await self.search_text(query, limit=limit, match=match)
         by_path = {hit.path: hit for hit in text_hits}
         ranked = [[hit.path for hit in text_hits]]
 
@@ -725,6 +801,57 @@ def _rrf(*ranked: Sequence[str], k: int = 60) -> dict[str, float]:
         for rank, path in enumerate(arm):
             scores[path] = scores.get(path, 0.0) + 1 / (k + rank)
     return dict(sorted(scores.items(), key=lambda kv: -kv[1]))
+
+
+def _scoring_terms(query: str) -> list[str]:
+    """The query's content-bearing words, in the order written.
+
+    Stopwords are dropped for *scoring* only -- they still match, they just do
+    not get a say in the ranking or in where the snippet is centred. Leaving them
+    in was measured to be the difference between BM25 helping and BM25 ranking
+    exactly as badly as raw term counts: with "the" scored, a long file repeating
+    it beats a short exact match. A query made only of stopwords keeps them all,
+    so ``"the who"`` still ranks something.
+    """
+    terms = [t for t in re.findall(r"\w+", query.lower()) if t]
+    return [t for t in terms if t not in _STOPWORDS] or terms
+
+
+def _bm25(bodies: dict[str, Sequence[str]], terms: Sequence[str]) -> dict[str, float]:
+    """Score analyzed documents against analyzed query terms. Paths to scores.
+
+    Okapi BM25: term frequency saturates (so repetition stops paying), long
+    documents are penalised, and a term is worth more the fewer documents hold
+    it. `df` is counted over the matched rows rather than the whole table --
+    measured no worse than a corpus-wide count, and it costs no extra queries.
+
+    Both arguments must be analyzer output, or a document that matched only by
+    stem scores zero.
+    """
+    if not bodies or not terms:
+        return {}
+    lengths = {path: len(words) or 1 for path, words in bodies.items()}
+    average = sum(lengths.values()) / len(lengths)
+    total = len(bodies)
+
+    inverse: dict[str, float] = {}
+    for term in set(terms):
+        documents = sum(1 for body in bodies.values() if term in body)
+        inverse[term] = math.log(1 + (total - documents + 0.5) / (documents + 0.5))
+
+    scores: dict[str, float] = {}
+    for path, body in bodies.items():
+        score = 0.0
+        for term in inverse:
+            frequency = body.count(term)
+            if not frequency:
+                continue
+            saturation = frequency + _BM25_K1 * (
+                1 - _BM25_B + _BM25_B * lengths[path] / average
+            )
+            score += inverse[term] * frequency * (_BM25_K1 + 1) / saturation
+        scores[path] = score
+    return scores
 
 
 def _snippet(content: str, terms: Sequence[str], *, width: int = 160) -> str:

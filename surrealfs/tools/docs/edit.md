@@ -1,4 +1,4 @@
-Replace text inside an existing file.
+Replace text inside an existing SurrealFS file.
 
 Finds `old` and replaces it with `new`, returning a unified diff of the change.
 By default only the first occurrence is replaced; set `replace_all` to true to

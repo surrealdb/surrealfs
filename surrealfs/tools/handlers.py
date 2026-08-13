@@ -1,7 +1,7 @@
 """Tool implementations: turn structured results into text for a model.
 
 Every handler takes a :class:`ToolContext` and a validated arguments model and
-returns a string. Both integration surfaces call these, so a model sees exactly
+returns a string. Every integration surface calls these, so a model sees exactly
 the same output whichever one is wired up.
 """
 

@@ -1,8 +1,8 @@
 """Argument models for the SurrealFS tools.
 
 These are the single source of truth for every tool's JSON Schema: the
-pydantic-ai toolset and the raw JSON tool definitions both derive from
-``model_json_schema()``, so the two surfaces cannot drift apart.
+pydantic-ai toolset, the raw JSON tool definitions, and the Hermes plugin all
+derive from ``model_json_schema()``, so the surfaces cannot drift apart.
 """
 
 from __future__ import annotations

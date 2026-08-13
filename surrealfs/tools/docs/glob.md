@@ -1,4 +1,4 @@
-Find files whose path matches a shell-style glob.
+Find files in SurrealFS whose path matches a shell-style glob.
 
 Supports `*` (within one path segment), `**` (across segments), `?`, and
 character classes like `[abc]`. Examples: `/notes/**/*.md`, `/projects/*/todo.md`.

@@ -3,7 +3,7 @@ name = "surrealfs"
 version = "0.2.0"
 description = "A filesystem for agents, backed by SurrealDB"
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.11"
 authors = [
     { name = "Martin Schaer", email = "martin.schaer@surrealdb.com" }
 ]
@@ -33,6 +33,11 @@ demo = [
     "markdown-it-py>=3",
 ]
 
+# Lets Hermes discover the plugin in `surrealfs/integrations/hermes/` as soon as
+# the package is installed. Nothing imports Hermes, so there is no extra to add.
+[project.entry-points."hermes_agent.plugins"]
+surrealfs = "surrealfs.integrations.hermes"
+
 [dependency-groups]
 # pydantic-ai is here as well as in the extra so `just test` exercises that
 # integration instead of silently skipping its tests.
@@ -51,7 +56,14 @@ build-backend = "hatchling.build"
 packages = ["surrealfs"]
 
 [tool.hatch.build]
-artifacts = ["surrealfs/schema/*.surql", "surrealfs/tools/docs/*.md"]
+artifacts = [
+    "surrealfs/schema/*.surql",
+    "surrealfs/tools/docs/*.md",
+    "surrealfs/integrations/hermes/plugin.yaml",
+    "surrealfs/integrations/hermes/skills/**/SKILL.md",
+    "surrealfs/integrations/hermes_memory/plugin.yaml",
+    "surrealfs/integrations/hermes_memory/README.md",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
