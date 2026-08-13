@@ -8,20 +8,26 @@ which files it under ``/home/<agent>/memories/<profile>``, and asks :meth:`prefe
 for context before each API call, which searches the whole filesystem — the agent's
 own notes included, another agent's or profile's transcripts not.
 
-Memory providers are found by directory, not by entry point, so this has to be
-installed on its own::
+Memory providers are found by directory, not by entry point, so this directory has to
+be installed on its own — ``hermes plugins install`` takes it straight out of the repo,
+naming it from ``plugin.yaml``::
 
-    ln -s "$PWD/surrealfs/integrations/hermes_memory" ~/.hermes/plugins/surrealfs-memory
+    hermes plugins install surrealdb/surrealfs/surrealfs/integrations/hermes_memory
+    uv pip install --python ~/.hermes/hermes-agent/venv/bin/python \
+      "surrealfs @ git+https://github.com/surrealdb/surrealfs.git"
     hermes memory setup surrealfs-memory
 
-The second step installs ``surrealfs`` into Hermes' own virtualenv — the
-``pip_dependencies`` in ``plugin.yaml`` — and activates the provider in
-``~/.hermes/config.yaml``::
+The package install is separate and manual because ``surrealfs`` is not on PyPI yet:
+the ``pip_dependencies`` Hermes would install itself may not carry a URL. Setup is
+:meth:`SurrealFsMemory.post_setup`, which prompts for the settings below, writes them
+to ``$HERMES_HOME/.env``, activates the provider in ``~/.hermes/config.yaml``::
 
     memory:
       provider: surrealfs-memory
 
-The directory name is the provider name Hermes matches that setting against.
+and then connects, so a bad database URL is caught there rather than swallowed into a
+per-turn warning. The directory name is the provider name Hermes matches that setting
+against.
 Connection details come from the usual ``SURREALDB_*`` variables; set
 ``SURREALFS_AGENT_USER`` to name the agent whose home turns are filed in,
 ``SURREALFS_MEMORY_DIR`` to file them somewhere else entirely, and
@@ -463,6 +469,71 @@ class SurrealFsMemory(_Base):
                 "env_var": "SURREALFS_SEMANTIC",
             },
         ]
+
+    def post_setup(self, hermes_home: str, config: dict[str, Any]) -> None:
+        """The whole of ``hermes memory setup surrealfs-memory``.
+
+        Hermes hands this hook the entire setup once it exists, and the generic path
+        it replaces prompts for nothing when setup is given a provider name: it
+        writes the activation key and stops, leaving the schema walk to the
+        interactive picker only. So a user who followed the README's own command
+        never got asked for a database URL.
+
+        Ends by connecting, which is the part no amount of config writing can
+        confirm — and the reason ``hermes surrealfs-memory status`` exists at all.
+        """
+        from hermes_cli.config import save_config, save_env_value
+        from hermes_cli.secret_prompt import masked_secret_prompt
+
+        print(f"\n  Configuring {PROVIDER_NAME}:\n")
+        for field in self.get_config_schema():
+            env_var = field["env_var"]
+            current = os.environ.get(env_var)
+            try:
+                if field.get("secret"):
+                    answer = masked_secret_prompt(
+                        f"  {field['description']}"
+                        f"{' (set, blank to keep)' if current else ''}: "
+                    ).strip()
+                else:
+                    shown = current or field.get("default", "")
+                    answer = input(f"  {field['description']} [{shown}]: ").strip()
+            except EOFError:
+                # Setup is not always a terminal — the web UI drives it too. Every
+                # setting has a working default, so an unanswerable prompt is not an
+                # error: keep what is there and go on to activate and connect.
+                print("  (no input available — keeping the current values)")
+                break
+            if not answer:
+                continue
+            save_env_value(env_var, answer)
+            # `.env` is read at startup, so this process still holds the old value —
+            # and the connection test below is in this process.
+            os.environ[env_var] = answer
+
+        config.setdefault("memory", {})["provider"] = PROVIDER_NAME
+        save_config(config)
+        print(f"\n  Activated in config.yaml. Profile: {_profile(hermes_home)}")
+
+        # Deferred like every other `surrealfs` import here, and for the same reason:
+        # setup has to survive being run before the package is installed, which is the
+        # state it most needs to report on.
+        try:
+            from surrealfs.integrations.hermes_memory.cli import _status
+        except ImportError as exc:
+            print(f"\n  Configured, but surrealfs is not importable yet: {exc}")
+            print("  Install it — see 'Install' in the plugin's README — then run:")
+            print("  hermes surrealfs-memory status\n")
+            return
+
+        _status()
+        if _semantic():
+            print(
+                "  Semantic recall matches only what the indexer has reached — "
+                "schedule it:\n  hermes cron create 'every 5m' --no-agent "
+                "--name surrealfs-embed --script surrealfs-embed.sh\n"
+                "  See the README section 'Keeping the vectors current'.\n"
+            )
 
     def root(self) -> str:
         """The folder this agent's profile files its turns under."""

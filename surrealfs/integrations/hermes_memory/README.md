@@ -5,37 +5,60 @@ before each turn by searching it.
 
 ## Install
 
-Hermes finds memory providers by scanning directories, not through the
-`hermes_agent.plugins` entry point, so this one is installed by symlink even when the
-package is pip-installed. The directory name is the provider name.
+No clone needed: `hermes plugins install` accepts a subdirectory of a repo and names what
+it installs from `plugin.yaml`, which is how the directory lands as `surrealfs-memory` —
+the name Hermes matches the active-provider setting against.
 
 ```bash
-ln -s "$PWD/surrealfs/integrations/hermes_memory" \
-  "${HERMES_HOME:-~/.hermes}/plugins/surrealfs-memory"
+hermes plugins install surrealdb/surrealfs/surrealfs/integrations/hermes_memory
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python \
+  "surrealfs @ git+https://github.com/surrealdb/surrealfs.git"
 hermes memory setup surrealfs-memory
 ```
 
-`setup` installs `surrealfs` into Hermes' own virtualenv — it has to be importable by
-`~/.hermes/hermes-agent/venv/bin/python`, and `plugin.yaml` declares it as a
-`pip_dependencies` entry so `hermes update` reinstalls it after a venv rebuild. Running
-from a checkout is the one case to do by hand, since that installs the *published*
-package over your working copy:
+Two installs, because they are two different things: the *directory* is what Hermes scans
+to discover memory providers, and the *package* is what the provider imports. Nothing
+merges those — providers are found by directory, never through the `hermes_agent.plugins`
+entry point. The first command prints the second, from the `python_dependencies` entry in
+`plugin.yaml`, and runs nothing: Hermes never installs a plugin's Python dependencies for
+it, and the `pip_dependencies` entry it *would* have installed cannot name a git URL
+(specs containing `@` or `://` are rejected as unsafe), so while `surrealfs` is unpublished
+that install is yours to run. Publication closes the hole; nothing here changes.
 
-```bash
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python -e .
-```
+Answer **N** to install's `Enable now?` prompt. That is the general plugin manager, which
+this directory does not go through — `kind: exclusive` routes it to memory discovery, and
+`hermes memory setup` is what activates it.
 
-Setup also activates the provider in `~/.hermes/config.yaml` — only one memory provider
-can be active at a time, and the equivalent by hand is:
+Setup is where the questions are: it walks every setting in the table below, offering the
+current value or the default, writes what you change to `$HERMES_HOME/.env`, activates the
+provider in `~/.hermes/config.yaml` — only one can be active at a time — and then
+*connects*, so a wrong URL surfaces there rather than as a per-turn warning nobody reads.
+Activating by hand is:
 
 ```yaml
 memory:
   provider: surrealfs-memory
 ```
 
-Confirm with `hermes memory`, which lists discovered providers and whether each
-reports itself available, then `hermes surrealfs-memory status`, which actually connects
-— names the database it resolved and counts the turns filed there.
+`hermes memory` lists discovered providers and whether each reports itself available;
+`hermes surrealfs-memory status` re-runs the connection check any time, naming the
+database it resolved and counting the turns filed there.
+
+Upgrades are two commands for the same reason installs are: `hermes plugins update
+surrealfs-memory` for the directory, and the `uv pip install` again for the package.
+Rerun the second whenever `hermes memory` starts reporting the provider unavailable — a
+venv rebuild strips it, and `hermes update` cannot heal a dependency it may not fetch.
+
+Working on SurrealFS itself? Take both from a checkout instead — an editable install, and
+a symlink in place of the copy `hermes plugins install` makes:
+
+```bash
+git clone https://github.com/surrealdb/surrealfs.git ~/repos/surrealfs
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python -e ~/repos/surrealfs
+ln -s ~/repos/surrealfs/surrealfs/integrations/hermes_memory \
+  "${HERMES_HOME:-$HOME/.hermes}/plugins/surrealfs-memory"
+hermes memory setup surrealfs-memory
+```
 
 ## Configuration
 
@@ -66,15 +89,20 @@ recall matches on meaning only for what the indexer has already reached. Hermes 
 no way for a plugin to declare a daemon of its own, but its scheduler runs scripts
 with no agent attached, which saves you a systemd unit:
 
+The indexer needs the `embed` extra, which the install above does not pull in:
+
 ```bash
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python \
+  "surrealfs[embed] @ git+https://github.com/surrealdb/surrealfs.git"
+
 mkdir -p "${HERMES_HOME:-$HOME/.hermes}/scripts"
 cat > "${HERMES_HOME:-$HOME/.hermes}/scripts/surrealfs-embed.sh" <<'EOF'
 #!/usr/bin/env bash
 # Cron sanitizes the subprocess env and OPENAI_API_KEY is on the blocklist, so the
-# key has to come from a file — as do the SURREALDB_* connection details.
-set -a; . "$HOME/repos/surrealfs/.env"; set +a
-exec uv run --project "$HOME/repos/surrealfs" --extra embed \
-  python -m surrealfs.embed --once
+# key has to come from a file — as do the SURREALDB_* connection details. Add both
+# to $HERMES_HOME/.env if they are not there already.
+set -a; . "${HERMES_HOME:-$HOME/.hermes}/.env"; set +a
+exec ~/.hermes/hermes-agent/venv/bin/python -m surrealfs.embed --once
 EOF
 
 hermes cron create 'every 5m' --no-agent --name surrealfs-embed \
@@ -83,12 +111,13 @@ hermes cron create 'every 5m' --no-agent --name surrealfs-embed \
 
 `--no-agent` skips inference entirely — no tokens, no model — so a `--once` pass per
 tick replaces the polling loop. The script has to live under `$HERMES_HOME/scripts/`;
-paths outside it are rejected. Pip-installed rather than a checkout? Point the script
-at Hermes' own interpreter instead, installed with the extra
-(`"surrealfs[embed] @ git+..."`):
+paths outside it are rejected. From a checkout, run it through uv instead so the extra
+comes from your working copy rather than the venv:
 
 ```bash
-exec ~/.hermes/hermes-agent/venv/bin/python -m surrealfs.embed --once
+set -a; . "$HOME/repos/surrealfs/.env"; set +a
+exec uv run --project "$HOME/repos/surrealfs" --extra embed \
+  python -m surrealfs.embed --once
 ```
 
 An idle pass prints nothing and empty stdout is a silent tick, so this speaks up only

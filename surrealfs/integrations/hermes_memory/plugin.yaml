@@ -13,6 +13,13 @@ author: Martin Schaer
 # dependency is not installed yet.
 pip_dependencies:
   - surrealfs
+# The same dependency in the form that can actually be fetched today, since surrealfs is
+# not on PyPI. Declaration only: `hermes plugins install` prints this list and installs
+# nothing from it, which is why it may carry a URL where `pip_dependencies` may not —
+# specs containing `@` or `://` are rejected there as unsafe. Both entries stay: this one
+# is what a user runs by hand now, that one is what heals the venv after publication.
+python_dependencies:
+  - "surrealfs @ git+https://github.com/surrealdb/surrealfs.git"
 # Everything the provider implements beyond the required lifecycle. Nothing in
 # Hermes reads this — memory discovery only takes `description` out of here — but
 # the plugin docs ask for it, and it is the only place the set is written down.
