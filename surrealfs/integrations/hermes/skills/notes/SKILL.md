@@ -35,22 +35,29 @@ Paths are absolute and there is no working directory. Use folders; a flat root g
 unusable fast.
 
 ```
-/home/hermes/todo.md              your own working files
-/home/hermes/scratch.md
-/preferences/voice.md             what you learn about the user
-/preferences/workflow.md
+/home/hermes-martin/todo.md       your own working files
+/home/hermes-martin/scratch.md
+/home/hermes-martin/memories/     your filed conversations — leave these alone
+/preferences/martin/voice.md      how martin prefers to be heard
 /projects/surrealfs/todo.md       one folder per project
 /projects/surrealfs/notes.md
 ```
 
-- `/home/<your name>/` is yours — working notes, running to-dos, anything you keep
-  for your own benefit. Keeping it separate means your scratch work never clutters
-  the user's folders.
-- `/preferences/` is what you learn about the user: how they like to be addressed,
+- `/home/<your username>/` is yours — working notes, running to-dos, anything you
+  keep for your own benefit. Your username is the account you run as, or whatever
+  `SURREALFS_AGENT_USER` sets; the system prompt names the folder your conversations
+  are filed in, which is inside it.
+- **Other `/home/` folders are not yours.** This filesystem may be shared with other
+  agents and with the people who own them, and each has a home of its own. Yours is
+  the only one you should write in, and the only one recall will read back to you.
+- `memories/` inside your home is written for you, one file per conversation. Read
+  it freely; write your own notes beside it rather than in it.
+- `/preferences/<user>/` is what you learn about the user: how they like to be addressed,
   tools they prefer, conventions they have corrected you on. One file per topic beats
-  one long file.
+  one long file. It sits outside `/home/` because it is shared — this is where you
+  hand something to the user, or to another agent working for them.
 - `/projects/<name>/` is per-project work — notes, plans, and that project's to-do
-  list together in one folder.
+  list together in one folder. Shared, for the same reason.
 
 ## How to work
 
@@ -66,8 +73,8 @@ unusable fast.
 
 ## Pitfalls
 
-- Paths must be absolute: `/preferences/voice.md`, never `preferences/voice.md` or
-  `~/notes.md`. There is no `cd`.
+- Paths must be absolute: `/preferences/martin/voice.md`, never
+  `preferences/voice.md` or `~/notes.md`. There is no `cd`.
 - `surrealfs_write_file` on an existing path replaces its entire contents. If you
   meant to add a line, use `surrealfs_edit`.
 - `surrealfs_rm` cannot be undone, and needs `recursive` to remove a folder that has

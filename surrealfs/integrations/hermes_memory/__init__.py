@@ -4,9 +4,9 @@ See https://hermes-agent.nousresearch.com/docs/developer-guide/memory-provider-p
 
 The tool plugin in ``surrealfs.integrations.hermes`` gives the agent tools it chooses
 to call. This closes the loop: Hermes hands every completed turn to :meth:`sync_turn`,
-which files it under ``/memory/<profile>``, and asks :meth:`prefetch` for context
-before each API call, which searches the whole filesystem — the agent's own notes
-included, another profile's transcripts not.
+which files it under ``/home/<agent>/memories/<profile>``, and asks :meth:`prefetch`
+for context before each API call, which searches the whole filesystem — the agent's
+own notes included, another agent's or profile's transcripts not.
 
 Memory providers are found by directory, not by entry point, so this has to be
 installed on its own::
@@ -23,17 +23,20 @@ The second step installs ``surrealfs`` into Hermes' own virtualenv — the
 
 The directory name is the provider name Hermes matches that setting against.
 Connection details come from the usual ``SURREALDB_*`` variables; set
-``SURREALFS_MEMORY_DIR`` to file turns somewhere other than ``/memory``, and
+``SURREALFS_AGENT_USER`` to name the agent whose home turns are filed in,
+``SURREALFS_MEMORY_DIR`` to file them somewhere else entirely, and
 ``SURREALFS_SEMANTIC=1`` to have recall match on meaning as well as wording.
 
 Those variables are read from ``$HERMES_HOME/.env``, so pointing two profiles at
-different databases is already a matter of configuring each one — see
-:func:`_profile` for what happens when they share.
+different databases — or two agents at different homes — is already a matter of
+configuring each one. See :func:`_agent_user` for who owns a home and
+:func:`_profile` for what happens when one agent runs several.
 """
 
 from __future__ import annotations
 
 import asyncio
+import getpass
 import importlib.util
 import os
 import re
@@ -95,8 +98,56 @@ def register(ctx: Any) -> None:
     ctx.register_memory_provider(SurrealFsMemory())
 
 
+HOME_ROOT = "/home"
+
+# Where turns were filed before homes existed. Never written now, and excluded from
+# recall rather than migrated: left in, one turn per file makes them short documents
+# that BM25 favours, so they would take the notes slots `_rank` reserves.
+LEGACY_MEMORY_DIR = "/memory"
+
+
+def _machine_user() -> str:
+    """The unix account this process runs as, or ``unknown``.
+
+    `getpass.getuser` walks LOGNAME/USER/LNAME/USERNAME and then the password
+    database, and raises only when every one of them fails — a container with no
+    passwd entry, some cron environments.
+    """
+    try:
+        return _slug(getpass.getuser())
+    except Exception:
+        return "unknown"
+
+
+def _agent_user() -> str:
+    """The agent whose home this provider files under.
+
+    The agent, not the human: the notes skill already hands the agent a home at
+    ``/home/<name>/``, so two Hermes instances owned by two different people
+    collide there unless the name distinguishes them.
+
+    Defaults to the machine username, because on a VM or sandbox the agent has an
+    account of its own and the SurrealFS path should match it. Where it does not —
+    an agent sharing a laptop account with its human, or two agents under one
+    account — ``SURREALFS_AGENT_USER`` names it (``hermes-martin``), and
+    ``hermes memory setup`` writes that into the profile's own ``.env``.
+    """
+    # Tested before slugging: `_slug("")` is `"session"`, not empty.
+    name = os.environ.get("SURREALFS_AGENT_USER", "").strip()
+    return _slug(name) if name else _machine_user()
+
+
+def _home() -> str:
+    return f"{HOME_ROOT}/{_agent_user()}"
+
+
+def _default_memory_dir() -> str:
+    return f"{_home()}/memories"
+
+
 def _memory_dir() -> str:
-    return os.environ.get("SURREALFS_MEMORY_DIR", "/memory").rstrip("/") or "/memory"
+    default = _default_memory_dir()
+    return os.environ.get("SURREALFS_MEMORY_DIR", default).rstrip("/") or default
 
 
 def _semantic() -> bool:
@@ -340,12 +391,16 @@ class SurrealFsMemory(_Base):
         setup` writes any field carrying an `env_var` to `.env` itself.
 
         The upstream advice is to prompt only for what the user *must* set and
-        document the rest. That is aimed at providers with many options; seven
+        document the rest. That is aimed at providers with many options; eight
         is not many, and this list is load-bearing elsewhere — `hermes
         surrealfs-memory status` builds its report by walking it, so a field
         demoted to README-only silently vanishes from the one command whose job
         is diagnosing a bad install. One rule: if the code reads it from the
         environment, it is here.
+
+        The two path fields overlap deliberately: `agent_user` is the knob to
+        reach for, and `memory_dir` overrides the whole thing for anyone who wants
+        turns outside `/home` altogether.
         """
         return [
             {
@@ -380,9 +435,21 @@ class SurrealFsMemory(_Base):
                 "env_var": "SURREALDB_PASS",
             },
             {
+                "key": "agent_user",
+                "description": (
+                    "Name of the agent's home in SurrealFS, under /home. "
+                    "Set it when two agents would otherwise share one"
+                ),
+                # The fallback, not the resolved value: `cli.py` renders this as
+                # `os.environ.get(env_var) or default`, so a resolved value here
+                # would report the env var's contents even when it is unset.
+                "default": _machine_user(),
+                "env_var": "SURREALFS_AGENT_USER",
+            },
+            {
                 "key": "memory_dir",
                 "description": "Folder in SurrealFS to file turns under",
-                "default": "/memory",
+                "default": _default_memory_dir(),
                 "env_var": "SURREALFS_MEMORY_DIR",
             },
             {
@@ -398,7 +465,7 @@ class SurrealFsMemory(_Base):
         ]
 
     def root(self) -> str:
-        """The folder this profile's turns are filed under."""
+        """The folder this agent's profile files its turns under."""
         return f"{_memory_dir()}/{self._profile}"
 
     def path_for(self, session: str, when: datetime) -> str:
@@ -543,16 +610,31 @@ class SurrealFsMemory(_Base):
         return (notes + filed[:MEMORY_SLOTS])[:RECALL_LIMIT]
 
     def _is_mine(self, path: str) -> bool:
-        """Keep everything except another profile's filed turns.
+        """Whether `path` is this agent's to recall.
 
-        Notes written with the `surrealfs_*` tools stay shared: they are the
-        user's own curated files, in a database the user chose, and hiding them
-        per profile would defeat the point of recalling them. Raw transcripts are
-        the part that must not cross over.
+        Two things it drops. Another profile's filed turns, as before — raw
+        transcripts are what must not cross over. And every other home: on a
+        shared database `/home/` holds one directory per agent, plus the humans'
+        own, and none of them are this agent's to read.
+
+        Outside `/home/` nothing is dropped. `/preferences/` and `/projects/` are
+        the shared root the notes skill points at, and they are the handover point
+        between an agent and everyone else — the highest-signal memories in the
+        tree, and hiding them would defeat the point of recalling them.
+
+        The `_memory_dir()` test has to come before the `_home()` one: a sibling
+        profile's turns live inside this home too, and would otherwise read as
+        ordinary files in it.
         """
-        return not path.startswith(f"{_memory_dir()}/") or path.startswith(
-            f"{self.root()}/"
-        )
+        if path.startswith(f"{self.root()}/"):
+            return True
+        if path.startswith(f"{_memory_dir()}/") or path.startswith(
+            f"{LEGACY_MEMORY_DIR}/"
+        ):
+            return False
+        if path.startswith(f"{_home()}/"):
+            return True
+        return not path.startswith(f"{HOME_ROOT}/")
 
     def _is_this_session(self, path: str) -> bool:
         """Whether `path` is a turn this very conversation filed.

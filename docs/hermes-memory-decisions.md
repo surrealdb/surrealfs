@@ -15,7 +15,7 @@ sources disagree, the sources win: the doc omits `on_session_switch` entirely an
 
 ## Turns are named by wall clock, not by a turn number
 
-`/memory/<profile>/<day>/<session>-HHMMSSmmm.md`.
+`/home/<agent>/memories/<profile>/<day>/<session>-HHMMSSmmm.md`.
 
 A counter has to be stored somewhere, and in-process is the one place it cannot be:
 `hermes --resume` starts a second process on the same session id, a counter in
@@ -40,12 +40,58 @@ The `# Turn N —` heading went with it, replaced by the timestamp. That is a
 doc-visible format change and the cheapest thing here to revert — the filename is
 the part that has to stay collision-free.
 
+## The memory root is a home, and the home belongs to the agent
+
+`/home/<agent>/memories/`. The alternative was a single global `/memory/`, which is
+what this was, and it holds only while one person owns the database. Shared, every
+user's raw transcripts land in one tree and recall hands one person's conversations
+to somebody else's agent.
+
+**The home is the agent's, not the human's.** The notes skill
+(`integrations/hermes/skills/notes/SKILL.md`) already gave the agent a home at
+`/home/<your name>/` and showed `/home/hermes/todo.md` — so two Hermes instances owned
+by two different people were already colliding there, before memories were involved.
+Naming the home after the agent fixes the pre-existing collision and gives the
+memories somewhere to live in one move: they go in the folder the agent already owns.
+`/home/martin` is then the human's, distinct from the `hermes-martin` that serves them.
+
+**The default is the bare machine username**, `getpass.getuser()`. On a VM or sandbox
+the agent has an account of its own, so the SurrealFS path matches the machine — which
+is the case worth optimising, because it needs no configuration at all. Rejected: an
+always-prefixed `hermes-<user>`, which never collides with a human but produces
+`hermes-hermes` on exactly that deployment. Where the default is wrong — an agent
+sharing a laptop account with its human, two agents under one account —
+`SURREALFS_AGENT_USER` names it, and `hermes memory setup` writes it into the
+profile's own `.env`.
+
+`SURREALFS_MEMORY_DIR` still overrides the whole path for anyone who wants turns
+outside `/home` altogether. `_is_mine` is written to stay correct when it points
+somewhere with no home in it.
+
+**Recall drops whole homes, not just their `memories/`.** The narrower rule was
+tempting — it preserves the "notes are shared, transcripts are not" line below
+verbatim — but a home is working space: an agent's scratch, to-dos, and half-finished
+drafts are not addressed to anyone else, and on a shared database "anyone else"
+now means other people. Everything outside `/home/` stays shared, and that is where
+the notes skill already points curated notes, so the handover path is unchanged.
+
+Legacy `/memory/` is excluded explicitly rather than migrated. Left in, it would not
+merely go quiet: it sits outside the new memories dir, so `_rank` would read those
+transcripts as *notes* and hand them the high-priority slots reserved against exactly
+that failure.
+
 ## Profiles scope the turn subtree, not the database
 
 `initialize()`'s `hermes_home` kwarg picks a segment: `<root>/profiles/<name>` →
 `<name>`, anything else (including `~/.hermes` and an absent kwarg) → `default`.
-Turns are written under `/memory/<profile>/`, and `_is_mine` drops other profiles'
+Turns are written under `<memories>/<profile>/`, and `_is_mine` drops other profiles'
 folders from recall.
+
+Both segments earn their place: the home separates agents, which have different
+owners; the profile separates one agent's own configurations, which share an account
+and a home. Ordering matters in `_is_mine` because of that nesting — the sibling
+profile test has to run before the home test, or another profile's transcripts read
+as ordinary files in a home that really is this agent's.
 
 Three things this deliberately does not do:
 
@@ -56,13 +102,15 @@ the highest-signal memories in the tree — losing them defeats the design. User
 want database-level separation already have it: `.env` lives in `$HERMES_HOME`, so
 `SURREALDB_DATABASE` is per-profile today, and `hermes memory setup` writes it there.
 
-**It does not hide tool-written notes across profiles.** They are the user's own
-curated files in a database the user chose. Raw transcripts are the part that must
-not cross over. If this ever needs to change, `_is_mine` is the single place.
+**It does not hide tool-written notes outside `/home/`.** They are the user's own
+curated files in a database the user chose, and the shared root is where an agent
+hands something over. Raw transcripts are the part that must not cross over. (Inside
+`/home/`, the home rule above is stricter and does hide them.) If this ever needs to
+change, `_is_mine` is still the single place.
 
 **It does not leave the default profile unprefixed.** That was less churn, but it
-isolates in one direction only: `/memory/<day>/` for the default and
-`/memory/<name>/<day>/` for the rest means the default profile still recalls every
+isolates in one direction only: `<memories>/<day>/` for the default and
+`<memories>/<name>/<day>/` for the rest means the default profile still recalls every
 named profile's transcripts. Symmetry is worth the extra path segment.
 
 `_recall` over-fetches `RECALL_LIMIT * 4` so the filtering cannot cost a result slot —
@@ -172,7 +220,7 @@ never be more than one turn old.
 
 ## The built-in memory mirror is state, not events
 
-`on_memory_write` applies each delta to `/memory/<profile>/builtin/<target>.md`, so that
+`on_memory_write` applies each delta to `<memories>/<profile>/builtin/<target>.md`, so that
 file says what Hermes' `MEMORY.md` / `USER.md` say. `add` appends, `replace` and `remove`
 go through `fs.edit`, and an edit whose text was never mirrored is dropped rather than
 re-added — that write predates the hook, and resurrecting text the user just removed is

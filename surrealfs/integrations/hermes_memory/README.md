@@ -46,11 +46,18 @@ All environment variables, so there is no config file to write:
 | `SURREALDB_URL` | `ws://localhost:8000/rpc` | server to connect to |
 | `SURREALDB_USER` / `SURREALDB_PASS` | `root` / `root` | credentials |
 | `SURREALDB_NAMESPACE` / `SURREALDB_DATABASE` | `surrealfs` / `demo` | where the `file` table lives |
-| `SURREALFS_MEMORY_DIR` | `/memory` | folder to file turns under |
+| `SURREALFS_AGENT_USER` | your unix username | the agent's home under `/home` |
+| `SURREALFS_MEMORY_DIR` | `/home/<agent>/memories` | folder to file turns under |
 | `SURREALFS_SEMANTIC` | unset | `1` makes recall match on meaning too |
 
 `SURREALFS_SEMANTIC` needs `OPENAI_API_KEY` and the `embed` extra, and only pays off
 once the vectors exist — see below.
+
+Set `SURREALFS_AGENT_USER` whenever two agents would otherwise share a home — two
+Hermes installs owned by different people against one database, or an agent running
+under the same account as its human. `hermes-martin` alongside the human's own
+`/home/martin` is the shape to aim for. On a VM or sandbox where the agent has an
+account to itself, the default already matches the machine.
 
 ## Keeping the vectors current
 
@@ -98,7 +105,7 @@ working on its full-text arm the whole time the vectors are behind.
 **Capture.** Each turn becomes its own file:
 
 ```
-/memory/default/2026-08-06/a1b2c3-142251003.md
+/home/hermes-martin/memories/default/2026-08-06/a1b2c3-142251003.md
 ```
 
 ```markdown
@@ -145,7 +152,7 @@ replaces — so turn one of the resumed conversation overwrote turn one of the o
 Two other things get filed, both under the same profile subtree:
 
 - **Hermes' own memory.** When the built-in memory tool writes to `MEMORY.md` or
-  `USER.md`, the same change is applied to `/memory/<profile>/builtin/memory.md` or
+  `USER.md`, the same change is applied to `<memories>/<profile>/builtin/memory.md` or
   `.../user.md`. That is a mirror of what those files *say*, not a log of the writes,
   so recall reads the current state. Without it, Hermes' memory and SurrealFS would
   diverge permanently and recall would never see either file.
@@ -156,10 +163,11 @@ Two other things get filed, both under the same profile subtree:
   the file, so the detail survives at full fidelity and the agent can read it back
   with `surrealfs_read`.
 
-**Recall.** Before each turn, the provider searches the **whole** filesystem, not just
-its own folder. The notes the agent wrote itself under `/preferences/` and `/projects/`
-are the highest-signal memories present, and excluding them would mean the bundled
-`surrealfs:notes` skill and this provider ignored each other's work.
+**Recall.** Before each turn, the provider searches the whole filesystem, not just its
+own folder — everything except other agents' homes. The notes the agent wrote itself
+under `/preferences/` and `/projects/` are the highest-signal memories present, and
+excluding them would mean the bundled `surrealfs:notes` skill and this provider ignored
+each other's work.
 
 Which is also why filed turns are held to two of the five recalled slots, and why the
 current conversation's own turns are never recalled at all. Recall reads the tree it
@@ -177,17 +185,26 @@ embedding round-trip `SURREALFS_SEMANTIC=1` adds. The cost is that a recall is o
 behind: switch topic abruptly and the first turn on the new subject still carries
 context for the old one.
 
-## Profiles
+## Homes and profiles
 
-Turns are filed under `/memory/<profile>/`, taken from the `hermes_home` Hermes passes
-to `initialize()` — `default` for `~/.hermes`, the directory name for anything under
-`<root>/profiles/`. Recall skips other profiles' folders, so two profiles pointed at
-one database still keep separate memories.
+Turns are filed under `/home/<agent>/memories/<profile>/`. Two segments, because there
+are two ways for memories to end up in one database that should not mix.
 
-Notes written with the `surrealfs_*` tools stay shared across profiles: they are the
-user's own curated files, in a database the user chose, and hiding them per profile
-would defeat the point of recalling them. For hard separation, give each profile its
-own `SURREALDB_DATABASE` — `.env` lives in `$HERMES_HOME`, so it is already
+`<agent>` is `SURREALFS_AGENT_USER`, or the unix account the agent runs as. A database
+shared between people holds one home per agent, plus the humans' own — the notes skill
+already treats `/home/<your username>/` as the agent's working directory, so the
+memories sit inside the folder the agent already owns. Recall reads that home and
+nothing under any other.
+
+`<profile>` comes from the `hermes_home` Hermes passes to `initialize()` — `default`
+for `~/.hermes`, the directory name for anything under `<root>/profiles/`. It separates
+one agent's own profiles, which share a home and a machine account.
+
+Everything outside `/home/` stays shared: `/preferences/`, `/projects/`, and anything
+else written with the `surrealfs_*` tools. That is the handover point — how an agent
+gives something to its user, or to another agent working for them — and hiding it would
+defeat the point of recalling it. Anything that must not be shared at all goes in a
+`SURREALDB_DATABASE` of its own; `.env` lives in `$HERMES_HOME`, so that is already
 per-profile.
 
 Note that `hermes backup` captures none of this: it walks `HERMES_HOME`, and the

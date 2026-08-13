@@ -23,6 +23,10 @@ from surrealfs.integrations import _connect, hermes_memory
 from surrealfs.integrations.hermes_memory import SurrealFsMemory, register
 from surrealfs.integrations.hermes_memory import cli as memory_cli
 
+AGENT = "hermes-test"
+HOME = f"/home/{AGENT}"
+MEMORIES = f"{HOME}/memories"
+
 
 class _FakeMemoryCtx:
     """Stands in for Hermes' `_ProviderCollector`."""
@@ -46,6 +50,9 @@ def memory(surreal_url, request, monkeypatch) -> SurrealFsMemory:
     namespace = "m" + str(abs(hash(request.node.nodeid)))[:12]
     monkeypatch.setenv("SURREALDB_NAMESPACE", namespace)
     monkeypatch.setenv("SURREALDB_DATABASE", "test")
+    # Pinned so the expected paths do not depend on whose machine runs the suite.
+    # `test_the_home_belongs_to_the_agent_not_the_machine` covers the unset case.
+    monkeypatch.setenv("SURREALFS_AGENT_USER", AGENT)
     monkeypatch.setattr(_connect, "_schema_applied", False)
 
     provider = SurrealFsMemory()
@@ -53,7 +60,7 @@ def memory(surreal_url, request, monkeypatch) -> SurrealFsMemory:
     return provider
 
 
-def _filed(prefix: str = "/memory") -> dict[str, str]:
+def _filed(prefix: str = MEMORIES) -> dict[str, str]:
     """Every turn filed under *prefix*, as ``{path: body}``.
 
     Filenames carry a wall-clock stamp rather than a turn number, so tests find
@@ -169,6 +176,7 @@ def test_config_schema_covers_every_setting_the_provider_reads():
         "SURREALDB_DATABASE",
         "SURREALDB_USER",
         "SURREALDB_PASS",
+        "SURREALFS_AGENT_USER",
         "SURREALFS_MEMORY_DIR",
         "SURREALFS_SEMANTIC",
     }
@@ -196,7 +204,7 @@ def test_sync_turn_files_the_exchange(memory):
     memory.sync_turn("how do I get paid", "You invoice monthly.", session_id="sess-1")
 
     ((path, body),) = _filed().items()
-    assert path.startswith("/memory/default/") and "/sess-1-" in path
+    assert path.startswith(f"{MEMORIES}/default/") and "/sess-1-" in path
     assert "session: sess-1" in body
     assert "how do I get paid" in body
     assert "You invoice monthly." in body
@@ -302,16 +310,89 @@ def test_profiles_do_not_read_each_others_turns(memory):
     # `test_recall_never_serves_this_conversation_back_to_itself`.
     work.sync_turn("the deploy key rotates monthly", "Noted.", session_id="sess-old")
 
-    assert work.root() == "/memory/work"
-    assert list(_filed("/memory/work"))
+    assert work.root() == f"{MEMORIES}/work"
+    assert list(_filed(f"{MEMORIES}/work"))
     # `memory` is the default profile: it can see that a subtree exists, but the
     # turns in it never ride on one of its own turns.
     assert "deploy key" not in memory.prefetch("when does the deploy key rotate")
     assert "deploy key" in work.prefetch("when does the deploy key rotate")
 
 
+def test_the_home_belongs_to_the_agent_not_the_machine(monkeypatch):
+    """`SURREALFS_AGENT_USER` is what keeps two agents off one home.
+
+    The machine username is only the default, and it is the wrong answer in both
+    directions: two agents under one account collide on it, and an agent sharing
+    a laptop account with its human lands in the human's home.
+    """
+    monkeypatch.delenv("SURREALFS_AGENT_USER", raising=False)
+    monkeypatch.delenv("SURREALFS_MEMORY_DIR", raising=False)
+    assert hermes_memory._memory_dir() == (
+        f"/home/{hermes_memory._machine_user()}/memories"
+    )
+
+    monkeypatch.setenv("SURREALFS_AGENT_USER", "hermes-martin")
+    assert hermes_memory._memory_dir() == "/home/hermes-martin/memories"
+    # Slugged like a session id, so a name with a slash cannot invent a folder.
+    monkeypatch.setenv("SURREALFS_AGENT_USER", "hermes/../martin")
+    assert hermes_memory._memory_dir() == "/home/hermes-martin/memories"
+
+    # And the whole thing is still overridable, home or no home.
+    monkeypatch.setenv("SURREALFS_MEMORY_DIR", "/shared/turns/")
+    assert hermes_memory._memory_dir() == "/shared/turns"
+
+
+def test_another_agents_home_is_never_recalled(memory):
+    """The point of the home: a shared database is not a shared memory.
+
+    Every file here says the same thing, so ranking cannot be what separates
+    them — only `_is_mine` can.
+    """
+
+    async def seed() -> None:
+        async with _connect.connected() as db:
+            fs = SurrealFs(db)
+            for path in (
+                "/home/hermes-alice/memories/default/2026-01-01/sess-a-120000000.md",
+                "/home/hermes-alice/todo.md",  # another agent's scratch, not just turns
+                "/home/martin/notes.md",  # the human's own files
+                # Filed before homes existed, and left where it is rather than
+                # migrated — so it has to be excluded, or it takes a notes slot.
+                "/memory/default/2026-01-01/sess-old-120000000.md",
+                "/preferences/voice.md",  # the shared root, the handover point
+            ):
+                await fs.write_text(path, "The flywheel spins.")
+
+    asyncio.run(seed())
+
+    recalled = memory.prefetch("flywheel")
+    assert [line for line in recalled.splitlines() if line.startswith("/")] == [
+        "/preferences/voice.md"
+    ]
+
+
+def test_the_agents_own_home_is_recalled_but_not_its_other_profiles(memory):
+    """The ordering `_is_mine` depends on: a sibling profile lives in this home too."""
+
+    async def seed() -> None:
+        async with _connect.connected() as db:
+            fs = SurrealFs(db)
+            await fs.write_text(f"{HOME}/todo.md", "The flywheel spins.")
+            await fs.write_text(
+                f"{MEMORIES}/work/2026-01-01/sess-w-120000000.md",
+                "The flywheel spins.",
+            )
+
+    asyncio.run(seed())
+
+    recalled = memory.prefetch("flywheel")
+    assert [line for line in recalled.splitlines() if line.startswith("/")] == [
+        f"{HOME}/todo.md"
+    ]
+
+
 def test_prefetch_recalls_from_the_whole_filesystem(memory):
-    """Not just /memory: the notes the agent wrote itself are the point."""
+    """Not just the memories folder: the notes the agent wrote are the point."""
 
     async def seed() -> None:
         async with _connect.connected() as db:
@@ -374,7 +455,7 @@ def test_recall_never_serves_this_conversation_back_to_itself(memory):
 
     recalled = memory.prefetch("flywheel")
     assert "/projects/acme.md" in recalled
-    assert "/memory/" not in recalled
+    assert f"{MEMORIES}/" not in recalled
 
 
 def test_filed_turns_cannot_crowd_the_notes_out_of_recall(memory):
@@ -385,7 +466,7 @@ def test_filed_turns_cannot_crowd_the_notes_out_of_recall(memory):
             fs = SurrealFs(db)
             for n in range(6):
                 await fs.write_text(
-                    f"/memory/default/2026-01-0{n + 1}/older-sess-1200000{n}.md",
+                    f"{MEMORIES}/default/2026-01-0{n + 1}/older-sess-1200000{n}.md",
                     f"## User\n\nthe flywheel spins, take {n}\n",
                 )
             for name in ("voice", "tone", "style"):
@@ -397,7 +478,7 @@ def test_filed_turns_cannot_crowd_the_notes_out_of_recall(memory):
 
     recalled = memory.prefetch("flywheel")
     paths = [line for line in recalled.splitlines() if line.startswith("/")]
-    filed = [p for p in paths if p.startswith("/memory/")]
+    filed = [p for p in paths if p.startswith(f"{MEMORIES}/")]
     assert len(paths) == 5, paths
     assert len(filed) <= hermes_memory.MEMORY_SLOTS, paths
     # And they are appended after the notes rather than interleaved with them.
@@ -506,10 +587,12 @@ def test_built_in_memory_writes_are_mirrored(memory):
     memory.on_memory_write("add", "user", "Prefers metric units.")
 
     filed = _filed()
-    assert filed["/memory/default/builtin/memory.md"].strip() == (
+    assert filed[f"{MEMORIES}/default/builtin/memory.md"].strip() == (
         "Deploys go out on Fridays."
     )
-    assert filed["/memory/default/builtin/user.md"].strip() == "Prefers metric units."
+    assert filed[f"{MEMORIES}/default/builtin/user.md"].strip() == (
+        "Prefers metric units."
+    )
 
 
 def test_a_mirror_edit_for_text_that_was_never_seen_is_dropped(memory):

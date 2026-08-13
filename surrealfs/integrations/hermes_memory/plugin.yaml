@@ -1,9 +1,10 @@
 name: surrealfs-memory
 version: 0.3.0
 description: >-
-  Memory backed by SurrealFS — files every turn under /memory in a SurrealDB-backed
-  filesystem, and recalls context by searching the whole tree, the agent's own notes
-  included. Connection details come from the SURREALDB_* env vars.
+  Memory backed by SurrealFS — files every turn under the agent's own home in a
+  SurrealDB-backed filesystem, and recalls context by searching the tree, the agent's
+  own notes included and other agents' homes not. Connection details come from the
+  SURREALDB_* env vars.
 author: Martin Schaer
 # Wiring, unlike `hooks:` below: `hermes memory setup` installs these into Hermes' own
 # virtualenv, and `hermes update` reinstalls them after a venv sync strips or downgrades

@@ -208,8 +208,9 @@ def test_hermes_bundles_the_notes_skill():
     assert text.startswith("---\n")
     assert "\nname: notes\n" in text
     assert "\ndescription: " in text
-    # The conventions the agent is meant to follow.
-    for folder in ("/home/hermes/", "/preferences/", "/projects/"):
+    # The conventions the agent is meant to follow. The home is per-agent — one
+    # database can serve several — so the skill has to show a name, not `/home/`.
+    for folder in ("/home/<your username>/", "/preferences/", "/projects/"):
         assert folder in text
 
     # Hermes logs a prompt-injection warning on every load if any of these appear

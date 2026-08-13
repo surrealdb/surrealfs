@@ -188,12 +188,14 @@ ln -s "$PWD/surrealfs/integrations/hermes_memory" ~/.hermes/plugins/surrealfs-me
 
 The symlink is not an alternative to installing — Hermes discovers memory providers
 by scanning `$HERMES_HOME/plugins/<name>/`, never the entry point, and the directory
-name *is* the provider name. Each turn is filed as its own file under
-`/memory/<profile>/` (`/memory/default/2026-08-06/<session>-142251003.md`), skipping
-ones whose prompt carries no signal and anything that is not a primary agent. Recall
-searches the whole filesystem rather than just that folder, so the agent's own
-`/preferences/` and `/projects/` notes come back too — they are the strongest signal
-in there — while another profile's transcripts do not. Set `SURREALFS_SEMANTIC=1`
+name *is* the provider name. Each turn is filed as its own file in the agent's home,
+under `/home/<agent>/memories/<profile>/`, skipping ones whose prompt carries no
+signal and anything that is not a primary agent. Recall searches the whole filesystem
+rather than just that folder, so the agent's own `/preferences/` and `/projects/`
+notes come back too — they are the strongest signal in there — while other agents'
+homes and other profiles' transcripts do not. One database can therefore serve
+several agents and their users; `SURREALFS_AGENT_USER` names the home when the unix
+account does not distinguish them. Set `SURREALFS_SEMANTIC=1`
 to have recall match on meaning too, which needs the indexer running — see
 [Keeping the vectors current under Hermes](#keeping-the-vectors-current-under-hermes).
 See `surrealfs/integrations/hermes_memory/README.md`.
