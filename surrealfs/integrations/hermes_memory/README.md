@@ -50,7 +50,48 @@ All environment variables, so there is no config file to write:
 | `SURREALFS_SEMANTIC` | unset | `1` makes recall match on meaning too |
 
 `SURREALFS_SEMANTIC` needs `OPENAI_API_KEY` and the `embed` extra, and only pays off
-once the vectors exist — run `python -m surrealfs.embed` to keep them current.
+once the vectors exist — see below.
+
+## Keeping the vectors current
+
+Skip this unless `SURREALFS_SEMANTIC=1`. Nothing embeds a file as it is written, so
+recall matches on meaning only for what the indexer has already reached. Hermes has
+no way for a plugin to declare a daemon of its own, but its scheduler runs scripts
+with no agent attached, which saves you a systemd unit:
+
+```bash
+mkdir -p "${HERMES_HOME:-$HOME/.hermes}/scripts"
+cat > "${HERMES_HOME:-$HOME/.hermes}/scripts/surrealfs-embed.sh" <<'EOF'
+#!/usr/bin/env bash
+# Cron sanitizes the subprocess env and OPENAI_API_KEY is on the blocklist, so the
+# key has to come from a file — as do the SURREALDB_* connection details.
+set -a; . "$HOME/repos/surrealfs/.env"; set +a
+exec uv run --project "$HOME/repos/surrealfs" --extra embed \
+  python -m surrealfs.embed --once
+EOF
+
+hermes cron create 'every 5m' --no-agent --name surrealfs-embed \
+  --script surrealfs-embed.sh
+```
+
+`--no-agent` skips inference entirely — no tokens, no model — so a `--once` pass per
+tick replaces the polling loop. The script has to live under `$HERMES_HOME/scripts/`;
+paths outside it are rejected. Pip-installed rather than a checkout? Point the script
+at Hermes' own interpreter instead, installed with the extra
+(`"surrealfs[embed] @ git+..."`):
+
+```bash
+exec ~/.hermes/hermes-agent/venv/bin/python -m surrealfs.embed --once
+```
+
+An idle pass prints nothing and empty stdout is a silent tick, so this speaks up only
+with news (`embedded 4 file(s)`) or a non-zero exit, which arrives as an alert instead
+of being swallowed. `hermes cron runs` has the history.
+
+The scheduler ticks inside the gateway daemon, so this runs only while that does
+(`hermes gateway install`), and the period is how long a new file takes to become
+recallable *by meaning* — it is matchable by term immediately, and recall keeps
+working on its full-text arm the whole time the vectors are behind.
 
 ## What it does
 

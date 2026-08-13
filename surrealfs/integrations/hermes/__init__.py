@@ -21,7 +21,13 @@ and write the local disk, already sit in it.
 Connection details come from the same ``SURREALDB_*`` environment variables the
 rest of the project uses, defaulting to a local server. Set
 ``SURREALFS_SEMANTIC=1`` to let `surrealfs_search` fuse in match-by-meaning results;
-that needs ``OPENAI_API_KEY`` and the ``embed`` extra.
+that needs ``OPENAI_API_KEY``, the ``embed`` extra, and the indexer on a schedule,
+since nothing embeds a file as it is written. Hermes has no plugin-declared daemon,
+so the least setup is one of its own script-only cron jobs::
+
+    hermes cron create 'every 5m' --no-agent --script surrealfs-embed.sh
+
+See "Keeping the vectors current under Hermes" in the README for the script.
 
 A skill in ``skills/notes/`` ships with the plugin, teaching the agent to keep its
 notes and memories here and how to organise them. Hermes does not advertise plugin

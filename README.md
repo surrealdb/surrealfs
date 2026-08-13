@@ -147,7 +147,10 @@ surface — see `surrealfs/tools/docs/ls.md`.
 
 The plugin opens its own connection per call, reading the same `SURREALDB_*`
 environment variables as everything else here and defaulting to a local server;
-set `SURREALFS_SEMANTIC=1` for hybrid search. Handlers are registered
+set `SURREALFS_SEMANTIC=1` for hybrid search — which also means installing the
+`embed` extra and scheduling the indexer, see
+[Keeping the vectors current under Hermes](#keeping-the-vectors-current-under-hermes).
+Handlers are registered
 `is_async=True`, so Hermes awaits them on whichever loop it is using, and every
 result — errors included — comes back as JSON.
 
@@ -190,12 +193,67 @@ name *is* the provider name. Each turn is filed as its own file under
 ones whose prompt carries no signal and anything that is not a primary agent. Recall
 searches the whole filesystem rather than just that folder, so the agent's own
 `/preferences/` and `/projects/` notes come back too — they are the strongest signal
-in there — while another profile's transcripts do not. See
-`surrealfs/integrations/hermes_memory/README.md`.
+in there — while another profile's transcripts do not. Set `SURREALFS_SEMANTIC=1`
+to have recall match on meaning too, which needs the indexer running — see
+[Keeping the vectors current under Hermes](#keeping-the-vectors-current-under-hermes).
+See `surrealfs/integrations/hermes_memory/README.md`.
 
 All four tool surfaces are generated from one registry in `surrealfs/tools/`, so
 they cannot drift apart. Tool descriptions are markdown in
 `surrealfs/tools/docs/` — edit them as prose; they are prompt text.
+
+### Keeping the vectors current under Hermes
+
+Only needed with `SURREALFS_SEMANTIC=1`, and needed by **both** Hermes surfaces
+above: nothing embeds a file as it is written, so semantic search and semantic
+recall see only what the indexer has already reached. Hermes has no way for a
+plugin to declare a daemon of its own — the plugin API registers tools, hooks,
+skills, commands and providers, and `terminal(background=true)` processes are
+session-scoped — but its scheduler runs scripts without an agent, which covers
+this without a systemd unit or a terminal you have to remember to leave open:
+
+```bash
+mkdir -p ~/.hermes/scripts
+cat > ~/.hermes/scripts/surrealfs-embed.sh <<'EOF'
+#!/usr/bin/env bash
+# Cron sanitizes the subprocess env and OPENAI_API_KEY is on the blocklist, so
+# the key has to come from a file. Same for the SURREALDB_* connection details.
+set -a; . "$HOME/repos/surrealfs/.env"; set +a
+exec uv run --project "$HOME/repos/surrealfs" --extra embed \
+  python -m surrealfs.embed --once
+EOF
+
+hermes cron create 'every 5m' --no-agent --name surrealfs-embed \
+  --script surrealfs-embed.sh
+```
+
+`--no-agent` skips the inference layer entirely — no tokens, no model, just the
+script — so `--once` per tick replaces the polling loop `just embed` runs. The
+script must live under `$HERMES_HOME/scripts/`; paths outside it are rejected.
+
+An idle pass prints nothing, and empty stdout is a silent tick, so you hear from
+this only when it has news: `embedded 4 file(s)` gets delivered, and a pass that
+fails (no API key, database down) exits non-zero, which Hermes reports as an
+alert rather than swallowing. `hermes cron runs` has the history.
+
+Two things to know before relying on it. The scheduler ticks inside the gateway
+daemon, so this runs only while that does — `hermes gateway install` if it is not
+already a service — and vectors go stale, without breaking anything, whenever it
+is down: search keeps working, on its full-text arm. And a five-minute period
+means a file written now is searchable by meaning in up to five minutes; it is
+immediately searchable by term. Lower the interval if that gap matters, at one
+`SELECT` per tick that returns nothing when there is no work.
+
+If the package is pip-installed rather than run from a checkout, install it into
+Hermes' virtualenv with the extra (`"surrealfs[embed] @ git+..."`) and have the
+script call that interpreter directly:
+
+```bash
+exec ~/.hermes/hermes-agent/venv/bin/python -m surrealfs.embed --once
+```
+
+It still needs `OPENAI_API_KEY` and the `SURREALDB_*` variables sourced from a
+file of your own, for the same reason.
 
 ## Semantic search
 

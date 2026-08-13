@@ -90,6 +90,18 @@ the provider's `register()` is called with the memory loader's own collector, wh
 also has no `register_skill` — hence two independent `register()` functions rather
 than one shared entry point.
 
+**Hermes cannot host the embedding indexer; a script-only cron job does.** There is
+no plugin-declared background process: `PluginContext` registers tools, hooks, skills,
+CLI commands, middleware and providers, the manifest has no field for it, and
+`tools/process_registry.py` only backs `terminal(background=true)` — session-scoped
+and killed on reset. `register_auxiliary_task` sounds like it and is LLM side-jobs.
+So both READMEs tell users to schedule `python -m surrealfs.embed --once` with
+`hermes cron create 'every 5m' --no-agent --script …`, which skips inference entirely.
+Two constraints the recipe exists to satisfy: the script must resolve inside
+`$HERMES_HOME/scripts/`, and cron sanitizes the subprocess env against a
+provider-credential blocklist that `OPENAI_API_KEY` is on — so the key comes from a
+sourced file, never from the gateway's environment.
+
 **`search_text` defaults to `match="any"` (`@1,OR@`), not AND.** With `@1@`,
 `'what tone does the user prefer'` finds nothing while `'prefer'` finds the note —
 and a caller that hands the model an empty result has cost it a turn, or worse: the
