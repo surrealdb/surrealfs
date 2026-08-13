@@ -1,6 +1,70 @@
-# surrealfs
+<br>
 
-A filesystem for agents, backed by SurrealDB.
+<p align="center">
+    <img width=120 src="https://raw.githubusercontent.com/surrealdb/icons/main/surreal.svg" />
+</p>
+
+<h1 align="center">SurrealFS</h1><br/>
+<p align="center">A filesystem for agents, backed by SurrealDB.</p>
+
+<br>
+
+<p align="center">
+    <img
+      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/surrealdb/default.svg"
+      alt="SurrealDB"
+      width="48"
+      height="48"
+    />
+    &nbsp;
+    <img
+      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/python/default.svg"
+      alt="Python"
+      width="48"
+      height="48"
+    />
+    &nbsp;
+    <img
+      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/pydantic/default.svg"
+      alt="Pydantic"
+      width="48"
+      height="48"
+    />
+    &nbsp;
+    <img
+      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/nousresearch-hermes/default.svg"
+      alt="NousResearch (Hermes)"
+      width="48"
+      height="48"
+    />
+    &nbsp;
+    <img
+      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/openai/default.svg"
+      alt="OpenAI"
+      width="48"
+      height="48"
+    />
+    &nbsp;
+    <img
+      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/anthropic/default.svg"
+      alt="Anthropic"
+      width="48"
+      height="48"
+    />
+</p>
+
+<br>
+
+<p align="center">
+    <a href="https://surrealdb.com/discord"><img src="https://img.shields.io/discord/902568124350599239?label=discord&style=flat-square&color=5a66f6"></a>
+    &nbsp;
+    <a href="https://x.com/surrealdb"><img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/surrealdb">
+</a>
+    &nbsp;
+    <a href="https://www.linkedin.com/company/surrealdb/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=flat-square"></a>
+    &nbsp;
+    <a href="https://www.youtube.com/@SurrealDB"><img src="https://img.shields.io/badge/youtube-subscribe-fc1c1c.svg?style=flat-square"></a>
+</p>
 
 Give an agent somewhere durable to keep its work. SurrealFS is a `file` table
 plus the tools to hand it to a model — files and folders, full-text and semantic
