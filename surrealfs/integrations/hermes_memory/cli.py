@@ -43,9 +43,14 @@ def _status() -> int:
         from surrealfs import SurrealFs
         from surrealfs.integrations._connect import connected
         from surrealfs.integrations.hermes_memory import SurrealFsMemory
-    except ImportError as exc:  # The state `pip_dependencies` exists to prevent.
+    except ImportError as exc:
+        # `pip_dependencies` exists to prevent this state and cannot, while the
+        # package is unpublished: Hermes refuses to install a spec carrying a URL,
+        # so the git install is the user's to run.
         print(f"\n  surrealfs is not importable by Hermes' interpreter: {exc}")
-        print("  Run: hermes memory setup surrealfs-memory\n")
+        print("  Run: uv pip install --python \\")
+        print("        ~/.hermes/hermes-agent/venv/bin/python \\")
+        print('        "surrealfs @ git+https://github.com/surrealdb/surrealfs.git"\n')
         return 1
 
     provider = SurrealFsMemory()
