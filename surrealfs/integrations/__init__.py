@@ -13,7 +13,10 @@ All three are generated from the registry in :mod:`surrealfs.tools`.
 :mod:`surrealfs.integrations.hermes_memory` is the odd one out: a Hermes *memory
 provider* rather than a set of tools, so it files turns and recalls them instead of
 exposing anything for a model to call. Hermes finds it by directory, so it installs
-separately from the plugin above — see its README.
+separately from the plugin above.
+
+Each of the four has a ``README.md`` beside its code; nothing about them is
+documented in the root README, which links out instead.
 """
 
 from __future__ import annotations

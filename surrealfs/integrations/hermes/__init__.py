@@ -27,7 +27,7 @@ so the least setup is one of its own script-only cron jobs::
 
     hermes cron create 'every 5m' --no-agent --script surrealfs-embed.sh
 
-See "Keeping the vectors current under Hermes" in the README for the script.
+See ``docs/hermes-indexer.md`` for the script.
 
 A skill in ``skills/notes/`` ships with the plugin, teaching the agent to keep its
 notes and memories here and how to organise them. Hermes does not advertise plugin

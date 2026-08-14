@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+from typing import Any
 
 import uvicorn
 from pydantic_ai import Agent
 from pydantic_ai.capabilities import WebFetch, WebSearch
 from surrealdb import AsyncSurreal
+from surrealdb.errors import ConnectionUnavailableError
+from websockets.exceptions import ConnectionClosed
 
 from surrealfs import SurrealFs, apply_schema
 from surrealfs.embed import make_embedder
@@ -76,9 +79,7 @@ def build_chat_agent(
     )
 
 
-async def connect() -> AsyncSurreal:
-    """Connect, authenticate, and make sure the schema is in place."""
-    db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
+async def _authenticate(db: AsyncSurreal) -> None:
     await db.signin(
         {
             "username": os.environ.get("SURREALDB_USER", "root"),
@@ -89,8 +90,49 @@ async def connect() -> AsyncSurreal:
         os.environ.get("SURREALDB_NAMESPACE", "surrealfs"),
         os.environ.get("SURREALDB_DATABASE", "demo"),
     )
+
+
+class _Reconnecting:
+    """A handle that reopens the WebSocket once it has been dropped.
+
+    An idle connection eventually dies -- "keepalive ping timeout" after the
+    server stops answering pings, or the machine sleeping -- and surrealdb-py
+    does not heal it: its ``connect()`` returns early while the dead socket is
+    still attached, so every later query fails with ``ConnectionClosed`` until
+    the process restarts. Only ``query_raw`` is wrapped because that is the one
+    call SurrealFs makes; everything else passes straight through.
+    """
+
+    def __init__(self, db: AsyncSurreal) -> None:
+        self._db = db
+        self._lock = asyncio.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._db, name)
+
+    async def query_raw(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return await self._db.query_raw(*args, **kwargs)
+        except (ConnectionClosed, ConnectionUnavailableError):
+            await self._reopen(self._db.socket)
+            return await self._db.query_raw(*args, **kwargs)
+
+    async def _reopen(self, dead: Any) -> None:
+        async with self._lock:
+            # Another request that failed on the same socket got here first;
+            # reconnecting again would drop the connection it just opened.
+            if self._db.socket is not dead:
+                return
+            await self._db.close()  # clears the dead socket so connect() reopens
+            await _authenticate(self._db)
+
+
+async def connect() -> AsyncSurreal:
+    """Connect, authenticate, and make sure the schema is in place."""
+    db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
+    await _authenticate(db)
     await apply_schema(db)
-    return db
+    return _Reconnecting(db)
 
 
 async def serve(host: str = "127.0.0.1", port: int = 7932) -> None:

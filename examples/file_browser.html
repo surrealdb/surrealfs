@@ -364,6 +364,8 @@ let entries = [];       // flat list from /api/tree
 let current = null;     // the open entry
 let mode = 'preview';   // 'preview' | 'source'
 let dirty = false;
+// renderTree() rebuilds every node, so expansion cannot live in the DOM.
+const dirOpen = new Map(); // folder path -> open?
 
 window.addEventListener('beforeunload', (e) => { if (dirty) e.preventDefault(); });
 
@@ -393,7 +395,7 @@ function renderTree() {
 
 const isDirNode = (node) => !!node.entry?.is_folder || node.kids.size > 0;
 
-function renderNodes(node, depth) {
+function renderNodes(node, depth, prefix = '') {
   const pad = (n) => make('span', { className: 'indent', style: `width:${n * 12}px` });
   const sorted = [...node.kids.entries()].sort(([a, x], [b, y]) =>
     (isDirNode(y) - isDirNode(x)) || a.localeCompare(b));
@@ -410,8 +412,13 @@ function renderNodes(node, depth) {
       const summary = make('summary', {},
         pad(depth), make('span', { className: 'twist', textContent: '▸' }), label);
       if (selected) summary.classList.add('selected');
-      return make('details', { open: depth < 2 }, summary,
-        make('div', { className: 'kids' }, ...renderNodes(child, depth + 1)));
+      // Implicit folders have no entry, so the path comes from the prefix.
+      const path = `${prefix}/${name}`;
+      if (!dirOpen.has(path)) dirOpen.set(path, depth < 2);
+      const details = make('details', { open: dirOpen.get(path) }, summary,
+        make('div', { className: 'kids' }, ...renderNodes(child, depth + 1, path)));
+      details.addEventListener('toggle', () => dirOpen.set(path, details.open));
+      return details;
     }
 
     const button = make('button', { className: 'node', onclick: () => openFile(entry.path) },
