@@ -10,59 +10,17 @@
 <br>
 
 <p align="center">
-    <a href="https://surrealdb.com">
-        <img
-            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/surrealdb/default.svg"
-            alt="SurrealDB"
-            width="48"
-            height="48"
-        />
-    </a>
+    <a href="https://surrealdb.com"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/surrealdb/default.svg" alt="SurrealDB" width="48" height="48" /></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/examples/semantic_search.py">
-        <img
-            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/python/default.svg"
-            alt="Python"
-            width="48"
-            height="48"
-        />
-    </a>
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/examples/semantic_search.py"> <img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/python/default.svg" alt="Python" width="48" height="48" /></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/pydantic_ai/README.md">
-        <img
-            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/pydantic/default.svg"
-            alt="Pydantic"
-            width="48"
-            height="48"
-        />
-    </a>
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/pydantic_ai/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/pydantic/default.svg" alt="Pydantic" width="48" height="48" /></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/hermes/README.md">
-        <img
-            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/nousresearch-hermes/default.svg"
-            alt="NousResearch (Hermes)"
-            width="48"
-            height="48"
-        />
-    </a>
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/hermes/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/nousresearch-hermes/default.svg" alt="NousResearch (Hermes)" width="48" height="48" /></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md">
-        <img
-            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/openai/default.svg"
-            alt="OpenAI"
-            width="48"
-            height="48"
-        />
-    </a>
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/openai/default.svg" alt="OpenAI" width="48" height="48" /></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md">
-        <img
-        src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/anthropic/default.svg"
-        alt="Anthropic"
-        width="48"
-        height="48"
-        />
-    </a>
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/anthropic/default.svg" alt="Anthropic" width="48" height="48" /></a>
 </p>
 
 <br>
