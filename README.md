@@ -10,47 +10,59 @@
 <br>
 
 <p align="center">
-    <img
-      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/surrealdb/default.svg"
-      alt="SurrealDB"
-      width="48"
-      height="48"
-    />
+    <a href="https://surrealdb.com">
+        <img
+            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/surrealdb/default.svg"
+            alt="SurrealDB"
+            width="48"
+            height="48"
+        />
+    </a>
     &nbsp;
-    <img
-      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/python/default.svg"
-      alt="Python"
-      width="48"
-      height="48"
-    />
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/examples/semantic_search.py">
+        <img
+            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/python/default.svg"
+            alt="Python"
+            width="48"
+            height="48"
+        />
+    </a>
     &nbsp;
-    <img
-      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/pydantic/default.svg"
-      alt="Pydantic"
-      width="48"
-      height="48"
-    />
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/pydantic_ai/README.md">
+        <img
+            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/pydantic/default.svg"
+            alt="Pydantic"
+            width="48"
+            height="48"
+        />
+    </a>
     &nbsp;
-    <img
-      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/nousresearch-hermes/default.svg"
-      alt="NousResearch (Hermes)"
-      width="48"
-      height="48"
-    />
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/hermes/README.md">
+        <img
+            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/nousresearch-hermes/default.svg"
+            alt="NousResearch (Hermes)"
+            width="48"
+            height="48"
+        />
+    </a>
     &nbsp;
-    <img
-      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/openai/default.svg"
-      alt="OpenAI"
-      width="48"
-      height="48"
-    />
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md">
+        <img
+            src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/openai/default.svg"
+            alt="OpenAI"
+            width="48"
+            height="48"
+        />
+    </a>
     &nbsp;
-    <img
-      src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/anthropic/default.svg"
-      alt="Anthropic"
-      width="48"
-      height="48"
-    />
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md">
+        <img
+        src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/anthropic/default.svg"
+        alt="Anthropic"
+        width="48"
+        height="48"
+        />
+    </a>
 </p>
 
 <br>
@@ -58,8 +70,7 @@
 <p align="center">
     <a href="https://surrealdb.com/discord"><img src="https://img.shields.io/discord/902568124350599239?label=discord&style=flat-square&color=5a66f6"></a>
     &nbsp;
-    <a href="https://x.com/surrealdb"><img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/surrealdb">
-</a>
+    <a href="https://x.com/surrealdb"><img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/surrealdb"></a>
     &nbsp;
     <a href="https://www.linkedin.com/company/surrealdb/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=flat-square"></a>
     &nbsp;
@@ -132,30 +143,30 @@ await fs.search_text("refactor")
 
 You create and own the connection. SurrealFS never connects, signs in, or
 selects a namespace — so the `file` table's `owner = $auth.id` permissions key
-off *your* auth context.
+off _your_ auth context.
 
 ## The plain async API
 
 `SurrealFs` returns structured `FileEntry` and `SearchHit` objects, not
 pre-formatted strings. Build whatever integration you like on top.
 
-| | |
-|---|---|
-| Read | `read_text` `read_bytes` `tail` `ls` `glob` `stat` `exists` |
-| Write | `write_text` `write_bytes` `edit` `touch` `mkdir` |
-| Organise | `mv` `cp` `rm` |
-| Search | `search` `search_text` `search_semantic` `reindex_embeddings` |
+|          |                                                               |
+| -------- | ------------------------------------------------------------- |
+| Read     | `read_text` `read_bytes` `tail` `ls` `glob` `stat` `exists`   |
+| Write    | `write_text` `write_bytes` `edit` `touch` `mkdir`             |
+| Organise | `mv` `cp` `rm`                                                |
+| Search   | `search` `search_text` `search_semantic` `reindex_embeddings` |
 
 ## Integrations
 
 Four ways to hand it to an agent, each with its own README:
 
-| | | |
-|---|---|---|
-| **[pydantic-ai](surrealfs/integrations/pydantic_ai/README.md)** | a `FunctionToolset`, with recoverable mistakes raised as `ModelRetry` | `surrealfs[pydantic-ai]` |
-| **[Raw JSON tool schemas](surrealfs/integrations/json_tools/README.md)** | plain dicts in Anthropic or OpenAI shape, no framework | core |
-| **[Hermes](surrealfs/integrations/hermes/README.md)** | the 14 `surrealfs_*` tools plus a bundled notes skill | core |
-| **[Hermes memory](surrealfs/integrations/hermes_memory/README.md)** | files every completed turn, and recalls context before each one | core |
+|                                                                          |                                                                       |                          |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------ |
+| **[pydantic-ai](surrealfs/integrations/pydantic_ai/README.md)**          | a `FunctionToolset`, with recoverable mistakes raised as `ModelRetry` | `surrealfs[pydantic-ai]` |
+| **[Raw JSON tool schemas](surrealfs/integrations/json_tools/README.md)** | plain dicts in Anthropic or OpenAI shape, no framework                | core                     |
+| **[Hermes](surrealfs/integrations/hermes/README.md)**                    | the 14 `surrealfs_*` tools plus a bundled notes skill                 | core                     |
+| **[Hermes memory](surrealfs/integrations/hermes_memory/README.md)**      | files every completed turn, and recalls context before each one       | core                     |
 
 The first three tool surfaces are generated from one registry in
 `surrealfs/tools/`, so they cannot drift apart. Tool descriptions are markdown in
@@ -180,7 +191,7 @@ available if you want one arm on its own.
 
 The full-text arm matches a file that shares **any** term with the query, so
 `"how do I get paid"` returns candidates even without embeddings — the vector arm is
-what makes it rank the invoicing note by *meaning* rather than by shared words. That
+what makes it rank the invoicing note by _meaning_ rather than by shared words. That
 default favours recall because the caller sees a ranked list of snippets and can
 dismiss a weak hit at a glance, but cannot dismiss one it never saw.
 
