@@ -59,10 +59,10 @@ packages = ["surrealfs"]
 artifacts = [
     "surrealfs/schema/*.surql",
     "surrealfs/tools/docs/*.md",
+    "surrealfs/integrations/*/README.md",
     "surrealfs/integrations/hermes/plugin.yaml",
     "surrealfs/integrations/hermes/skills/**/SKILL.md",
     "surrealfs/integrations/hermes_memory/plugin.yaml",
-    "surrealfs/integrations/hermes_memory/README.md",
 ]
 
 [tool.pytest.ini_options]

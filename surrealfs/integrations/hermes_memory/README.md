@@ -85,49 +85,11 @@ account to itself, the default already matches the machine.
 ## Keeping the vectors current
 
 Skip this unless `SURREALFS_SEMANTIC=1`. Nothing embeds a file as it is written, so
-recall matches on meaning only for what the indexer has already reached. Hermes has
-no way for a plugin to declare a daemon of its own, but its scheduler runs scripts
-with no agent attached, which saves you a systemd unit:
-
-The indexer needs the `embed` extra, which the install above does not pull in:
-
-```bash
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python \
-  "surrealfs[embed] @ git+https://github.com/surrealdb/surrealfs.git"
-
-mkdir -p "${HERMES_HOME:-$HOME/.hermes}/scripts"
-cat > "${HERMES_HOME:-$HOME/.hermes}/scripts/surrealfs-embed.sh" <<'EOF'
-#!/usr/bin/env bash
-# Cron sanitizes the subprocess env and OPENAI_API_KEY is on the blocklist, so the
-# key has to come from a file — as do the SURREALDB_* connection details. Add both
-# to $HERMES_HOME/.env if they are not there already.
-set -a; . "${HERMES_HOME:-$HOME/.hermes}/.env"; set +a
-exec ~/.hermes/hermes-agent/venv/bin/python -m surrealfs.embed --once
-EOF
-
-hermes cron create 'every 5m' --no-agent --name surrealfs-embed \
-  --script surrealfs-embed.sh
-```
-
-`--no-agent` skips inference entirely — no tokens, no model — so a `--once` pass per
-tick replaces the polling loop. The script has to live under `$HERMES_HOME/scripts/`;
-paths outside it are rejected. From a checkout, run it through uv instead so the extra
-comes from your working copy rather than the venv:
-
-```bash
-set -a; . "$HOME/repos/surrealfs/.env"; set +a
-exec uv run --project "$HOME/repos/surrealfs" --extra embed \
-  python -m surrealfs.embed --once
-```
-
-An idle pass prints nothing and empty stdout is a silent tick, so this speaks up only
-with news (`embedded 4 file(s)`) or a non-zero exit, which arrives as an alert instead
-of being swallowed. `hermes cron runs` has the history.
-
-The scheduler ticks inside the gateway daemon, so this runs only while that does
-(`hermes gateway install`), and the period is how long a new file takes to become
-recallable *by meaning* — it is matchable by term immediately, and recall keeps
-working on its full-text arm the whole time the vectors are behind.
+recall matches on meaning only for what the indexer has already reached — recall keeps
+working on its full-text arm the whole time the vectors are behind. Scheduling the
+indexer is one Hermes cron job, shared with the tool plugin:
+[Keeping the vectors current under
+Hermes](https://github.com/surrealdb/surrealfs/blob/main/docs/hermes-indexer.md).
 
 ## What it does
 
@@ -245,8 +207,9 @@ set would collide in Hermes' flat tool namespace.
 
 ## Relationship to the tool plugin
 
-Independent installs. The tool plugin
-(`surrealfs.integrations.hermes`) registers tools and a skill through the entry point;
+Independent installs. The [tool
+plugin](https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/hermes/README.md)
+registers tools and a skill through the entry point;
 this registers a memory provider by directory. Either works without the other, though
 they are better together — the provider's recall surfaces what the agent wrote with
 the tools.

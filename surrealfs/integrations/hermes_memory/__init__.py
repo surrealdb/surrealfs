@@ -532,7 +532,8 @@ class SurrealFsMemory(_Base):
                 "  Semantic recall matches only what the indexer has reached — "
                 "schedule it:\n  hermes cron create 'every 5m' --no-agent "
                 "--name surrealfs-embed --script surrealfs-embed.sh\n"
-                "  See the README section 'Keeping the vectors current'.\n"
+                "  See https://github.com/surrealdb/surrealfs/blob/main/"
+                "docs/hermes-indexer.md\n"
             )
 
     def root(self) -> str:

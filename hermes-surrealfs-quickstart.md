@@ -39,6 +39,9 @@ hermes plugins install surrealdb/surrealfs/surrealfs/integrations/hermes_memory
 hermes memory setup surrealfs-memory
 ```
 
-4. Install SurrealFS as a Hermes memory provider
+4. Read the integration docs
 
-[SurrealFS Hermes memory provider](surrealfs/integrations/hermes_memory/README.md)
+- [SurrealFS Hermes memory provider](surrealfs/integrations/hermes_memory/README.md)
+  — configuration, homes and profiles, what gets filed and recalled.
+- [SurrealFS Hermes toolset](surrealfs/integrations/hermes/README.md) — the
+  `surrealfs_*` tools and the bundled notes skill, installed separately.
