@@ -222,7 +222,14 @@ class Browser:
             return JSONResponse(
                 {"error": "chat needs ANTHROPIC_API_KEY"}, status_code=400
             )
-        message = (await request.json())["message"]
+        body = await request.json()
+        message = body["message"]
+        # The question is nearly always about what is on screen. It rides on the
+        # user message rather than the instructions so it stays in `self.history`:
+        # each turn then records what was open at the time, instead of the whole
+        # conversation being retconned to whatever is open now.
+        if path := body.get("path"):
+            message = f"[The user has {path} open in the file browser.]\n\n{message}"
 
         async def stream() -> AsyncIterator[bytes]:
             reply = ""
