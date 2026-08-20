@@ -66,7 +66,7 @@ body {
   margin: 0;
   height: 100vh;
   display: grid;
-  grid-template-columns: 320px 1fr 380px;
+  grid-template-columns: 320px 1fr var(--chat-w, 380px);
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -225,7 +225,17 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
 }
+
+/* A grabbable strip straddling the panel's border. Absolute rather than a
+   fourth grid track: the track would have to be resized too, and the border
+   is already drawn by #chat. */
+#drag {
+  position: absolute; left: -3px; top: 0; bottom: 0; width: 6px;
+  cursor: col-resize; z-index: 1;
+}
+#drag:hover { background: var(--primary); opacity: .5; }
 
 #messages { flex: 1; overflow: auto; padding: 12px 14px; display: grid; gap: 14px; align-content: start; }
 #messages .hint { color: var(--text-muted); font-size: 12px; }
@@ -267,6 +277,28 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
 .md th, .md td { border: 1px solid var(--border-default); padding: 5px 10px; }
 .md hr { border: 0; border-top: 1px solid var(--border-default); }
 .md img { max-width: 100%; }
+
+/* Print = the document alone. The browser's print dialog is the PDF export.
+   Backgrounds are dropped when printing, so every colour the .md rules take
+   from the dark palette has to be re-stated or the text prints white on white. */
+@media print {
+  body { display: block; height: auto; background: #fff; color: #000; }
+  #sidebar, #chat, #toolbar, #status { display: none; }
+  /* #view scrolls on screen, and an overflow container prints only its visible
+     box -- which would cut a long note off at one page. */
+  #main, #view { display: block; overflow: visible; height: auto; }
+  #view.pad { padding: 0; }
+  .md { max-width: none; }
+  .md a { color: #000; }
+  .md code, .md pre { background: #f4f4f4; border-color: #ccc; }
+  .md pre { overflow: visible; }
+  .md h2 { border-bottom-color: #ccc; }
+  .md blockquote { border-left-color: #999; color: #333; }
+  .md th, .md td { border-color: #999; }
+  .md hr { border-top-color: #999; }
+  .md pre, .md blockquote, .md table, .md img { break-inside: avoid; }
+  .md h1, .md h2, .md h3 { break-after: avoid; }
+}
 </style>
 </head>
 <body>
@@ -296,6 +328,7 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
 </main>
 
 <aside id="chat">
+  <div id="drag"></div>
   <div id="brand"><b>Agent</b> &nbsp;chat</div>
   <div id="messages"><div class="hint">Ask the agent to take notes. It reads and writes the same filesystem you are browsing.</div></div>
   <div id="compose">
@@ -539,6 +572,9 @@ function renderActions() {
       }));
     }
   }
+  if (ct === 'text/markdown') {
+    actions.push(make('button', { textContent: 'PDF', title: 'Print / save as PDF', onclick: guard(printFile) }));
+  }
   if (!current.is_folder && isText(ct)) {
     actions.push(make('button', { className: 'primary', textContent: 'Save', disabled: !dirty, onclick: save }));
   }
@@ -548,6 +584,20 @@ function renderActions() {
 }
 
 // --- mutations ---------------------------------------------------------------
+// Print is the export: "Save as PDF" is a destination in every browser's print
+// dialog, and @media print strips the page down to the rendered document.
+const printFile = async () => {
+  if (mode !== 'preview') {
+    if (dirty && !confirm('Discard unsaved changes?')) return;
+    mode = 'preview'; dirty = false; await renderViewer();
+  }
+  // The title is what the browser uses for the PDF's filename and header.
+  const title = document.title;
+  document.title = current.filename.replace(/\.md$/, '');
+  window.addEventListener('afterprint', () => { document.title = title; }, { once: true });
+  window.print();
+};
+
 const save = guard(async () => {
   const box = $('view').querySelector('textarea');
   if (!box) return;
@@ -640,7 +690,9 @@ const send = guard(async () => {
     const res = await api('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      // Nearly every question is about the file on screen, so the agent gets its
+      // path -- not its content: it has `cat`, and the file may be huge.
+      body: JSON.stringify({ message: text, path: current?.path ?? null }),
     });
     // NDJSON: one JSON object per line, and a chunk can split a line in half.
     const reader = res.body.getReader(), decoder = new TextDecoder();
@@ -672,6 +724,23 @@ const send = guard(async () => {
     $('ask').focus();
   }
 });
+
+// Resizing the chat panel is just its grid track, so one CSS variable does it.
+// Pointer capture keeps the drag alive over the iframe previews, which would
+// otherwise swallow the pointermove.
+const setChatWidth = (w) => {
+  w = Math.min(Math.max(w, 240), Math.max(240, innerWidth - 520));
+  document.documentElement.style.setProperty('--chat-w', `${w}px`);
+  return w;
+};
+$('drag').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  const drag = (ev) => localStorage.setItem('chatWidth', setChatWidth(innerWidth - ev.clientX));
+  $('drag').setPointerCapture(e.pointerId);
+  $('drag').addEventListener('pointermove', drag);
+  $('drag').addEventListener('pointerup', () => $('drag').removeEventListener('pointermove', drag), { once: true });
+});
+if (localStorage.chatWidth) setChatWidth(+localStorage.chatWidth);
 
 $('send').onclick = send;
 $('ask').addEventListener('keydown', (e) => {
