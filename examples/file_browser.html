@@ -228,6 +228,10 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
   position: relative;
 }
 
+/* #brand is uppercase and letter-spaced, which a button would inherit. */
+#chat #brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 8px 16px; }
+#chat #brand button { font-size: 11px; letter-spacing: normal; text-transform: none; }
+
 /* A grabbable strip straddling the panel's border. Absolute rather than a
    fourth grid track: the track would have to be resized too, and the border
    is already drawn by #chat. */
@@ -329,8 +333,8 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
 
 <aside id="chat">
   <div id="drag"></div>
-  <div id="brand"><b>Agent</b> &nbsp;chat</div>
-  <div id="messages"><div class="hint">Ask the agent to take notes. It reads and writes the same filesystem you are browsing.</div></div>
+  <div id="brand"><span><b>Agent</b> &nbsp;chat</span><button id="new-chat" title="Start a new conversation">+ New</button></div>
+  <div id="messages"></div>
   <div id="compose">
     <textarea id="ask" rows="3" placeholder="Ask the agent…  (Enter to send, Shift+Enter for a newline)" spellcheck="false"></textarea>
     <button id="send" class="primary">Send</button>
@@ -339,6 +343,9 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// Conversations are files under here, so the tree doubles as the session list.
+const SESSIONS = '/_sessions';
 
 // --- tiny helpers -----------------------------------------------------------
 function make(tag, props = {}, ...kids) {
@@ -397,6 +404,7 @@ let entries = [];       // flat list from /api/tree
 let current = null;     // the open entry
 let mode = 'preview';   // 'preview' | 'source'
 let dirty = false;
+let session = null;     // path of the open conversation, or null for a new one
 // renderTree() rebuilds every node, so expansion cannot live in the DOM.
 const dirOpen = new Map(); // folder path -> open?
 
@@ -506,6 +514,8 @@ const openFile = guard(async (path) => {
   mode = hasPreview(current.content_type) ? 'preview' : 'source';
   renderTree();
   await renderViewer();
+  // A conversation is a file too: opening one replays it in the chat panel.
+  if (current.path.startsWith(`${SESSIONS}/`)) await loadSession(current.path);
 });
 
 async function renderViewer() {
@@ -679,6 +689,29 @@ function bubble(who, bodyClass) {
 
 function scrollChat() { $('messages').scrollTop = $('messages').scrollHeight; }
 
+const HINT = 'Ask the agent to take notes. It reads and writes the same filesystem you are browsing.';
+
+// The panel holds only the path: the history itself lives in the file, so the
+// server reads it per turn and nothing here can drift out of sync with it.
+function newChat() {
+  session = null;
+  $('messages').replaceChildren(make('div', { className: 'hint', textContent: HINT }));
+}
+
+async function loadSession(path) {
+  const bubbles = await json(`/api/session?path=${encodeURIComponent(path)}`);
+  session = path;
+  $('messages').replaceChildren();
+  for (const msg of bubbles) {
+    const { tools, body } = bubble(msg.who, msg.who === 'you' ? 'said' : 'md');
+    tools.textContent = (msg.tools || []).map((tool) => `▸ ${tool}  `).join('');
+    // Same split as a finished live turn: the reply is rendered markdown through
+    // the scrubber, the user's own text is text.
+    if (msg.who === 'you') body.textContent = msg.text;
+    else { setMarkdown(body, msg.html); body.classList.add('done'); }
+  }
+}
+
 const send = guard(async () => {
   const text = $('ask').value.trim();
   if (!text || $('send').disabled) return;
@@ -686,13 +719,14 @@ const send = guard(async () => {
   bubble('you', 'said').body.textContent = text;
   const { tools, body } = bubble('agent', 'md');
   $('send').disabled = true;
+  $('new-chat').disabled = true;
   try {
     const res = await api('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       // Nearly every question is about the file on screen, so the agent gets its
       // path -- not its content: it has `cat`, and the file may be huge.
-      body: JSON.stringify({ message: text, path: current?.path ?? null }),
+      body: JSON.stringify({ message: text, path: current?.path ?? null, session }),
     });
     // NDJSON: one JSON object per line, and a chunk can split a line in half.
     const reader = res.body.getReader(), decoder = new TextDecoder();
@@ -709,7 +743,9 @@ const send = guard(async () => {
         else if (event.error) throw new Error(event.error);
         // Streaming deltas land as text; the finished reply is rendered markdown
         // and goes through the scrubber -- the model's output is untrusted input.
-        else if (event.done) { setMarkdown(body, event.html); body.classList.add('done'); }
+        // The turn was stored under `event.session` -- adopt it so the next
+        // message continues the same file rather than starting another.
+        else if (event.done) { session = event.session; setMarkdown(body, event.html); body.classList.add('done'); }
         scrollChat();
       }
       if (done) break;
@@ -721,6 +757,7 @@ const send = guard(async () => {
     else if (dirty) say('The agent may have changed this file; your unsaved edits were kept.');
   } finally {
     $('send').disabled = false;
+    $('new-chat').disabled = false;
     $('ask').focus();
   }
 });
@@ -743,10 +780,12 @@ $('drag').addEventListener('pointerdown', (e) => {
 if (localStorage.chatWidth) setChatWidth(+localStorage.chatWidth);
 
 $('send').onclick = send;
+$('new-chat').onclick = newChat;
 $('ask').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
+newChat();
 loadTree(false).catch((e) => say(e.message, true));
 </script>
 </body>

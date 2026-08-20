@@ -18,7 +18,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +33,15 @@ from markdown_it import MarkdownIt
 from pydantic_ai import AgentRunResultEvent
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
+    ModelMessagesTypeAdapter,
+    ModelRequest,
+    ModelResponse,
     PartDeltaEvent,
     PartStartEvent,
     TextPart,
     TextPartDelta,
     ToolCallPart,
+    UserPromptPart,
 )
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -73,6 +79,55 @@ STATUS = {
     DirectoryNotEmpty: 409,
 }
 
+# Conversations are files like every other note: the tree is the session list,
+# and opening one loads it back into the chat panel.
+SESSIONS = "/_sessions"
+
+# chat() prefixes each user message with whatever was open at the time. Strip it
+# back out so a reloaded transcript shows what the user actually typed.
+OPEN_FILE_NOTE = re.compile(r"^\[The user has .*? open in the file browser\.\]\n\n")
+
+
+def _session_path(first_message: str) -> str:
+    """Where a new conversation lands.
+
+    The slug only exists to make the tree readable -- the file is always found by
+    path, never by name, so a collision within the same second is the only thing
+    the timestamp has to rule out.
+    """
+    now = datetime.now()
+    slug = re.sub(r"[^a-z0-9]+", "-", first_message.lower())[:40].strip("-")
+    return f"{SESSIONS}/{now:%Y-%m-%d}/{now:%H%M%S}-{slug or 'chat'}.json"
+
+
+def _transcript(messages: list[Any]) -> list[dict[str, Any]]:
+    """Model messages as the bubbles the chat panel draws.
+
+    Mirrors a live turn: one `you` bubble, then one `agent` bubble accumulating
+    text and tool names across the whole run -- a run that stops to call tools
+    resumes in a new `ModelResponse`, and all of it belongs to the same bubble.
+    """
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        for part in message.parts:
+            # Content is a list for a multimodal prompt; this UI only sends text.
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                out.append({"who": "you", "text": OPEN_FILE_NOTE.sub("", part.content)})
+                out.append({"who": "agent", "text": "", "tools": []})
+            elif not out:
+                continue  # instructions, or a response with no prompt before it
+            elif isinstance(part, TextPart):
+                out[-1]["text"] = f"{out[-1]['text']}\n\n{part.content}".strip()
+            elif isinstance(part, ToolCallPart):
+                out[-1]["tools"].append(part.tool_name)
+    # The reply is rendered markdown, same as at the end of a live turn; the
+    # user's own text is not markdown and reaches the page as textContent.
+    return [
+        {**b, "html": MD.render(b["text"]) if b["who"] == "agent" else ""}
+        for b in out
+        if b["text"] or b.get("tools")
+    ]
+
 
 def _line(payload: dict[str, Any]) -> bytes:
     """One NDJSON frame for the chat stream."""
@@ -103,6 +158,30 @@ def demo() -> None:
     assert _stream_event(call) == {"tool": "write_file"}
     assert _stream_event(object()) is None
 
+    # ... and that a stored conversation survives the round trip to a file and
+    # back into bubbles: two responses, one bubble.
+    history = [
+        ModelRequest(
+            parts=[
+                UserPromptPart(
+                    content="[The user has /a.md open in the file browser.]\n\nhi"
+                )
+            ]
+        ),
+        ModelResponse(parts=[ToolCallPart(tool_name="ls", args={})]),
+        ModelResponse(parts=[TextPart(content="**done**")]),
+    ]
+    stored = ModelMessagesTypeAdapter.dump_json(history)
+    bubbles = _transcript(ModelMessagesTypeAdapter.validate_json(stored))
+    assert [b["who"] for b in bubbles] == ["you", "agent"], bubbles
+    assert bubbles[0] == {"who": "you", "text": "hi", "html": ""}
+    assert bubbles[1]["tools"] == ["ls"]
+    assert bubbles[1]["html"].strip() == "<p><strong>done</strong></p>"
+
+    assert _session_path("Fix the README!").endswith("-fix-the-readme.json")
+    assert _session_path("¿?").endswith("-chat.json")
+    assert _session_path("x").startswith(f"{SESSIONS}/{datetime.now():%Y-%m-%d}/")
+
 
 def _param(request: Request, name: str) -> str:
     value = request.query_params.get(name)
@@ -129,10 +208,6 @@ class Browser:
         self.fs = fs
         self.embed = embed
         self.agent = agent
-        # ponytail: one conversation shared by the whole process, growing without
-        # bound. Key it by a session cookie and trim it if this ever serves two
-        # people, or runs long enough to outgrow the context window.
-        self.history: list[Any] = []
 
     async def page(self, request: Request) -> Response:
         return FileResponse(PAGE)
@@ -225,25 +300,37 @@ class Browser:
         body = await request.json()
         message = body["message"]
         # The question is nearly always about what is on screen. It rides on the
-        # user message rather than the instructions so it stays in `self.history`:
-        # each turn then records what was open at the time, instead of the whole
-        # conversation being retconned to whatever is open now.
+        # user message rather than the instructions so it is stored with the
+        # conversation: each turn then records what was open at the time, instead
+        # of the whole transcript being retconned to whatever is open now.
         if path := body.get("path"):
             message = f"[The user has {path} open in the file browser.]\n\n{message}"
 
+        # The conversation lives in the file, not in this process: an absent
+        # `session` starts a new one, and the page adopts the path we return.
+        # ponytail: the whole history goes back to the model every turn. Trim the
+        # middle of it if a conversation ever outgrows the context window.
+        session = body.get("session")
+        history = (
+            ModelMessagesTypeAdapter.validate_json(await self.fs.read_bytes(session))
+            if session
+            else []
+        )
+
         async def stream() -> AsyncIterator[bytes]:
             reply = ""
+            messages: list[Any] = []
             try:
                 async with self.agent.run_stream_events(
                     message,
                     # Read `self.embed` per turn: it is set to None if the
                     # provider ever fails, and the tool must follow.
                     deps=ToolContext(fs=self.fs, embed=self.embed),
-                    message_history=self.history,
+                    message_history=history,
                 ) as events:
                     async for event in events:
                         if isinstance(event, AgentRunResultEvent):
-                            self.history = event.result.all_messages()
+                            messages = event.result.all_messages()
                         elif (payload := _stream_event(event)) is not None:
                             # Accumulate what was streamed rather than taking
                             # `result.output`: that holds only the final text
@@ -251,15 +338,41 @@ class Browser:
                             # vanish when the rendered reply replaced it.
                             reply = (reply + payload.get("delta", "")).lstrip()
                             yield _line(payload)
+                # write_bytes, not write_text: `search_text` and
+                # `reindex_embeddings` both filter on the row's `content`, which
+                # this leaves unset -- so transcripts cost no embeddings and stay
+                # out of note search, while /raw still serves them to the viewer.
+                # `messages` is empty only if the run ended without a result
+                # event; writing that would blank an existing transcript.
+                stored_at = session or _session_path(body["message"])
+                if messages:
+                    await self.fs.write_bytes(
+                        stored_at,
+                        ModelMessagesTypeAdapter.dump_json(messages),
+                        content_type="application/json",
+                    )
                 # The agent writes files, so the search index is now stale.
                 await self._reindex()
-                yield _line({"done": True, "html": MD.render(reply)})
+                yield _line(
+                    # Nothing stored means nothing to adopt: leave the page on
+                    # the session it already had.
+                    {
+                        "done": True,
+                        "html": MD.render(reply),
+                        "session": stored_at if messages else session,
+                    }
+                )
             except Exception as exc:  # noqa: BLE001 -- any failure, same answer
                 # The 200 is already on the wire, so failures have to ride the
                 # stream: on_error never sees them.
                 yield _line({"error": str(exc)})
 
         return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+    async def session(self, request: Request) -> Response:
+        """One stored conversation, as the bubbles the chat panel draws."""
+        raw = await self.fs.read_bytes(_param(request, "path"))
+        return JSONResponse(_transcript(ModelMessagesTypeAdapter.validate_json(raw)))
 
     async def _embed(self, text: str) -> Any:
         """Embed one string, or None if there is no working embedder."""
@@ -305,6 +418,7 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
             Route("/api/tree", b.tree),
             Route("/api/markdown", b.markdown),
             Route("/api/search", b.search),
+            Route("/api/session", b.session),
             Route("/api/chat", b.chat, methods=["POST"]),
             Route("/api/move", b.move, methods=["POST"]),
             Route("/api/file", b.save, methods=["PUT"]),
