@@ -76,6 +76,12 @@ def build_chat_agent(
         # taken for one and invoked, failing at request time with
         # "'WebSearchTool' object is not callable".
         capabilities=[WebSearch(), WebFetch()] if enable_web_tools else [],
+        # pydantic-ai defaults Anthropic to max_tokens=4096, which a `write_file`
+        # of a decent-sized note blows through mid-tool-call: the run then dies
+        # with "token limit exceeded while generating a tool call" and truncated
+        # arguments. Haiku 4.5 allows 64k output; 16k is headroom without
+        # licensing a runaway.
+        model_settings={"max_tokens": 16000},
     )
 
 
