@@ -20,7 +20,7 @@ embed *ARGS:
     uv run --extra embed python -m surrealfs.embed {{ARGS}}
 
 test:
-    uv run pytest
+    uv run pytest --quiet --no-summary
 
 lint:
     uv run ruff check .
