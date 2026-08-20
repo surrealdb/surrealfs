@@ -70,7 +70,7 @@ Here is a tree one agent built for its user over a few conversations:
 ## Requirements
 
 - Python 3.12+
-- **A SurrealDB 3.x server.**.
+- A SurrealDB 3.x server.
 
 ## Install
 
