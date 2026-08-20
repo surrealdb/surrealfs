@@ -396,7 +396,9 @@ const guard = (fn) => async (...args) => {
 };
 
 const isText = (ct) => ct.startsWith('text/') || /(json|javascript|xml|yaml|toml|x-sh)/.test(ct);
-const hasPreview = (ct) => ct === 'text/markdown' || ct === 'text/html';
+// application/json, and application/ld+json and friends.
+const isJson = (ct) => ct.endsWith('json');
+const hasPreview = (ct) => ct === 'text/markdown' || ct === 'text/html' || isJson(ct);
 const size = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 
 // --- state ------------------------------------------------------------------
@@ -552,7 +554,11 @@ async function renderViewer() {
     view.className = 'pad';
     view.replaceChildren(make('img', { className: 'preview', src: `/raw?path=${encodeURIComponent(current.path)}`, alt: current.filename }));
   } else if (isText(ct)) {
-    const text = await api(`/raw?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
+    let text = await api(`/raw?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
+    // Stored JSON is one long line -- pydantic-ai's dump_json is compact. Source
+    // mode is caught above, so this is the preview: indent it. Anything that
+    // will not parse is shown exactly as stored.
+    if (isJson(ct)) try { text = JSON.stringify(JSON.parse(text), null, 2); } catch { /* as-is */ }
     view.className = 'pad';
     view.replaceChildren(make('pre', { className: 'plain', textContent: text }));
   } else {
