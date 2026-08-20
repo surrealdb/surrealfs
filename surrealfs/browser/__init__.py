@@ -1,7 +1,11 @@
 """A web file browser for the SurrealFS `file` table.
 
-    just db          # start SurrealDB in one terminal
-    just browser     # then run this, and open http://127.0.0.1:7933
+    pip install "surrealfs[browser]"
+    surrealfs-browser        # then open http://127.0.0.1:7933
+
+Run it locally against whatever database the agents are writing to -- the
+`SURREALDB_*` variables in a `.env` in the working directory point it there. See
+`surrealfs/browser/__main__.py` for the command line.
 
 Tree on the left, file on the right, chat with the note-taking agent on the far
 right: text is editable, markdown renders as HTML with a source toggle, HTML
@@ -15,7 +19,6 @@ and sending a message reports the missing key.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import re
@@ -25,17 +28,11 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-
-# chat_agent is the sibling example, resolved because `examples/` is sys.path[0]
-# when this file is run as a script. Reusing it keeps the DB config in one place.
-from chat_agent import build_chat_agent, connect
 from markdown_it import MarkdownIt
 from pydantic_ai import AgentRunResultEvent
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
     ModelMessagesTypeAdapter,
-    ModelRequest,
-    ModelResponse,
     PartDeltaEvent,
     PartStartEvent,
     TextPart,
@@ -53,18 +50,21 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from surrealfs import SurrealFs
-from surrealfs.embed import INDEXER_VERSION, make_embedder
-from surrealfs.errors import (
+from ..embed import INDEXER_VERSION, make_embedder
+from ..errors import (
     AlreadyExists,
     DirectoryNotEmpty,
     InvalidPath,
     NotFound,
     SurrealFsError,
 )
-from surrealfs.tools import ToolContext
+from ..fs import SurrealFs
+from ..integrations._connect import connect
+from ..schema import apply_schema
+from ..tools import ToolContext
+from .agent import build_chat_agent
 
-PAGE = Path(__file__).with_name("file_browser.html")
+PAGE = Path(__file__).with_name("page.html")
 
 # html=False is NOT the default -- the commonmark preset sets html=True, because
 # the CommonMark spec allows raw HTML. The rendered fragment is injected into the
@@ -146,41 +146,6 @@ def _stream_event(event: Any) -> dict[str, Any] | None:
     if isinstance(event, FunctionToolCallEvent):
         return {"tool": event.part.tool_name}
     return None
-
-
-def demo() -> None:
-    """Self-check: the chat stream maps agent events to what the page renders."""
-    delta = PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi"))
-    assert _stream_event(delta) == {"delta": "hi"}
-    start = PartStartEvent(index=0, part=TextPart(content="hi"))
-    assert _stream_event(start) == {"delta": "\n\nhi"}
-    call = FunctionToolCallEvent(ToolCallPart(tool_name="write_file"))
-    assert _stream_event(call) == {"tool": "write_file"}
-    assert _stream_event(object()) is None
-
-    # ... and that a stored conversation survives the round trip to a file and
-    # back into bubbles: two responses, one bubble.
-    history = [
-        ModelRequest(
-            parts=[
-                UserPromptPart(
-                    content="[The user has /a.md open in the file browser.]\n\nhi"
-                )
-            ]
-        ),
-        ModelResponse(parts=[ToolCallPart(tool_name="ls", args={})]),
-        ModelResponse(parts=[TextPart(content="**done**")]),
-    ]
-    stored = ModelMessagesTypeAdapter.dump_json(history)
-    bubbles = _transcript(ModelMessagesTypeAdapter.validate_json(stored))
-    assert [b["who"] for b in bubbles] == ["you", "agent"], bubbles
-    assert bubbles[0] == {"who": "you", "text": "hi", "html": ""}
-    assert bubbles[1]["tools"] == ["ls"]
-    assert bubbles[1]["html"].strip() == "<p><strong>done</strong></p>"
-
-    assert _session_path("Fix the README!").endswith("-fix-the-readme.json")
-    assert _session_path("¿?").endswith("-chat.json")
-    assert _session_path("x").startswith(f"{SESSIONS}/{datetime.now():%Y-%m-%d}/")
 
 
 def _param(request: Request, name: str) -> str:
@@ -434,11 +399,19 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
 async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
     """Connect and serve on a single event loop.
 
-    Same constraint as the chat agent: the DB connection has to be opened on the
-    loop that serves requests, so drive `uvicorn.Server` ourselves rather than
-    calling `uvicorn.run()`, which would make its own.
+    A SurrealDB WebSocket belongs to the loop it was opened on, so the connection
+    has to be opened on the loop that will serve requests. `uvicorn.run()` makes
+    its own loop; drive `uvicorn.Server` ourselves instead and everything stays
+    on one.
     """
     db = await connect()
+    try:
+        # Usually a no-op: on a shared database the table is already defined, and
+        # the credential may hold no right to define one. Either way an
+        # un-applied schema is no reason to refuse to show the files.
+        await apply_schema(db)
+    except Exception as exc:  # noqa: BLE001 -- any DDL failure, same answer
+        print(f"could not apply the schema (continuing): {exc}")
     fs = SurrealFs(db)
 
     embed = make_embedder() if os.environ.get("OPENAI_API_KEY") else None
@@ -465,8 +438,3 @@ async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
         await uvicorn.Server(uvicorn.Config(app, host=host, port=port)).serve()
     finally:
         await db.close()
-
-
-if __name__ == "__main__":
-    demo()
-    asyncio.run(serve())
