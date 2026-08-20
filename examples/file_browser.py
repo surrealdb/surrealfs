@@ -65,7 +65,7 @@ PAGE = Path(__file__).with_name("file_browser.html")
 # page with innerHTML, so leaving it on is stored XSS: `<script>` would not fire
 # from innerHTML but `<img onerror=…>` very much would. Off means raw HTML in a
 # markdown file is escaped and shown as text. Do not turn it back on.
-MD = MarkdownIt("commonmark", {"html": False})
+MD = MarkdownIt("commonmark", {"html": False}).enable("table")
 
 STATUS = {
     NotFound: 404,
