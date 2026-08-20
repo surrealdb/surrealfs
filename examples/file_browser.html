@@ -709,11 +709,15 @@ async function loadSession(path) {
   session = path;
   $('messages').replaceChildren();
   for (const msg of bubbles) {
-    const { tools, body } = bubble(msg.who, msg.who === 'you' ? 'said' : 'md');
+    // Pin the role to one of the two the stylesheet knows, so nothing from the
+    // response reaches `bubble()`'s class list -- and a live turn and a replayed
+    // one build the identical DOM.
+    const who = msg.who === 'you' ? 'you' : 'agent';
+    const { tools, body } = bubble(who, who === 'you' ? 'said' : 'md');
     tools.textContent = (msg.tools || []).map((tool) => `▸ ${tool}  `).join('');
     // Same split as a finished live turn: the reply is rendered markdown through
     // the scrubber, the user's own text is text.
-    if (msg.who === 'you') body.textContent = msg.text;
+    if (who === 'you') body.textContent = msg.text;
     else { setMarkdown(body, msg.html); body.classList.add('done'); }
   }
 }
