@@ -1,11 +1,18 @@
-"""One connection, opened from the environment, for integrations that host themselves.
+"""One connection, opened from the environment, for surfaces that host themselves.
 
-Most of this library never connects: the caller owns the handle and passes it in. The
-Hermes surfaces are the exception — Hermes hands a plugin a sync callback and no
-lifecycle hook to own a connection on, so they have to open their own.
+Most of this library never connects: the caller owns the handle and passes it in.
+The exceptions are the surfaces that have no caller to hand them one — the Hermes
+plugin and memory provider, which Hermes gives a sync callback and no lifecycle
+hook, and the file browser, which is a program rather than a library.
 
-    async with connected() as db:
+    async with connected() as db:        # short-lived, one call
         await SurrealFs(db).ls("/")
+
+    db = await connect()                 # long-lived, survives an idle socket
+    try:
+        await SurrealFs(db).ls("/")
+    finally:
+        await db.close()
 
 Connection details come from the same ``SURREALDB_*`` variables the rest of the
 project uses, defaulting to a local server.
@@ -13,17 +20,117 @@ project uses, defaulting to a local server.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from surrealdb import AsyncSurreal
+from surrealdb.errors import ConnectionUnavailableError
+from websockets.exceptions import ConnectionClosed
 
 from ..schema import apply_schema
 
-__all__ = ["connected"]
+__all__ = ["connect", "connected"]
+
+# Which kind of user the credentials belong to. All three are *system* users, so
+# they bypass the `file` table's `owner = $auth.id` permissions and see the whole
+# tree -- which is the point when several agents and people share one database.
+# Record access (the optional `account` in schema/user.surql) is deliberately not
+# offered here: a person signed in as a `user` record would see only files that
+# record owns, and everything the agents wrote would be invisible.
+AUTH_LEVELS = ("root", "namespace", "database")
 
 _schema_applied = False
+
+
+def _namespace() -> str:
+    return os.environ.get("SURREALDB_NAMESPACE", "surrealfs")
+
+
+def _database() -> str:
+    return os.environ.get("SURREALDB_DATABASE", "demo")
+
+
+def _credentials() -> dict[str, str]:
+    """The signin payload for the configured auth level.
+
+    The server infers the level from which keys are present -- the SDK forwards
+    this dict to the signin RPC untouched -- so a root credential must *not*
+    carry a namespace, and a database user must carry both.
+    """
+    level = os.environ.get("SURREALDB_AUTH_LEVEL", "root").strip().lower()
+    if level not in AUTH_LEVELS:
+        raise ValueError(
+            f"SURREALDB_AUTH_LEVEL must be one of {', '.join(AUTH_LEVELS)}: {level!r}"
+        )
+    creds = {
+        "username": os.environ.get("SURREALDB_USER", "root"),
+        "password": os.environ.get("SURREALDB_PASS", "root"),
+    }
+    if level in ("namespace", "database"):
+        creds["namespace"] = _namespace()
+    if level == "database":
+        creds["database"] = _database()
+    return creds
+
+
+async def _authenticate(db: AsyncSurreal) -> None:
+    await db.signin(_credentials())
+    await db.use(_namespace(), _database())
+
+
+class _Reconnecting:
+    """A handle that reopens the WebSocket once it has been dropped.
+
+    An idle connection eventually dies -- "keepalive ping timeout" after the
+    server stops answering pings, or the machine sleeping -- and surrealdb-py
+    does not heal it: its ``connect()`` returns early while the dead socket is
+    still attached, so every later query fails with ``ConnectionClosed`` until
+    the process restarts. Only ``query_raw`` is wrapped because that is the one
+    call SurrealFs makes; everything else passes straight through.
+    """
+
+    def __init__(self, db: AsyncSurreal) -> None:
+        self._db = db
+        self._lock = asyncio.Lock()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._db, name)
+
+    async def query_raw(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return await self._db.query_raw(*args, **kwargs)
+        except (ConnectionClosed, ConnectionUnavailableError):
+            await self._reopen(self._db.socket)
+            return await self._db.query_raw(*args, **kwargs)
+
+    async def _reopen(self, dead: Any) -> None:
+        async with self._lock:
+            # Another request that failed on the same socket got here first;
+            # reconnecting again would drop the connection it just opened.
+            if self._db.socket is not dead:
+                return
+            await self._db.close()  # clears the dead socket so connect() reopens
+            await _authenticate(self._db)
+
+
+async def connect() -> AsyncSurreal:
+    """Connect and authenticate, for a process that keeps the handle.
+
+    The schema is *not* applied: a long-running program pointed at a shared
+    database usually finds the `file` table already there, and may hold a
+    credential with no right to define one. Callers that need it apply it
+    themselves and decide whether a failure is fatal.
+
+    The connection must be opened on the loop that will use it -- a SurrealDB
+    WebSocket belongs to the loop it was opened on -- so `await` this from inside
+    the server's own loop, not from a separate `asyncio.run`.
+    """
+    db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
+    await _authenticate(db)
+    return _Reconnecting(db)
 
 
 @asynccontextmanager
@@ -40,16 +147,7 @@ async def connected() -> AsyncIterator[AsyncSurreal]:
 
     db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
     try:
-        await db.signin(
-            {
-                "username": os.environ.get("SURREALDB_USER", "root"),
-                "password": os.environ.get("SURREALDB_PASS", "root"),
-            }
-        )
-        await db.use(
-            os.environ.get("SURREALDB_NAMESPACE", "surrealfs"),
-            os.environ.get("SURREALDB_DATABASE", "demo"),
-        )
+        await _authenticate(db)
         if not _schema_applied:
             # Once per process, so a first call works against a bare database
             # without the user running `python -m surrealfs.schema` first.

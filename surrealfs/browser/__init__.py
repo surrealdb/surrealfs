@@ -1,7 +1,11 @@
 """A web file browser for the SurrealFS `file` table.
 
-    just db          # start SurrealDB in one terminal
-    just browser     # then run this, and open http://127.0.0.1:7933
+    pip install "surrealfs[browser]"
+    surrealfs-browser        # then open http://127.0.0.1:7933
+
+Run it locally against whatever database the agents are writing to -- the
+`SURREALDB_*` variables in a `.env` in the working directory point it there. See
+`surrealfs/browser/__main__.py` for the command line.
 
 Tree on the left, file on the right, chat with the note-taking agent on the far
 right: text is editable, markdown renders as HTML with a source toggle, HTML
@@ -15,27 +19,26 @@ and sending a message reports the missing key.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
+import re
 from collections.abc import AsyncIterator
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import uvicorn
-
-# chat_agent is the sibling example, resolved because `examples/` is sys.path[0]
-# when this file is run as a script. Reusing it keeps the DB config in one place.
-from chat_agent import build_chat_agent, connect
 from markdown_it import MarkdownIt
 from pydantic_ai import AgentRunResultEvent
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
+    ModelMessagesTypeAdapter,
     PartDeltaEvent,
     PartStartEvent,
     TextPart,
     TextPartDelta,
     ToolCallPart,
+    UserPromptPart,
 )
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -47,31 +50,83 @@ from starlette.responses import (
 )
 from starlette.routing import Route
 
-from surrealfs import SurrealFs
-from surrealfs.embed import INDEXER_VERSION, make_embedder
-from surrealfs.errors import (
+from ..embed import INDEXER_VERSION, make_embedder
+from ..errors import (
     AlreadyExists,
     DirectoryNotEmpty,
     InvalidPath,
     NotFound,
     SurrealFsError,
 )
-from surrealfs.tools import ToolContext
+from ..fs import SurrealFs
+from ..integrations._connect import connect
+from ..schema import apply_schema
+from ..tools import ToolContext
+from .agent import build_chat_agent
 
-PAGE = Path(__file__).with_name("file_browser.html")
+PAGE = Path(__file__).with_name("page.html")
 
 # html=False is NOT the default -- the commonmark preset sets html=True, because
 # the CommonMark spec allows raw HTML. The rendered fragment is injected into the
 # page with innerHTML, so leaving it on is stored XSS: `<script>` would not fire
 # from innerHTML but `<img onerror=…>` very much would. Off means raw HTML in a
 # markdown file is escaped and shown as text. Do not turn it back on.
-MD = MarkdownIt("commonmark", {"html": False})
+MD = MarkdownIt("commonmark", {"html": False}).enable("table")
 
 STATUS = {
     NotFound: 404,
     AlreadyExists: 409,
     DirectoryNotEmpty: 409,
 }
+
+# Conversations are files like every other note: the tree is the session list,
+# and opening one loads it back into the chat panel.
+SESSIONS = "/_sessions"
+
+# chat() prefixes each user message with whatever was open at the time. Strip it
+# back out so a reloaded transcript shows what the user actually typed.
+OPEN_FILE_NOTE = re.compile(r"^\[The user has .*? open in the file browser\.\]\n\n")
+
+
+def _session_path(first_message: str) -> str:
+    """Where a new conversation lands.
+
+    The slug only exists to make the tree readable -- the file is always found by
+    path, never by name, so a collision within the same second is the only thing
+    the timestamp has to rule out.
+    """
+    now = datetime.now()
+    slug = re.sub(r"[^a-z0-9]+", "-", first_message.lower())[:40].strip("-")
+    return f"{SESSIONS}/{now:%Y-%m-%d}/{now:%H%M%S}-{slug or 'chat'}.json"
+
+
+def _transcript(messages: list[Any]) -> list[dict[str, Any]]:
+    """Model messages as the bubbles the chat panel draws.
+
+    Mirrors a live turn: one `you` bubble, then one `agent` bubble accumulating
+    text and tool names across the whole run -- a run that stops to call tools
+    resumes in a new `ModelResponse`, and all of it belongs to the same bubble.
+    """
+    out: list[dict[str, Any]] = []
+    for message in messages:
+        for part in message.parts:
+            # Content is a list for a multimodal prompt; this UI only sends text.
+            if isinstance(part, UserPromptPart) and isinstance(part.content, str):
+                out.append({"who": "you", "text": OPEN_FILE_NOTE.sub("", part.content)})
+                out.append({"who": "agent", "text": "", "tools": []})
+            elif not out:
+                continue  # instructions, or a response with no prompt before it
+            elif isinstance(part, TextPart):
+                out[-1]["text"] = f"{out[-1]['text']}\n\n{part.content}".strip()
+            elif isinstance(part, ToolCallPart):
+                out[-1]["tools"].append(part.tool_name)
+    # The reply is rendered markdown, same as at the end of a live turn; the
+    # user's own text is not markdown and reaches the page as textContent.
+    return [
+        {**b, "html": MD.render(b["text"]) if b["who"] == "agent" else ""}
+        for b in out
+        if b["text"] or b.get("tools")
+    ]
 
 
 def _line(payload: dict[str, Any]) -> bytes:
@@ -91,17 +146,6 @@ def _stream_event(event: Any) -> dict[str, Any] | None:
     if isinstance(event, FunctionToolCallEvent):
         return {"tool": event.part.tool_name}
     return None
-
-
-def demo() -> None:
-    """Self-check: the chat stream maps agent events to what the page renders."""
-    delta = PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi"))
-    assert _stream_event(delta) == {"delta": "hi"}
-    start = PartStartEvent(index=0, part=TextPart(content="hi"))
-    assert _stream_event(start) == {"delta": "\n\nhi"}
-    call = FunctionToolCallEvent(ToolCallPart(tool_name="write_file"))
-    assert _stream_event(call) == {"tool": "write_file"}
-    assert _stream_event(object()) is None
 
 
 def _param(request: Request, name: str) -> str:
@@ -129,10 +173,6 @@ class Browser:
         self.fs = fs
         self.embed = embed
         self.agent = agent
-        # ponytail: one conversation shared by the whole process, growing without
-        # bound. Key it by a session cookie and trim it if this ever serves two
-        # people, or runs long enough to outgrow the context window.
-        self.history: list[Any] = []
 
     async def page(self, request: Request) -> Response:
         return FileResponse(PAGE)
@@ -222,21 +262,40 @@ class Browser:
             return JSONResponse(
                 {"error": "chat needs ANTHROPIC_API_KEY"}, status_code=400
             )
-        message = (await request.json())["message"]
+        body = await request.json()
+        message = body["message"]
+        # The question is nearly always about what is on screen. It rides on the
+        # user message rather than the instructions so it is stored with the
+        # conversation: each turn then records what was open at the time, instead
+        # of the whole transcript being retconned to whatever is open now.
+        if path := body.get("path"):
+            message = f"[The user has {path} open in the file browser.]\n\n{message}"
+
+        # The conversation lives in the file, not in this process: an absent
+        # `session` starts a new one, and the page adopts the path we return.
+        # ponytail: the whole history goes back to the model every turn. Trim the
+        # middle of it if a conversation ever outgrows the context window.
+        session = body.get("session")
+        history = (
+            ModelMessagesTypeAdapter.validate_json(await self.fs.read_bytes(session))
+            if session
+            else []
+        )
 
         async def stream() -> AsyncIterator[bytes]:
             reply = ""
+            messages: list[Any] = []
             try:
                 async with self.agent.run_stream_events(
                     message,
                     # Read `self.embed` per turn: it is set to None if the
                     # provider ever fails, and the tool must follow.
                     deps=ToolContext(fs=self.fs, embed=self.embed),
-                    message_history=self.history,
+                    message_history=history,
                 ) as events:
                     async for event in events:
                         if isinstance(event, AgentRunResultEvent):
-                            self.history = event.result.all_messages()
+                            messages = event.result.all_messages()
                         elif (payload := _stream_event(event)) is not None:
                             # Accumulate what was streamed rather than taking
                             # `result.output`: that holds only the final text
@@ -244,15 +303,41 @@ class Browser:
                             # vanish when the rendered reply replaced it.
                             reply = (reply + payload.get("delta", "")).lstrip()
                             yield _line(payload)
+                # write_bytes, not write_text: `search_text` and
+                # `reindex_embeddings` both filter on the row's `content`, which
+                # this leaves unset -- so transcripts cost no embeddings and stay
+                # out of note search, while /raw still serves them to the viewer.
+                # `messages` is empty only if the run ended without a result
+                # event; writing that would blank an existing transcript.
+                stored_at = session or _session_path(body["message"])
+                if messages:
+                    await self.fs.write_bytes(
+                        stored_at,
+                        ModelMessagesTypeAdapter.dump_json(messages),
+                        content_type="application/json",
+                    )
                 # The agent writes files, so the search index is now stale.
                 await self._reindex()
-                yield _line({"done": True, "html": MD.render(reply)})
+                yield _line(
+                    # Nothing stored means nothing to adopt: leave the page on
+                    # the session it already had.
+                    {
+                        "done": True,
+                        "html": MD.render(reply),
+                        "session": stored_at if messages else session,
+                    }
+                )
             except Exception as exc:  # noqa: BLE001 -- any failure, same answer
                 # The 200 is already on the wire, so failures have to ride the
                 # stream: on_error never sees them.
                 yield _line({"error": str(exc)})
 
         return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+    async def session(self, request: Request) -> Response:
+        """One stored conversation, as the bubbles the chat panel draws."""
+        raw = await self.fs.read_bytes(_param(request, "path"))
+        return JSONResponse(_transcript(ModelMessagesTypeAdapter.validate_json(raw)))
 
     async def _embed(self, text: str) -> Any:
         """Embed one string, or None if there is no working embedder."""
@@ -298,6 +383,7 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
             Route("/api/tree", b.tree),
             Route("/api/markdown", b.markdown),
             Route("/api/search", b.search),
+            Route("/api/session", b.session),
             Route("/api/chat", b.chat, methods=["POST"]),
             Route("/api/move", b.move, methods=["POST"]),
             Route("/api/file", b.save, methods=["PUT"]),
@@ -313,11 +399,19 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
 async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
     """Connect and serve on a single event loop.
 
-    Same constraint as the chat agent: the DB connection has to be opened on the
-    loop that serves requests, so drive `uvicorn.Server` ourselves rather than
-    calling `uvicorn.run()`, which would make its own.
+    A SurrealDB WebSocket belongs to the loop it was opened on, so the connection
+    has to be opened on the loop that will serve requests. `uvicorn.run()` makes
+    its own loop; drive `uvicorn.Server` ourselves instead and everything stays
+    on one.
     """
     db = await connect()
+    try:
+        # Usually a no-op: on a shared database the table is already defined, and
+        # the credential may hold no right to define one. Either way an
+        # un-applied schema is no reason to refuse to show the files.
+        await apply_schema(db)
+    except Exception as exc:  # noqa: BLE001 -- any DDL failure, same answer
+        print(f"could not apply the schema (continuing): {exc}")
     fs = SurrealFs(db)
 
     embed = make_embedder() if os.environ.get("OPENAI_API_KEY") else None
@@ -344,8 +438,3 @@ async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
         await uvicorn.Server(uvicorn.Config(app, host=host, port=port)).serve()
     finally:
         await db.close()
-
-
-if __name__ == "__main__":
-    demo()
-    asyncio.run(serve())

@@ -66,7 +66,7 @@ body {
   margin: 0;
   height: 100vh;
   display: grid;
-  grid-template-columns: 320px 1fr 380px;
+  grid-template-columns: 320px 1fr var(--chat-w, 380px);
   background: var(--bg);
   color: var(--text);
   font-family: var(--font-sans);
@@ -225,7 +225,21 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
   display: flex;
   flex-direction: column;
   min-height: 0;
+  position: relative;
 }
+
+/* #brand is uppercase and letter-spaced, which a button would inherit. */
+#chat #brand { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px 8px 16px; }
+#chat #brand button { font-size: 11px; letter-spacing: normal; text-transform: none; }
+
+/* A grabbable strip straddling the panel's border. Absolute rather than a
+   fourth grid track: the track would have to be resized too, and the border
+   is already drawn by #chat. */
+#drag {
+  position: absolute; left: -3px; top: 0; bottom: 0; width: 6px;
+  cursor: col-resize; z-index: 1;
+}
+#drag:hover { background: var(--primary); opacity: .5; }
 
 #messages { flex: 1; overflow: auto; padding: 12px 14px; display: grid; gap: 14px; align-content: start; }
 #messages .hint { color: var(--text-muted); font-size: 12px; }
@@ -267,6 +281,28 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
 .md th, .md td { border: 1px solid var(--border-default); padding: 5px 10px; }
 .md hr { border: 0; border-top: 1px solid var(--border-default); }
 .md img { max-width: 100%; }
+
+/* Print = the document alone. The browser's print dialog is the PDF export.
+   Backgrounds are dropped when printing, so every colour the .md rules take
+   from the dark palette has to be re-stated or the text prints white on white. */
+@media print {
+  body { display: block; height: auto; background: #fff; color: #000; }
+  #sidebar, #chat, #toolbar, #status { display: none; }
+  /* #view scrolls on screen, and an overflow container prints only its visible
+     box -- which would cut a long note off at one page. */
+  #main, #view { display: block; overflow: visible; height: auto; }
+  #view.pad { padding: 0; }
+  .md { max-width: none; }
+  .md a { color: #000; }
+  .md code, .md pre { background: #f4f4f4; border-color: #ccc; }
+  .md pre { overflow: visible; }
+  .md h2 { border-bottom-color: #ccc; }
+  .md blockquote { border-left-color: #999; color: #333; }
+  .md th, .md td { border-color: #999; }
+  .md hr { border-top-color: #999; }
+  .md pre, .md blockquote, .md table, .md img { break-inside: avoid; }
+  .md h1, .md h2, .md h3 { break-after: avoid; }
+}
 </style>
 </head>
 <body>
@@ -296,8 +332,9 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
 </main>
 
 <aside id="chat">
-  <div id="brand"><b>Agent</b> &nbsp;chat</div>
-  <div id="messages"><div class="hint">Ask the agent to take notes. It reads and writes the same filesystem you are browsing.</div></div>
+  <div id="drag"></div>
+  <div id="brand"><span><b>Agent</b> &nbsp;chat</span><button id="new-chat" title="Start a new conversation">+ New</button></div>
+  <div id="messages"></div>
   <div id="compose">
     <textarea id="ask" rows="3" placeholder="Ask the agent…  (Enter to send, Shift+Enter for a newline)" spellcheck="false"></textarea>
     <button id="send" class="primary">Send</button>
@@ -306,6 +343,9 @@ pre.plain { margin: 0; font-family: var(--font-mono); font-size: 13px; white-spa
 
 <script>
 const $ = (id) => document.getElementById(id);
+
+// Conversations are files under here, so the tree doubles as the session list.
+const SESSIONS = '/_sessions';
 
 // --- tiny helpers -----------------------------------------------------------
 function make(tag, props = {}, ...kids) {
@@ -356,7 +396,9 @@ const guard = (fn) => async (...args) => {
 };
 
 const isText = (ct) => ct.startsWith('text/') || /(json|javascript|xml|yaml|toml|x-sh)/.test(ct);
-const hasPreview = (ct) => ct === 'text/markdown' || ct === 'text/html';
+// application/json, and application/ld+json and friends.
+const isJson = (ct) => ct.endsWith('json');
+const hasPreview = (ct) => ct === 'text/markdown' || ct === 'text/html' || isJson(ct);
 const size = (n) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 
 // --- state ------------------------------------------------------------------
@@ -364,6 +406,7 @@ let entries = [];       // flat list from /api/tree
 let current = null;     // the open entry
 let mode = 'preview';   // 'preview' | 'source'
 let dirty = false;
+let session = null;     // path of the open conversation, or null for a new one
 // renderTree() rebuilds every node, so expansion cannot live in the DOM.
 const dirOpen = new Map(); // folder path -> open?
 
@@ -473,6 +516,8 @@ const openFile = guard(async (path) => {
   mode = hasPreview(current.content_type) ? 'preview' : 'source';
   renderTree();
   await renderViewer();
+  // A conversation is a file too: opening one replays it in the chat panel.
+  if (current.path.startsWith(`${SESSIONS}/`)) await loadSession(current.path);
 });
 
 async function renderViewer() {
@@ -509,7 +554,11 @@ async function renderViewer() {
     view.className = 'pad';
     view.replaceChildren(make('img', { className: 'preview', src: `/raw?path=${encodeURIComponent(current.path)}`, alt: current.filename }));
   } else if (isText(ct)) {
-    const text = await api(`/raw?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
+    let text = await api(`/raw?path=${encodeURIComponent(current.path)}`).then((r) => r.text());
+    // Stored JSON is one long line -- pydantic-ai's dump_json is compact. Source
+    // mode is caught above, so this is the preview: indent it. Anything that
+    // will not parse is shown exactly as stored.
+    if (isJson(ct)) try { text = JSON.stringify(JSON.parse(text), null, 2); } catch { /* as-is */ }
     view.className = 'pad';
     view.replaceChildren(make('pre', { className: 'plain', textContent: text }));
   } else {
@@ -539,6 +588,9 @@ function renderActions() {
       }));
     }
   }
+  if (ct === 'text/markdown') {
+    actions.push(make('button', { textContent: 'PDF', title: 'Print / save as PDF', onclick: guard(printFile) }));
+  }
   if (!current.is_folder && isText(ct)) {
     actions.push(make('button', { className: 'primary', textContent: 'Save', disabled: !dirty, onclick: save }));
   }
@@ -548,6 +600,20 @@ function renderActions() {
 }
 
 // --- mutations ---------------------------------------------------------------
+// Print is the export: "Save as PDF" is a destination in every browser's print
+// dialog, and @media print strips the page down to the rendered document.
+const printFile = async () => {
+  if (mode !== 'preview') {
+    if (dirty && !confirm('Discard unsaved changes?')) return;
+    mode = 'preview'; dirty = false; await renderViewer();
+  }
+  // The title is what the browser uses for the PDF's filename and header.
+  const title = document.title;
+  document.title = current.filename.replace(/\.md$/, '');
+  window.addEventListener('afterprint', () => { document.title = title; }, { once: true });
+  window.print();
+};
+
 const save = guard(async () => {
   const box = $('view').querySelector('textarea');
   if (!box) return;
@@ -629,6 +695,33 @@ function bubble(who, bodyClass) {
 
 function scrollChat() { $('messages').scrollTop = $('messages').scrollHeight; }
 
+const HINT = 'Ask the agent to take notes. It reads and writes the same filesystem you are browsing.';
+
+// The panel holds only the path: the history itself lives in the file, so the
+// server reads it per turn and nothing here can drift out of sync with it.
+function newChat() {
+  session = null;
+  $('messages').replaceChildren(make('div', { className: 'hint', textContent: HINT }));
+}
+
+async function loadSession(path) {
+  const bubbles = await json(`/api/session?path=${encodeURIComponent(path)}`);
+  session = path;
+  $('messages').replaceChildren();
+  for (const msg of bubbles) {
+    // Pin the role to one of the two the stylesheet knows, so nothing from the
+    // response reaches `bubble()`'s class list -- and a live turn and a replayed
+    // one build the identical DOM.
+    const who = msg.who === 'you' ? 'you' : 'agent';
+    const { tools, body } = bubble(who, who === 'you' ? 'said' : 'md');
+    tools.textContent = (msg.tools || []).map((tool) => `▸ ${tool}  `).join('');
+    // Same split as a finished live turn: the reply is rendered markdown through
+    // the scrubber, the user's own text is text.
+    if (who === 'you') body.textContent = msg.text;
+    else { setMarkdown(body, msg.html); body.classList.add('done'); }
+  }
+}
+
 const send = guard(async () => {
   const text = $('ask').value.trim();
   if (!text || $('send').disabled) return;
@@ -636,11 +729,14 @@ const send = guard(async () => {
   bubble('you', 'said').body.textContent = text;
   const { tools, body } = bubble('agent', 'md');
   $('send').disabled = true;
+  $('new-chat').disabled = true;
   try {
     const res = await api('/api/chat', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ message: text }),
+      // Nearly every question is about the file on screen, so the agent gets its
+      // path -- not its content: it has `cat`, and the file may be huge.
+      body: JSON.stringify({ message: text, path: current?.path ?? null, session }),
     });
     // NDJSON: one JSON object per line, and a chunk can split a line in half.
     const reader = res.body.getReader(), decoder = new TextDecoder();
@@ -657,7 +753,9 @@ const send = guard(async () => {
         else if (event.error) throw new Error(event.error);
         // Streaming deltas land as text; the finished reply is rendered markdown
         // and goes through the scrubber -- the model's output is untrusted input.
-        else if (event.done) { setMarkdown(body, event.html); body.classList.add('done'); }
+        // The turn was stored under `event.session` -- adopt it so the next
+        // message continues the same file rather than starting another.
+        else if (event.done) { session = event.session; setMarkdown(body, event.html); body.classList.add('done'); }
         scrollChat();
       }
       if (done) break;
@@ -669,15 +767,35 @@ const send = guard(async () => {
     else if (dirty) say('The agent may have changed this file; your unsaved edits were kept.');
   } finally {
     $('send').disabled = false;
+    $('new-chat').disabled = false;
     $('ask').focus();
   }
 });
 
+// Resizing the chat panel is just its grid track, so one CSS variable does it.
+// Pointer capture keeps the drag alive over the iframe previews, which would
+// otherwise swallow the pointermove.
+const setChatWidth = (w) => {
+  w = Math.min(Math.max(w, 240), Math.max(240, innerWidth - 520));
+  document.documentElement.style.setProperty('--chat-w', `${w}px`);
+  return w;
+};
+$('drag').addEventListener('pointerdown', (e) => {
+  e.preventDefault();
+  const drag = (ev) => localStorage.setItem('chatWidth', setChatWidth(innerWidth - ev.clientX));
+  $('drag').setPointerCapture(e.pointerId);
+  $('drag').addEventListener('pointermove', drag);
+  $('drag').addEventListener('pointerup', () => $('drag').removeEventListener('pointermove', drag), { once: true });
+});
+if (localStorage.chatWidth) setChatWidth(+localStorage.chatWidth);
+
 $('send').onclick = send;
+$('new-chat').onclick = newChat;
 $('ask').addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
 });
 
+newChat();
 loadTree(false).catch((e) => say(e.message, true));
 </script>
 </body>

@@ -23,15 +23,27 @@ dependencies = [
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
 # What `surrealfs.embed` needs, without the rest of the demo stack.
 embed = ["openai>=2.0"]
+# The file browser (`surrealfs-browser`). starlette is listed explicitly because
+# it reaches the tree today only as a transitive of pydantic-ai's `web` extra,
+# and markdown-it-py only as one of rich's -- both are imported directly here.
+browser = [
+    "starlette>=0.37",
+    "uvicorn>=0.30",
+    "markdown-it-py>=3",
+    "pydantic-ai-slim[anthropic]>=2.0",
+    "python-dotenv>=1",
+    "openai>=2.0",
+]
 demo = [
     "pydantic-ai-slim[web,anthropic]>=2.0",
     "anthropic>=0.40",
     "openai>=2.0",
     "logfire>=4.20",
     "uvicorn>=0.30",
-    # Only a transitive dep of rich today; the file browser imports it directly.
-    "markdown-it-py>=3",
 ]
+
+[project.scripts]
+surrealfs-browser = "surrealfs.browser.__main__:main"
 
 # Lets Hermes discover the plugin in `surrealfs/integrations/hermes/` as soon as
 # the package is installed. Nothing imports Hermes, so there is no extra to add.
@@ -57,6 +69,7 @@ packages = ["surrealfs"]
 
 [tool.hatch.build]
 artifacts = [
+    "surrealfs/browser/*.html",
     "surrealfs/schema/*.surql",
     "surrealfs/tools/docs/*.md",
     "surrealfs/integrations/*/README.md",

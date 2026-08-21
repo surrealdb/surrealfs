@@ -14,6 +14,7 @@ import asyncio
 import importlib.util
 import inspect
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -685,9 +686,20 @@ def _hermes_abc():
     path = home / "hermes-agent" / "agent" / "memory_provider.py"
     if not path.exists():
         pytest.skip(f"Hermes is not installed at {path}")
+    if (cached := sys.modules.get("_hermes_memory_provider")) is not None:
+        return cached.MemoryProvider
     spec = importlib.util.spec_from_file_location("_hermes_memory_provider", path)
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Registered *before* executing: the module's `@dataclass(frozen=True)`
+    # classes have string annotations, and dataclasses resolves those through
+    # `sys.modules[cls.__module__].__dict__` -- which is `None.__dict__`, and an
+    # AttributeError, for a module loaded by path and never registered.
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        del sys.modules[spec.name]
+        raise
     return module.MemoryProvider
 
 

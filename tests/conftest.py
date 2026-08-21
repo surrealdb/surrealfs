@@ -38,6 +38,19 @@ def _free_port() -> int:
         return int(sock.getsockname()[1])
 
 
+@pytest.fixture(autouse=True)
+def _clean_surrealdb_env(monkeypatch):
+    """Tests talk to the throwaway server, never to whatever ``.env`` configures.
+
+    ``just test`` sets ``dotenv-load``, so without this a developer's real
+    ``SURREALDB_USER``/``PASS``/``AUTH_LEVEL`` reach ``integrations._connect``,
+    which reads the environment, and signin against the local root-only server
+    fails. Each test sets the variables it needs itself.
+    """
+    for name in [n for n in os.environ if n.startswith("SURREALDB_")]:
+        monkeypatch.delenv(name)
+
+
 @pytest.fixture(scope="session")
 def surreal_url() -> str:
     """URL of a running SurrealDB 3.x server, starting one if needed."""

@@ -18,8 +18,11 @@ surrealfs/
   embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
   schema/           file.surql, user.surql, apply_schema()
   tools/            args.py, handlers.py, registry, docs/*.md
-  integrations/     _connect.py, and one dir per integration, each with its own
-                    README.md: pydantic_ai/, json_tools/, hermes/ (plugin +
+  browser/          the `surrealfs-browser` web UI — page.html, the Starlette
+                    app, its chat agent, and the CLI in __main__.py
+  integrations/     _connect.py (env connection, shared by the browser and the
+                    Hermes surfaces), and one dir per integration, each with its
+                    own README.md: pydantic_ai/, json_tools/, hermes/ (plugin +
                     bundled skill), hermes_memory/ (memory provider)
 examples/           chat_agent.py, anthropic_loop.py, semantic_search.py
 tests/
@@ -104,6 +107,13 @@ Two constraints the recipe exists to satisfy: the script must resolve inside
 `$HERMES_HOME/scripts/`, and cron sanitizes the subprocess env against a
 provider-credential blocklist that `OPENAI_API_KEY` is on — so the key comes from a
 sourced file, never from the gateway's environment.
+
+**The browser's `.env` must be found with `find_dotenv(usecwd=True)`.** Plain
+`load_dotenv()` walks up from the *calling module's* directory, not the working
+directory — so `surrealfs-browser` run from anywhere inside a checkout silently
+picked up this repo's own `.env` (a cloud instance) instead of the one the user was
+standing in, and failed authentication against the server their flags named. The
+whole point of the tool is that a person runs it in their own directory.
 
 **`search_text` defaults to `match="any"` (`@1,OR@`), not AND.** With `@1@`,
 `'what tone does the user prefer'` finds nothing while `'prefer'` finds the note —

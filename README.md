@@ -39,44 +39,21 @@ Give an agent somewhere durable to keep its work. SurrealFS is a `file` table
 plus the tools to hand it to a model — files and folders, full-text and semantic
 search, all queryable with SurrealQL because it is just a table.
 
-Here is a tree one agent built for its user over a few conversations:
+![The file browser](assets/surrealfs-browser.png)
 
-```
-/
-├── notes.md                           # Master profile & current projects overview
-├── reminders.md                       # Daily to-dos
-│
-├── preferences/
-│   ├── professional.md                # Work identity, tech preferences, leadership style
-│   ├── hobbies.md                     # FPV drones, eSports, tennis, open source
-│   └── content.md                     # Content creation preferences & LinkedIn strategy
-│
-└── projects/
-    ├── knowledge_graphs_ai_presentation/
-    │   ├── outline.md                 # 40-min structure (6 sections)
-    │   └── talking_points.md          # Deep talking points, examples, Q&A prep
-    │
-    └── content/
-        ├── ideas.md                   # Blog post ideas (series + individual)
-        ├── demo_library.md            # 6 core demos (reusable across formats)
-        │
-        └── surrealdb_marketing/
-            ├── enterprise_strategy.md # Unified comparison approach
-            └── core_arguments.md      # 5 key arguments
-```
-
-![Hermes integration](assets/surrealfs-browser.png)
+*The file browser is a standalone tool that can be used to browse and edit files in a SurrealDB database.*
 
 ## Requirements
 
 - Python 3.12+
-- **A SurrealDB 3.x server.**.
+- A SurrealDB 3.x server.
 
 ## Install
 
 ```bash
 pip install surrealfs                    # core, and the Hermes plugin
 pip install "surrealfs[pydantic-ai]"     # + the pydantic-ai toolset
+pip install "surrealfs[browser]"         # + the file browser
 ```
 
 ## Quickstart
@@ -131,6 +108,49 @@ The first three tool surfaces are generated from one registry in
 `surrealfs/tools/docs/` — edit them as prose; they are prompt text. The memory
 provider is the odd one out: it exposes no tools of its own, because the Hermes
 plugin's already cover explicit reads and writes.
+
+## The file browser
+
+Point the agents at a shared SurrealDB —
+a Cloud instance, say — and every person on the team can run the browser on their
+own machine to see and edit the same filesystem the agents are writing to:
+
+```bash
+pip install "surrealfs[browser]"
+surrealfs-browser                # http://127.0.0.1:7933
+```
+
+Tree on the left, file on the right, chat with the note-taking agent on the far
+right. Text is editable and saves back to the table, markdown renders with a
+source toggle, agent-authored HTML renders in a sandboxed iframe, images display,
+and the search box is the same hybrid `fs.search` the agent's own tool calls.
+Conversations are files too, under `/_sessions/` — open one from the tree and it
+replays.
+
+Credentials come from a `.env` in the working directory, or the environment
+directly, which wins over the file:
+
+```bash
+SURREALDB_URL=wss://….surreal.cloud/rpc
+SURREALDB_USER=…
+SURREALDB_PASS=…
+SURREALDB_NAMESPACE=…
+SURREALDB_DATABASE=…
+SURREALDB_AUTH_LEVEL=database    # root (default) | namespace | database
+OPENAI_API_KEY=…                 # optional: makes search hybrid
+ANTHROPIC_API_KEY=…              # optional: enables the chat panel
+```
+
+`SURREALDB_AUTH_LEVEL` picks which kind of user the credentials are, since the
+server infers that from the signin payload — a database-scoped Cloud credential
+needs `database`. All three are system users, so they bypass the `file` table's
+`owner = $auth.id` permissions and everyone sharing the database sees the one
+shared tree, which is the point. Every variable has a command-line form too
+(`surrealfs-browser --help`).
+
+The server binds loopback. `--host 0.0.0.0` exposes it, and then anyone who can
+reach the port has whatever access those credentials do — the page has no login
+of its own.
 
 ## Semantic search
 
@@ -223,6 +243,7 @@ just db        # start SurrealDB in one terminal
 just schema    # apply the file table to it
 just test      # run the suite (starts its own server if needed)
 just check     # lint + test
+just browser   # the file browser on :7933
 just agent     # the note-taking chat agent on :7932
 just loop "…"  # the framework-free Anthropic tool-use loop
 ```

@@ -20,7 +20,7 @@ embed *ARGS:
     uv run --extra embed python -m surrealfs.embed {{ARGS}}
 
 test:
-    uv run pytest
+    uv run pytest --quiet --no-summary
 
 lint:
     uv run ruff check .
@@ -33,8 +33,8 @@ agent:
     uv run --extra demo python examples/chat_agent.py
 
 # Browse the filesystem in a web UI on http://127.0.0.1:7933
-browser:
-    uv run --extra demo python examples/file_browser.py
+browser *ARGS:
+    uv run --extra browser python -m surrealfs.browser {{ARGS}}
 
 # Run the framework-free Anthropic tool-use loop.
 loop *ARGS:
