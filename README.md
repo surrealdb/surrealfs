@@ -39,33 +39,9 @@ Give an agent somewhere durable to keep its work. SurrealFS is a `file` table
 plus the tools to hand it to a model — files and folders, full-text and semantic
 search, all queryable with SurrealQL because it is just a table.
 
-Here is a tree one agent built for its user over a few conversations:
-
-```
-/
-├── notes.md                           # Master profile & current projects overview
-├── reminders.md                       # Daily to-dos
-│
-├── preferences/
-│   ├── professional.md                # Work identity, tech preferences, leadership style
-│   ├── hobbies.md                     # FPV drones, eSports, tennis, open source
-│   └── content.md                     # Content creation preferences & LinkedIn strategy
-│
-└── projects/
-    ├── knowledge_graphs_ai_presentation/
-    │   ├── outline.md                 # 40-min structure (6 sections)
-    │   └── talking_points.md          # Deep talking points, examples, Q&A prep
-    │
-    └── content/
-        ├── ideas.md                   # Blog post ideas (series + individual)
-        ├── demo_library.md            # 6 core demos (reusable across formats)
-        │
-        └── surrealdb_marketing/
-            ├── enterprise_strategy.md # Unified comparison approach
-            └── core_arguments.md      # 5 key arguments
-```
-
 ![The file browser](assets/surrealfs-browser.png)
+
+*The file browser is a standalone tool that can be used to browse and edit files in a SurrealDB database.*
 
 ## Requirements
 
@@ -135,7 +111,7 @@ plugin's already cover explicit reads and writes.
 
 ## The file browser
 
-That screenshot is a tool, not a demo. Point the agents at a shared SurrealDB —
+Point the agents at a shared SurrealDB —
 a Cloud instance, say — and every person on the team can run the browser on their
 own machine to see and edit the same filesystem the agents are writing to:
 
