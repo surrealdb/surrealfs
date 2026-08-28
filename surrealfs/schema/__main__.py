@@ -2,7 +2,6 @@
 
     python -m surrealfs.schema
     python -m surrealfs.schema --record-auth
-    python -m surrealfs.schema --migrate     # existing database: backfill owner/mode
     python -m surrealfs.schema --url ws://localhost:8000/rpc --namespace notes
     python -m surrealfs.schema --print          # dump the DDL, connect to nothing
 
@@ -18,7 +17,7 @@ import asyncio
 import os
 import sys
 
-from . import apply_schema, migrate, schema_sql
+from . import apply_schema, schema_sql
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -59,13 +58,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "enforces the file permissions itself (see docs/permissions.md)",
     )
     parser.add_argument(
-        "--migrate",
-        action="store_true",
-        help="after applying, backfill `owner` and `mode` on rows written "
-        "before they existed. Required once per pre-permissions database; "
-        "a no-op on a fresh one, and safe to re-run",
-    )
-    parser.add_argument(
         "--print",
         action="store_true",
         dest="print_only",
@@ -82,8 +74,6 @@ async def _apply(args: argparse.Namespace) -> None:
         await db.signin({"username": args.username, "password": args.password})
         await db.use(args.namespace, args.database)
         await apply_schema(db, record_auth=args.record_auth)
-        if args.migrate:
-            await migrate(db)
     finally:
         await db.close()
 
@@ -103,8 +93,7 @@ def main(argv: list[str] | None = None) -> int:
 
     target = f"{args.namespace}/{args.database} on {args.url}"
     tables = "file + user" if args.record_auth else "file"
-    migrated = ", migrated existing rows" if args.migrate else ""
-    print(f"Applied schema ({tables}) to {target}{migrated}")
+    print(f"Applied schema ({tables}) to {target}")
     return 0
 
 

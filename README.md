@@ -176,17 +176,6 @@ Files carry a unix `owner` and `mode`, `/home/<user>` is private, everything
 else is shared, and `chmod` moves things between the two. `SurrealFs` enforces
 it. See [Permissions](docs/permissions.md) for the rules and the reasoning.
 
-### Upgrading a database that already has files
-
-The schema applies itself, but rows written before `owner` and `mode` existed
-need a one-off backfill, including closing any existing `/home/<user>`:
-
-```bash
-python -m surrealfs.schema --migrate
-```
-
-A fresh database needs nothing. See `surrealfs/schema/migrate_permissions.surql`.
-
 ### Letting the database enforce it too (optional)
 
 The above is a real boundary for an agent, since no tool exposes raw SurrealQL,

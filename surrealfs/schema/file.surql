@@ -38,7 +38,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
     RETURN IF $parent IS NONE THEN NONE
         ELSE IF $parent.gate IS NOT NONE THEN $parent.gate
         -- A row written before `mode` existed belongs to nobody but root until
-        -- `migrate_permissions.surql` has run. Treating a missing mode as
+        -- `docs/migrate_permissions.surql` has run. Treating a missing mode as
         -- traversable would expose an un-migrated tree; erroring on it -- which
         -- is what `NONE % 2` does -- takes the whole database down, including
         -- the migration itself, because re-writing a row recomputes this.
@@ -65,7 +65,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_reachable($gate: option<string>, $me: option<s
 -- `$owner` and `$mode` are optional for one reason only: a row written before
 -- those fields existed has neither, and it must fail *closed* -- no owner reads
 -- as root's, no mode as no permissions -- until
--- `migrate_permissions.surql` has run. `SurrealFs.from_row` coalesces the same
+-- `docs/migrate_permissions.surql` has run. `SurrealFs.from_row` coalesces the same
 -- way, so the two implementations still agree.
 DEFINE FUNCTION OVERWRITE fn::sfs_bits(
     $owner: option<string>, $mode: option<int>, $me: option<string>

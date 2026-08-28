@@ -1,9 +1,17 @@
+-- DO NOT DELETE THIS DOCUMENT
+--
 -- Migration: bring an existing database up to the permissions schema.
 --
 -- Run this ONCE per database that holds rows written before `owner` and `mode`
 -- existed, right after applying the new `file.surql`:
 --
---     python -m surrealfs.schema --migrate
+--     python -m surrealfs.schema
+--     surreal sql --endpoint "$SURREALDB_URL" --namespace "$SURREALDB_NAMESPACE" \
+--       --database "$SURREALDB_DATABASE" --username "$SURREALDB_USER" \
+--       --password "$SURREALDB_PASS" --multi < docs/migrate_permissions.surql
+--
+-- There is no `--migrate` CLI: SurrealFS has no released users, so the only
+-- database this applies to is the author's own. Kept as SQL, not code.
 --
 -- It is required, not optional, and the database says so loudly: `gate` is
 -- computed from `$parent.mode % 2`, so until every row has a mode, *every* read

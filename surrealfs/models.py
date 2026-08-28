@@ -82,7 +82,7 @@ class FileEntry:
             owner=row.get("owner") or "root",
             # No mode means a row older than the permissions schema, not a
             # permissive one: it reads as no bits at all, so only root sees it
-            # until `migrate_permissions.surql` has run. Mirrors the `?? 0` in
+            # until `docs/migrate_permissions.surql` has run. Mirrors the `?? 0` in
             # `fn::sfs_bits`.
             mode=int(row["mode"]) if row.get("mode") is not None else 0,
             gate=row.get("gate"),
