@@ -1,7 +1,6 @@
 """Apply the SurrealFS schema from the command line.
 
     python -m surrealfs.schema
-    python -m surrealfs.schema --include-user
     python -m surrealfs.schema --url ws://localhost:8000/rpc --namespace notes
     python -m surrealfs.schema --print          # dump the DDL, connect to nothing
 
@@ -51,12 +50,6 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="(env: SURREALDB_DATABASE)",
     )
     parser.add_argument(
-        "--include-user",
-        action="store_true",
-        help="also define the optional `user` table and record access, which the "
-        "file table's `owner = $auth.id` permissions need for multi-tenancy",
-    )
-    parser.add_argument(
         "--print",
         action="store_true",
         dest="print_only",
@@ -72,7 +65,7 @@ async def _apply(args: argparse.Namespace) -> None:
     try:
         await db.signin({"username": args.username, "password": args.password})
         await db.use(args.namespace, args.database)
-        await apply_schema(db, include_user=args.include_user)
+        await apply_schema(db)
     finally:
         await db.close()
 
@@ -81,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
     if args.print_only:
-        print(schema_sql(include_user=args.include_user))
+        print(schema_sql())
         return 0
 
     try:
@@ -91,8 +84,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     target = f"{args.namespace}/{args.database} on {args.url}"
-    tables = "file + user" if args.include_user else "file"
-    print(f"Applied schema ({tables}) to {target}")
+    print(f"Applied schema to {target}")
     return 0
 
 

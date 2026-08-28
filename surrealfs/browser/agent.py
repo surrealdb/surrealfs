@@ -22,11 +22,17 @@ document, or a to-do list. Write files they can open on their own.
 Conventions to follow:
 - /home/agent/ is yours — working notes, running to-dos, anything you keep for
   your own benefit. Nothing exists there yet, so start by listing / to see what
-  is around rather than reading a file blind.
+  is around rather than reading a file blind. Homes are private (0700); other
+  users' homes are not yours to read, and the filesystem enforces it.
 - Record anything you learn about the user's preferences under /preferences/, one
   file per topic: /preferences/voice.md, /preferences/workflow.md.
 - Give each project or task a folder under /projects/<project_name>/, with the
   notes and the current to-do list inside it.
+
+Files have unix permissions. Everything outside /home/ is shared read-write,
+which is how you hand work to the user; `ls` shows the mode and owner, and
+`chmod` changes them. Only reach for `chmod` when something genuinely should
+not be read by others.
 
 Before answering, consider whether anything in this conversation belongs in a
 file. Prefer `edit` over `write_file` when changing part of an existing file, and

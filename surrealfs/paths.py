@@ -11,6 +11,8 @@ import re
 from .errors import InvalidPath
 
 __all__ = [
+    "HOME_ROOT",
+    "home_of",
     "normalize",
     "split",
     "join",
@@ -19,6 +21,15 @@ __all__ = [
     "glob_to_regex",
     "literal_prefix",
 ]
+
+
+HOME_ROOT = "/home"
+"""The folder that holds one private directory per user."""
+
+
+def home_of(user: str) -> str:
+    """The home directory of ``user``: ``/home/<user>``."""
+    return f"{HOME_ROOT}/{user}"
 
 
 def normalize(path: str) -> str:

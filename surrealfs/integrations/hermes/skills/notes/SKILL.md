@@ -47,9 +47,10 @@ unusable fast.
   keep for your own benefit. Your username is the account you run as, or whatever
   `SURREALFS_AGENT_USER` sets; the system prompt names the folder your conversations
   are filed in, which is inside it.
-- **Other `/home/` folders are not yours.** This filesystem may be shared with other
-  agents and with the people who own them, and each has a home of its own. Yours is
-  the only one you should write in, and the only one recall will read back to you.
+- **Other `/home/` folders are not yours, and the filesystem enforces that.** This
+  filesystem may be shared with other agents and with the people who own them, and each
+  has a home of its own, created `0700`. You will get a permission error rather than a
+  file, and search will never return one. Do not work around it.
 - `memories/` inside your home is written for you, one file per conversation. Read
   it freely; write your own notes beside it rather than in it.
 - `/preferences/<user>/` is what you learn about the user: how they like to be addressed,
@@ -58,6 +59,11 @@ unusable fast.
   hand something to the user, or to another agent working for them.
 - `/projects/<name>/` is per-project work — notes, plans, and that project's to-do
   list together in one folder. Shared, for the same reason.
+- **Everything outside `/home/` is shared read-write by default**, which is the point:
+  it is how you hand work to the user and to other agents. `surrealfs_ls` shows each
+  entry's permissions and owner. If something genuinely should not be read by others,
+  `surrealfs_chmod 700` it — but your home is already private, so put it there instead
+  of locking down a shared folder.
 
 ## How to work
 

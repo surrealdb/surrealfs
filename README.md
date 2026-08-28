@@ -69,7 +69,7 @@ await db.signin({"username": "root", "password": "root"})
 await db.use("surrealfs", "demo")
 await apply_schema(db)  # defines the `file` table; safe to re-run
 
-fs = SurrealFs(db)
+fs = SurrealFs(db, user="alice")  # who you are; ROOT bypasses permissions
 await fs.write_text("/notes/today.md", "# Today\n- ship the refactor")
 await fs.edit("/notes/today.md", "ship", "shipped")
 await fs.ls("/notes")
@@ -77,8 +77,11 @@ await fs.search_text("refactor")
 ```
 
 You create and own the connection. SurrealFS never connects, signs in, or
-selects a namespace — so the `file` table's `owner = $auth.id` permissions key
-off _your_ auth context.
+selects a namespace.
+
+`user` is required and has no default. Files carry a unix owner and mode, and
+the database cannot tell SurrealFS who is asking — every credential is a system
+credential — so the identity comes from you. See [Permissions](#permissions).
 
 ## The plain async API
 
@@ -89,7 +92,7 @@ pre-formatted strings. Build whatever integration you like on top.
 | -------- | ------------------------------------------------------------- |
 | Read     | `read_text` `read_bytes` `tail` `ls` `glob` `stat` `exists`   |
 | Write    | `write_text` `write_bytes` `edit` `touch` `mkdir`             |
-| Organise | `mv` `cp` `rm`                                                |
+| Organise | `mv` `cp` `rm` `chmod`                                        |
 | Search   | `search` `search_text` `search_semantic` `reindex_embeddings` |
 
 ## Integrations
@@ -143,9 +146,10 @@ ANTHROPIC_API_KEY=…              # optional: enables the chat panel
 
 `SURREALDB_AUTH_LEVEL` picks which kind of user the credentials are, since the
 server infers that from the signin payload — a database-scoped Cloud credential
-needs `database`. All three are system users, so they bypass the `file` table's
-`owner = $auth.id` permissions and everyone sharing the database sees the one
-shared tree, which is the point. Every variable has a command-line form too
+needs `database`. All three are system users, which is why SurrealFS enforces
+permissions itself rather than leaning on the database; `SURREALFS_USER` (or
+`--user`) picks who the browser acts as, defaulting to root, which sees every
+private home. Every variable has a command-line form too
 (`surrealfs-browser --help`).
 
 The server binds loopback. `--host 0.0.0.0` exposes it, and then anyone who can
@@ -186,7 +190,7 @@ Pass `match="all"` when you want a precise filter and an empty result is a real
 answer:
 
 ```python
-hits = await fs.search("invoice 2026", match="all")   # both terms must appear
+hits = await fs.search("invoice 2026", match="all")  # both terms must appear
 ```
 
 Re-running the indexer is cheap: it skips files whose content has not changed
@@ -207,6 +211,40 @@ It needs `OPENAI_API_KEY` and an already-applied schema (`just schema`). Under
 Hermes there is no daemon to leave running — see [Keeping the vectors current
 under Hermes](docs/hermes-indexer.md).
 
+## Permissions
+
+Files carry a unix `owner` and `mode`, and `SurrealFs` enforces them.
+
+```
+drwx------  alice          -  /home/alice/      private, created that way
+-rw-rw-rw-  alice          -  /home/alice/x.md  unreachable anyway: see the 0700 above
+drwxrwxrwx  bob            -  /projects/        shared, the default everywhere else
+```
+
+Every folder directly under `/home` is somebody's home and is created `0700`.
+Everything else defaults to `0777`/`0666` — the shared tree is how agents hand
+work to each other, so sharing is the default and privacy is opt-in:
+
+```python
+await fs.chmod("/projects/draft", 0o700)  # mine only
+await fs.chmod("/notes/policy.md", 0o644)  # everyone reads, I write
+```
+
+Agents get the same thing as a `chmod` tool, and `ls` prints the mode and owner
+so a model can see what it is changing.
+
+The rules are the unix ones an agent already expects. A folder's bits govern
+everything inside it, so a `0700` folder hides its whole subtree whatever the
+files in it say. `rm` is keyed on the containing folder rather than the file.
+Only the owner may `chmod`. `ROOT` bypasses every check, and the indexer and the
+browser run as root because they are meant to see the whole tree.
+
+`user` is required on the constructor because the database cannot supply it —
+every shipped credential is a root/namespace/database *system* credential, and
+those bypass table permissions entirely. `docs/permissions.md` records why the
+checks live in Python, how the computed `gate` field does ancestor traversal in
+one column, and the two things deliberately left out.
+
 ## The schema
 
 `surrealfs/schema/file.surql` is the whole data model, and it is worth reading.
@@ -225,14 +263,13 @@ A folder is just a row with no `content`, no `file` bytes, and no `symlink` —
 also computed, as `is_folder`. `hash` is maintained by an event, and there are
 HNSW and BM25 indexes for the two search modes.
 
-`apply_schema(db, include_user=True)` also defines the optional `user` table and
-record access that the `owner` permissions need for real multi-tenancy.
+`owner`, `mode` and the computed `gate` are the permission model — see
+[Permissions](#permissions) below and `docs/permissions.md`.
 
 You can apply it without writing any code:
 
 ```bash
 python -m surrealfs.schema                     # uses SURREALDB_* env vars
-python -m surrealfs.schema --include-user
 python -m surrealfs.schema --print             # dump the DDL, connect to nothing
 ```
 

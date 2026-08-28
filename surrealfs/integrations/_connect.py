@@ -6,11 +6,11 @@ plugin and memory provider, which Hermes gives a sync callback and no lifecycle
 hook, and the file browser, which is a program rather than a library.
 
     async with connected() as db:        # short-lived, one call
-        await SurrealFs(db).ls("/")
+        await SurrealFs(db, user=agent_user()).ls("/")
 
     db = await connect()                 # long-lived, survives an idle socket
     try:
-        await SurrealFs(db).ls("/")
+        await SurrealFs(db, user=agent_user()).ls("/")
     finally:
         await db.close()
 
@@ -21,7 +21,9 @@ project uses, defaulting to a local server.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -32,17 +34,56 @@ from websockets.exceptions import ConnectionClosed
 
 from ..schema import apply_schema
 
-__all__ = ["connect", "connected"]
+__all__ = ["agent_user", "connect", "connected"]
 
 # Which kind of user the credentials belong to. All three are *system* users, so
-# they bypass the `file` table's `owner = $auth.id` permissions and see the whole
-# tree -- which is the point when several agents and people share one database.
-# Record access (the optional `account` in schema/user.surql) is deliberately not
-# offered here: a person signed in as a `user` record would see only files that
-# record owns, and everything the agents wrote would be invisible.
+# they bypass table permissions entirely. That is deliberate, and it is why
+# SurrealFS enforces its own: the identity a `SurrealFs` acts as comes from
+# `agent_user()` below, not from the database. See `docs/permissions.md`.
 AUTH_LEVELS = ("root", "namespace", "database")
 
 _schema_applied = False
+
+# No dot: a name is a single path segment, and `hermes/../martin` must not
+# slug into anything containing `..`.
+_UNSAFE_IN_NAME = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _machine_user() -> str:
+    """The unix account this process runs as, or ``unknown``.
+
+    `getpass.getuser` walks LOGNAME/USER/LNAME/USERNAME and then the password
+    database, and raises only when every one of them fails -- a container with no
+    passwd entry, some cron environments.
+    """
+    try:
+        return _slug(getpass.getuser())
+    except Exception:
+        return "unknown"
+
+
+def _slug(name: str) -> str:
+    return _UNSAFE_IN_NAME.sub("-", name).strip("-") or "unknown"
+
+
+def agent_user() -> str:
+    """The user an agent surface acts as, and whose home it owns.
+
+    The agent, not the human: the notes skill hands the agent a home at
+    ``/home/<name>/``, so two agents owned by two different people collide there
+    unless the name distinguishes them.
+
+    Defaults to the machine username, because on a VM or sandbox the agent has an
+    account of its own and the SurrealFS path should match it. Where it does not --
+    an agent sharing a laptop account with its human, or two agents under one
+    account -- ``SURREALFS_AGENT_USER`` names it (``hermes-martin``), and
+    ``hermes memory setup`` writes that into the profile's own ``.env``.
+
+    This is now an access-control boundary, not just a path convention: whatever
+    it returns is the only home this process can read or write.
+    """
+    name = os.environ.get("SURREALFS_AGENT_USER", "").strip()
+    return _slug(name) if name else _machine_user()
 
 
 def _namespace() -> str:

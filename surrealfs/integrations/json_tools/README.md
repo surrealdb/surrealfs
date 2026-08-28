@@ -7,7 +7,7 @@ against any provider.
 from surrealfs.integrations.json_tools import call_tool, tool_definitions
 from surrealfs.tools import ToolContext
 
-ctx = ToolContext(fs=SurrealFs(db))
+ctx = ToolContext(fs=SurrealFs(db, user="alice"))
 tools = tool_definitions(flavor="anthropic")  # or flavor="openai"
 
 # inside your tool-use loop:

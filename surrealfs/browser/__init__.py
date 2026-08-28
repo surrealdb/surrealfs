@@ -58,7 +58,7 @@ from ..errors import (
     NotFound,
     SurrealFsError,
 )
-from ..fs import SurrealFs
+from ..fs import ROOT, SurrealFs
 from ..integrations._connect import connect
 from ..schema import apply_schema
 from ..tools import ToolContext
@@ -412,7 +412,7 @@ async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
         await apply_schema(db)
     except Exception as exc:  # noqa: BLE001 -- any DDL failure, same answer
         print(f"could not apply the schema (continuing): {exc}")
-    fs = SurrealFs(db)
+    fs = SurrealFs(db, user=os.environ.get("SURREALFS_USER") or ROOT)
 
     embed = make_embedder() if os.environ.get("OPENAI_API_KEY") else None
     if embed is None:

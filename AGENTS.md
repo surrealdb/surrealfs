@@ -16,7 +16,7 @@ surrealfs/
   errors.py         exception hierarchy (dual-inherits builtin OSErrors)
   paths.py          normalisation + glob->regex
   embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
-  schema/           file.surql, user.surql, apply_schema()
+  schema/           file.surql, apply_schema()
   tools/            args.py, handlers.py, registry, docs/*.md
   browser/          the `surrealfs-browser` web UI — page.html, the Starlette
                     app, its chat agent, and the CLI in __main__.py
@@ -54,7 +54,7 @@ Hermes has one flat tool namespace, and `tools/registry.py` rejects a name
 already owned by another toolset by *logging an error and returning* — no
 exception. Registering `write_file` would therefore lose to Hermes' built-in
 disk one, silently, and the model would go on calling that instead. `PREFIX` in
-`integrations/hermes/__init__.py` keeps all fourteen and disambiguates the two
+`integrations/hermes/__init__.py` keeps all fifteen and disambiguates the two
 filesystems for the model; `_describe` rewrites the cross-references inside the
 shared `docs/*.md` text to match, since `cat.md` telling the model to use
 `read_bytes` is a dead end when the tool is `surrealfs_read_bytes`.
@@ -217,6 +217,38 @@ indexer's own — a timestamp comparison marks every row stale forever and
 updates a row shortly after its content changes, so writing twice in quick
 succession races it. `_query` retries anything the store marks retryable.
 
+**Permission checks are in `SurrealFs`, and a missed one in a *bulk* query is a
+disclosure.** `_require` covers the ancestry of anything resolved by path, so
+single-path operations are safe by construction. The four queries that return
+many rows without resolving them — `ls`, `glob`, `search_text`,
+`search_semantic` — each have to append `fn::sfs_can_read` via `self._readable`,
+and `search` returns file *content*, so forgetting one hands another user's
+notes to a model. `tests/test_permissions.py` asserts all four.
+
+**`gate` is COMPUTED, so it cannot be indexed — and a COMPUTED field reading
+NULL through an index would silently disable filtering rather than error.** That
+is why the permission tests exercise the FULLTEXT and HNSW paths specifically,
+and why `EXPLAIN` was checked (`idx_file_content` still drives a `FullTextScan`,
+with the predicate applied above it). Verified on 3.2.4; re-check it on a server
+upgrade.
+
+**HNSW applies its `k` cut before the permission filter.** `search_semantic`
+therefore over-fetches by `_KNN_OVERFETCH` for a non-root user and trims in
+Python, or a filtered vector search would quietly return fewer hits than asked
+for. Root skips the predicate entirely and keeps the original plan.
+
+**A home directory is owned by the user it is named after, not by whoever
+created it** (`default_owner`). Root seeds `/home/<x>` often — the indexer, the
+browser, test fixtures — and a home is 0700, so crediting the creator would lock
+that user out permanently. There is no `chown`.
+
+**`rm` checks the parent folder, not the file.** That is unix, it is what agents
+expect, and it is easy to "fix" into a bug.
+
+**SurrealQL has no bitwise operators.** The mode-bit arithmetic in
+`fn::sfs_bits` and the `gate` field uses `math::floor` and `%`. Do not reach for
+`&`.
+
 ## Conventions
 
 - Async throughout. The library never owns a connection — the caller passes a
@@ -224,6 +256,9 @@ succession races it. `_query` retries anything the store marks retryable.
   has no caller to pass it one: Hermes hands a plugin sync handlers and no
   lifecycle hooks, so it connects per tool call from the `SURREALDB_*` env vars.
 - No working directory. Every path is absolute; `cd`/`pwd` do not exist.
+- Permissions are unix ones, enforced in `SurrealFs` and nowhere else. `user` is
+  a required constructor argument; `ROOT` bypasses every check. Read
+  `docs/permissions.md` before touching `owner`, `mode` or `gate`.
 - The core returns dataclasses; only `tools/handlers.py` formats strings for a
   model.
 - Adding a tool means one entry in `surrealfs/tools/__init__.py`, an args model,

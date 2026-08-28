@@ -40,7 +40,7 @@ async def serve(host: str = "127.0.0.1", port: int = 7932) -> None:
     db = await connect()
     await apply_schema(db)
     agent = build_chat_agent()
-    app = agent.to_web(deps=ToolContext(fs=SurrealFs(db), embed=embed))
+    app = agent.to_web(deps=ToolContext(fs=SurrealFs(db, user="demo"), embed=embed))
     try:
         await uvicorn.Server(uvicorn.Config(app, host=host, port=port)).serve()
     finally:

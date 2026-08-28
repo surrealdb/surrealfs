@@ -143,6 +143,23 @@ async def test_tools_round_trip_through_dispatch(ctx):
     )
 
 
+async def test_chmod_round_trips_through_dispatch(ctx):
+    await call_tool(ctx, "write_file", {"path": "/a.md", "content": "hi"})
+    assert "Mode 700 on 1 item" in await call_tool(
+        ctx, "chmod", {"path": "/a.md", "mode": "700"}
+    )
+    assert "-rwx------" in await call_tool(ctx, "ls", {"path": "/"})
+    # Octal, not decimal: "700" must not become 700.
+    assert "Error" in await call_tool(ctx, "chmod", {"path": "/a.md", "mode": "800"})
+
+
+async def test_ls_shows_mode_and_owner(ctx):
+    await call_tool(ctx, "write_file", {"path": "/notes.md", "content": "hi"})
+    line = await call_tool(ctx, "ls", {"path": "/"})
+    assert line.startswith("-rw-rw-rw-  root")
+    assert line.endswith("/notes.md")
+
+
 async def test_binary_tools_use_base64(ctx):
     payload = base64.b64encode(b"\x89PNG\x00\xff").decode()
     await call_tool(

@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 from surrealfs import SurrealFs
+from surrealfs.fs import ROOT as ROOT_USER
 from surrealfs.integrations import _connect, hermes_memory
 from surrealfs.integrations.hermes_memory import SurrealFsMemory, register
 from surrealfs.integrations.hermes_memory import cli as memory_cli
@@ -70,7 +71,7 @@ def _filed(prefix: str = MEMORIES) -> dict[str, str]:
 
     async def go() -> dict[str, str]:
         async with _connect.connected() as db:
-            fs = SurrealFs(db)
+            fs = SurrealFs(db, user=ROOT_USER)
             # `glob` does not return content, so read each hit back.
             return {
                 e.path: await fs.read_text(e.path)
@@ -352,7 +353,7 @@ def test_another_agents_home_is_never_recalled(memory):
 
     async def seed() -> None:
         async with _connect.connected() as db:
-            fs = SurrealFs(db)
+            fs = SurrealFs(db, user=ROOT_USER)
             for path in (
                 "/home/hermes-alice/memories/default/2026-01-01/sess-a-120000000.md",
                 "/home/hermes-alice/todo.md",  # another agent's scratch, not just turns
@@ -377,7 +378,7 @@ def test_the_agents_own_home_is_recalled_but_not_its_other_profiles(memory):
 
     async def seed() -> None:
         async with _connect.connected() as db:
-            fs = SurrealFs(db)
+            fs = SurrealFs(db, user=ROOT_USER)
             await fs.write_text(f"{HOME}/todo.md", "The flywheel spins.")
             await fs.write_text(
                 f"{MEMORIES}/work/2026-01-01/sess-w-120000000.md",
@@ -397,7 +398,7 @@ def test_prefetch_recalls_from_the_whole_filesystem(memory):
 
     async def seed() -> None:
         async with _connect.connected() as db:
-            await SurrealFs(db).write_text(
+            await SurrealFs(db, user=ROOT_USER).write_text(
                 "/preferences/voice.md", "Prefers terse replies, no preamble."
             )
 
@@ -421,7 +422,7 @@ def test_recall_finds_the_note_that_answers_the_question(memory):
 
     async def seed() -> None:
         async with _connect.connected() as db:
-            fs = SurrealFs(db)
+            fs = SurrealFs(db, user=ROOT_USER)
             await fs.write_text("/preferences/voice.md", "Prefers terse replies.")
             await fs.write_text(
                 "/projects/acme/notes.md",
@@ -450,7 +451,9 @@ def test_recall_never_serves_this_conversation_back_to_itself(memory):
 
     async def seed() -> None:
         async with _connect.connected() as db:
-            await SurrealFs(db).write_text("/projects/acme.md", "The flywheel spins.")
+            await SurrealFs(db, user=ROOT_USER).write_text(
+                "/projects/acme.md", "The flywheel spins."
+            )
 
     asyncio.run(seed())
 
@@ -464,7 +467,7 @@ def test_filed_turns_cannot_crowd_the_notes_out_of_recall(memory):
 
     async def seed() -> None:
         async with _connect.connected() as db:
-            fs = SurrealFs(db)
+            fs = SurrealFs(db, user=ROOT_USER)
             for n in range(6):
                 await fs.write_text(
                     f"{MEMORIES}/default/2026-01-0{n + 1}/older-sess-1200000{n}.md",
@@ -521,7 +524,7 @@ def test_a_session_switch_tolerates_keywords_it_has_not_seen(memory):
 def _seed(path: str, body: str) -> None:
     async def go() -> None:
         async with _connect.connected() as db:
-            await SurrealFs(db).write_text(path, body)
+            await SurrealFs(db, user=ROOT_USER).write_text(path, body)
 
     asyncio.run(go())
 
@@ -537,7 +540,7 @@ def test_a_queued_recall_is_served_on_the_next_turn(memory):
 
     async def drop() -> None:
         async with _connect.connected() as db:
-            await SurrealFs(db).rm("/preferences/voice.md")
+            await SurrealFs(db, user=ROOT_USER).rm("/preferences/voice.md")
 
     asyncio.run(drop())
 

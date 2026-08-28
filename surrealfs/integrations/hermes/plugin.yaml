@@ -23,6 +23,7 @@ provides_tools:
   - surrealfs_cp
   - surrealfs_mv
   - surrealfs_rm
+  - surrealfs_chmod
   - surrealfs_search
 # Points the agent at the bundled `notes` skill on the first turn of a session.
 # Hermes lists plugin skills nowhere, so without this the skill is unreachable.

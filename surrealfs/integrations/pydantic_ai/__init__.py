@@ -13,7 +13,8 @@ Usage — the agent's deps carry the filesystem:
 
     agent = Agent("claude-sonnet-5", deps_type=ToolContext,
                   toolsets=[build_fs_toolset()])
-    await agent.run("Summarise my notes", deps=ToolContext(fs=SurrealFs(db)))
+    deps = ToolContext(fs=SurrealFs(db, user="alice"))
+    await agent.run("Summarise my notes", deps=deps)
 """
 
 from __future__ import annotations

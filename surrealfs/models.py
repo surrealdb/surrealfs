@@ -12,9 +12,20 @@ from typing import Any
 
 from surrealdb import RecordID
 
-__all__ = ["FileEntry", "SearchHit"]
+__all__ = ["FileEntry", "SearchHit", "format_mode"]
 
 FOLDER_CONTENT_TYPE = "inode/directory"
+
+
+def format_mode(mode: int, *, is_folder: bool = False) -> str:
+    """Mode bits as ``ls -l`` writes them: ``drwxr-x---``."""
+    out = ["d" if is_folder else "-"]
+    for shift in (6, 3, 0):
+        digit = (mode >> shift) & 7
+        out.append("r" if digit & 4 else "-")
+        out.append("w" if digit & 2 else "-")
+        out.append("x" if digit & 1 else "-")
+    return "".join(out)
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +35,10 @@ class FileEntry:
     ``content`` and ``data`` are only populated by the methods that fetch them
     (``read_text``/``read_bytes``); listing methods leave them ``None`` and set
     ``size`` instead.
+
+    ``gate`` is the schema's computed ancestry check: the owner of the nearest
+    directory above this row that is not world-traversable, or ``None`` when the
+    whole chain is. It is what lets a permission check cost no extra queries.
     """
 
     id: RecordID
@@ -31,12 +46,20 @@ class FileEntry:
     filename: str
     content_type: str
     is_folder: bool
+    owner: str = "root"
+    mode: int = 0o666
+    gate: str | None = None
     size: int = 0
     hash: str = ""
     content: str | None = None
     data: bytes | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+
+    @property
+    def permissions(self) -> str:
+        """Mode bits as ``ls -l`` writes them: ``drwxr-x---``."""
+        return format_mode(self.mode, is_folder=self.is_folder)
 
     @property
     def is_binary(self) -> bool:
@@ -56,6 +79,9 @@ class FileEntry:
             filename=row.get("filename", ""),
             content_type=row.get("content_type", ""),
             is_folder=bool(row.get("is_folder", False)),
+            owner=row.get("owner") or "root",
+            mode=int(row["mode"]) if row.get("mode") is not None else 0o666,
+            gate=row.get("gate"),
             size=int(size or 0),
             hash=row.get("hash") or "",
             content=content,

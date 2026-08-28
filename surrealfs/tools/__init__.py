@@ -68,6 +68,7 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("cp", _args.CpArgs, _handlers.cp),
     ToolSpec("mv", _args.MvArgs, _handlers.mv),
     ToolSpec("rm", _args.RmArgs, _handlers.rm),
+    ToolSpec("chmod", _args.ChmodArgs, _handlers.chmod),
     ToolSpec("search", _args.SearchArgs, _handlers.search),
 )
 

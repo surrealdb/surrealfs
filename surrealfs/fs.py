@@ -1,9 +1,17 @@
 """The SurrealFS core API.
 
 :class:`SurrealFs` wraps an already-connected ``AsyncSurreal`` handle. It never
-connects, signs in, or selects a namespace -- the caller owns the connection and
-therefore the authentication context that the ``file`` table's ``owner =
-$auth.id`` permissions key off.
+connects, signs in, or selects a namespace -- the caller owns the connection.
+
+Every instance acts as exactly one user, named at construction. That user is
+not discovered from the database: every shipped surface signs in as a
+root/namespace/database *system* credential, which bypasses table permissions
+entirely, so the identity has to come from the process that built the object.
+:data:`ROOT` bypasses every check, as it does on a real machine.
+
+This class is the enforcement boundary -- no tool exposes raw SurrealQL, so
+every path an agent has into the tree runs the checks below. See
+``docs/permissions.md``.
 """
 
 from __future__ import annotations
@@ -27,13 +35,33 @@ from .errors import (
     NotADirectory,
     NotATextFile,
     NotFound,
+    PermissionDenied,
     QueryError,
 )
 from .models import FOLDER_CONTENT_TYPE, FileEntry, SearchHit
 
-__all__ = ["SurrealFs", "raise_for_status"]
+__all__ = [
+    "ROOT",
+    "SurrealFs",
+    "default_mode",
+    "default_owner",
+    "home_owner",
+    "raise_for_status",
+]
+
+# The user that bypasses every permission check, as uid 0 does on a real
+# machine. The indexer runs as this -- it has to read every file to embed it --
+# and so does the browser, which is an admin view over the whole tree.
+ROOT = "root"
+
+READ, WRITE, EXEC = 4, 2, 1
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# How much wider than `k` a non-root vector search casts, so that the
+# permission filter -- which HNSW applies only after its own cut -- still has k
+# readable rows left to return.
+_KNN_OVERFETCH = 4
 
 _MAX_RETRIES = 5
 _RETRY_BACKOFF = 0.02  # seconds; doubles per attempt
@@ -73,11 +101,46 @@ def _parent_key(parent_id: RecordID | None) -> str:
     return ROOT_KEY if parent_id is None else str(parent_id)
 
 
-# Every field the model layer needs. `path` and `is_folder` are COMPUTED, so
-# selecting them costs a parent-chain walk per row -- worth it, and the only way
-# to get a path at all.
+def home_owner(path: str, *, is_folder: bool) -> str | None:
+    """The user whose home ``path`` is, or ``None`` if it is not a home.
+
+    A home is any folder directly under ``/home`` -- ``/home/alice`` is alice's,
+    and nothing deeper is a home of its own.
+    """
+    if is_folder and paths.parent_of(path) == paths.HOME_ROOT:
+        return paths.basename(path)
+    return None
+
+
+def default_mode(path: str, *, is_folder: bool) -> int:
+    """The mode a newly created file or folder gets.
+
+    Half of the default policy. A home is private; everything else is shared
+    read-write, which is what the tree already was before permissions existed.
+    `chmod` is how you tighten something, not how you open it up.
+    """
+    if home_owner(path, is_folder=is_folder) is not None:
+        return 0o700
+    return 0o777 if is_folder else 0o666
+
+
+def default_owner(path: str, *, is_folder: bool, creator: str) -> str:
+    """Who a newly created file or folder belongs to.
+
+    The other half, and the reason it is not simply the creator: a home belongs
+    to the user it is named after, whoever runs the `mkdir`. Without this, root
+    seeding `/home/alice` -- the indexer, the browser, a migration -- would lock
+    alice out of her own home, and there is no `chown` to undo it with.
+    """
+    return home_owner(path, is_folder=is_folder) or creator
+
+
+# Every field the model layer needs. `path`, `is_folder` and `gate` are
+# COMPUTED, so selecting them costs a parent-chain walk per row -- worth it, and
+# the only way to get a path or an ancestry check at all.
 _FIELDS = (
-    "id, filename, path, content_type, is_folder, hash, created_at, updated_at, "
+    "id, filename, path, content_type, is_folder, owner, mode, gate, "
+    "hash, created_at, updated_at, "
     "IF content IS NOT NONE THEN string::len(content) "
     "ELSE IF file IS NOT NONE THEN bytes::len(file) "
     "ELSE 0 END AS size"
@@ -120,14 +183,64 @@ class SurrealFs:
     Args:
         db: A connected ``AsyncSurreal`` handle (signed in, namespace/database
             selected). Not owned by this object -- closing it is the caller's job.
+        user: Who this filesystem acts as. Required, with no default: the
+            database cannot tell us (every surface signs in as a system
+            credential), and guessing wrong is either a lockout or a leak.
+            :data:`ROOT` bypasses every check.
         table: Table name, if you renamed it in the schema.
     """
 
-    def __init__(self, db: Any, *, table: str = "file") -> None:
+    def __init__(self, db: Any, *, user: str, table: str = "file") -> None:
         if not _IDENT.match(table):
             raise InvalidPath(f"invalid table name: {table!r}")
+        if not user or not user.strip():
+            raise InvalidPath("user must be a non-empty username, or ROOT")
         self.db = db
         self.table = table
+        self.user = user
+        self.is_root = user == ROOT
+
+    # ------------------------------------------------------------ permissions
+
+    def _bits(self, entry: FileEntry) -> int:
+        """The octal digit that applies to this user. Mirrors `fn::sfs_bits`."""
+        if entry.owner == self.user:
+            return (entry.mode >> 6) & 7
+        return entry.mode & 7
+
+    def _allowed(self, entry: FileEntry, need: int) -> bool:
+        if self.is_root:
+            return True
+        # `gate` is the ancestry check: the owner of the nearest directory above
+        # this row that is not world-traversable. Non-NONE and not ours means
+        # some parent is closed, and nothing below it is reachable whatever its
+        # own bits say.
+        if entry.gate is not None and entry.gate != self.user:
+            return False
+        return self._bits(entry) & need == need
+
+    def _check(self, entry: FileEntry, need: int, verb: str) -> None:
+        if not self._allowed(entry, need):
+            raise PermissionDenied(f"Permission denied: cannot {verb} {entry.path}")
+
+    def _readable(self, where: str) -> tuple[str, dict[str, Any]]:
+        """Add the read predicate to a bulk query's WHERE clause.
+
+        `ls`, `glob` and both search arms return many rows without resolving any
+        of them, so they cannot be filtered row by row in Python -- and `search`
+        returns file *content*, which makes a missed filter a disclosure rather
+        than a cosmetic bug. The predicate is `fn::sfs_can_read` in
+        `schema/file.surql`, so the rule is written once.
+
+        Root gets the query untouched, which keeps its plans exactly as they
+        were before permissions existed.
+        """
+        if self.is_root:
+            return where, {}
+        return (
+            f"({where}) AND fn::sfs_can_read(gate, owner, mode, $me)",
+            {"me": self.user},
+        )
 
     # ---------------------------------------------------------------- querying
 
@@ -184,28 +297,77 @@ class SurrealFs:
         return FileEntry.from_row(row) if row else None
 
     async def _require(self, path: str, *, fields: str = _FIELDS) -> FileEntry:
+        """Resolve a path, or raise. Enforces ancestry, not the row's own bits.
+
+        `gate` covers every directory above the row in one column, so this costs
+        no extra queries. What the caller may then *do* with the row is its own
+        check -- `stat` needs nothing further, `cat` needs read.
+        """
         entry = await self._resolve(path, fields=fields)
         if entry is None:
             raise NotFound(f"No such file or directory: {paths.normalize(path)}")
+        if not self.is_root and entry.gate is not None and entry.gate != self.user:
+            raise PermissionDenied(f"Permission denied: {entry.path}")
         return entry
 
-    async def _require_file(self, path: str, *, fields: str = _FIELDS) -> FileEntry:
+    async def _require_file(
+        self, path: str, *, fields: str = _FIELDS, need: int = READ, verb: str = "read"
+    ) -> FileEntry:
         entry = await self._require(path, fields=fields)
         if entry.is_folder:
             raise IsADirectory(f"Is a directory: {entry.path}")
+        self._check(entry, need, verb)
         return entry
 
-    async def _parent_id(self, path: str) -> RecordID | None:
-        """Record id of ``path``'s parent folder, or ``None`` if it is root."""
+    async def _parent_id(self, path: str, *, write: bool = False) -> RecordID | None:
+        """Record id of ``path``'s parent folder, or ``None`` if it is root.
+
+        With ``write``, also require the bits unix requires to create, remove or
+        rename an entry *in* that folder: write and execute on the folder, and
+        nothing at all on the entry itself.
+        """
         parent_path = paths.parent_of(path)
         if parent_path == "/":
+            # The root is not a row (see `_resolve`). It behaves as 0777 owned
+            # by root, so anyone may create a top-level entry.
+            self._guard_home(path)
             return None
-        parent = await self._resolve(parent_path)
-        if parent is None:
-            raise NotFound(f"No such file or directory: {parent_path}")
+        parent = await self._require(parent_path)
         if not parent.is_folder:
             raise NotADirectory(f"Not a directory: {parent.path}")
+        if write:
+            self._check(parent, WRITE | EXEC, "write to")
+            self._guard_home(path)
         return parent.id
+
+    async def _require_writable_dir(self, folder: str, new_path: str) -> None:
+        """Require the bits needed to create ``new_path`` inside ``folder``.
+
+        A folder that does not exist yet is not an error here: the callers that
+        allow it go on to `mkdir` the chain, which runs this check on each
+        ancestor it actually creates.
+        """
+        if folder != "/":
+            existing = await self._resolve(folder)
+            if existing is not None:
+                self._check(existing, WRITE | EXEC, "write to")
+        self._guard_home(new_path)
+
+    def _guard_home(self, path: str) -> None:
+        """Refuse to create somebody else's home directory.
+
+        `/home` is 0777 like the rest of the shared tree, so without this anyone
+        could squat `/home/alice` before alice first connects and would own it
+        -- and owning it means reading everything she later puts in it.
+        """
+        if self.is_root:
+            return
+        normalized = paths.normalize(path)
+        if paths.parent_of(normalized) == paths.HOME_ROOT:
+            if paths.basename(normalized) != self.user:
+                raise PermissionDenied(
+                    f"Permission denied: {normalized} is not your home directory"
+                )
 
     # -------------------------------------------------------------------- read
 
@@ -254,6 +416,7 @@ class SurrealFs:
             folder = await self._require(normalized)
             if not folder.is_folder:
                 raise NotADirectory(f"Not a directory: {folder.path}")
+            self._check(folder, READ | EXEC, "list")
             root_id = folder.id
 
         out: list[FileEntry] = []
@@ -265,10 +428,18 @@ class SurrealFs:
                 {"keys": frontier},
             )
             entries = [FileEntry.from_row(row) for row in (rows or [])]
+            # Unfiltered on purpose: unix needs `r` on the *folder* to list it,
+            # and then names every child whatever its own bits say -- `ls /home`
+            # shows every user's home. Only the descent is filtered, so a
+            # recursive walk stops at a folder it may not enter.
             out.extend(entries)
             if not recursive:
                 break
-            frontier = [_parent_key(e.id) for e in entries if e.is_folder]
+            frontier = [
+                _parent_key(e.id)
+                for e in entries
+                if e.is_folder and self._allowed(e, READ | EXEC)
+            ]
         out.sort(key=lambda e: e.path)
         return out
 
@@ -281,10 +452,10 @@ class SurrealFs:
         """
         prefix = paths.literal_prefix(pattern)
         regex = paths.glob_to_regex(pattern)
+        where, extra = self._readable("string::starts_with(path, $prefix)")
         rows = await self._query(
-            f"SELECT {_FIELDS} FROM {self.table} "
-            "WHERE string::starts_with(path, $prefix) ORDER BY path",
-            {"prefix": prefix},
+            f"SELECT {_FIELDS} FROM {self.table} WHERE {where} ORDER BY path",
+            {"prefix": prefix, **extra},
         )
         matches = [FileEntry.from_row(row) for row in (rows or [])]
         return [e for e in matches if regex.match(e.path)]
@@ -308,6 +479,9 @@ class SurrealFs:
                     raise AlreadyExists(f"Not a directory: {partial}")
                 if is_last:
                     raise AlreadyExists(f"File exists: {partial}")
+                # Descending through it, so we need to be able to traverse it;
+                # the write bit is checked on whichever folder we create in.
+                self._check(existing, EXEC, "enter")
                 parent_id = existing.id
                 continue
             if not is_last and not parents:
@@ -315,7 +489,10 @@ class SurrealFs:
                     f"No such file or directory: {partial}. "
                     "Pass parents=True to create it."
                 )
-            created = await self._create(segment, parent_id, FOLDER_CONTENT_TYPE)
+            await self._require_writable_dir(paths.parent_of(partial), partial)
+            created = await self._create(
+                segment, parent_id, FOLDER_CONTENT_TYPE, path=partial
+            )
             parent_id = created.id
 
         assert created is not None  # the last segment always exists or is created
@@ -327,13 +504,24 @@ class SurrealFs:
         parent_id: RecordID | None,
         content_type: str,
         *,
+        path: str,
         content: str | None = None,
         data: bytes | None = None,
+        mode: int | None = None,
     ) -> FileEntry:
+        """Insert one row, stamped with this user and a default mode.
+
+        ``path`` is passed in rather than derived because the schema computes it
+        from the parent chain only *after* the row exists, and `default_mode`
+        has to know whether this is a home directory before then.
+        """
+        is_folder = content is None and data is None
         payload: dict[str, Any] = {
             "filename": filename,
             "parent": parent_id,
             "content_type": content_type,
+            "owner": default_owner(path, is_folder=is_folder, creator=self.user),
+            "mode": default_mode(path, is_folder=is_folder) if mode is None else mode,
         }
         if content is not None:
             payload["content"] = content
@@ -349,15 +537,19 @@ class SurrealFs:
     async def _ensure_parent(self, path: str, *, create: bool) -> RecordID | None:
         parent_path = paths.parent_of(path)
         if parent_path == "/":
+            self._guard_home(path)
             return None
         if create:
             existing = await self._resolve(parent_path)
             if existing is None:
+                # mkdir runs the same checks on the way down.
                 return (await self.mkdir(parent_path, parents=True)).id
             if not existing.is_folder:
                 raise NotADirectory(f"Not a directory: {parent_path}")
+            self._check(existing, WRITE | EXEC, "write to")
+            self._guard_home(path)
             return existing.id
-        return await self._parent_id(path)
+        return await self._parent_id(path, write=True)
 
     async def write_text(
         self,
@@ -378,6 +570,7 @@ class SurrealFs:
         if existing is not None:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
+            self._check(existing, WRITE, "write to")
             rows = await self._query(
                 f"UPDATE $id SET content = $content, file = NONE, "
                 f"content_type = $content_type RETURN {_FIELDS}",
@@ -391,7 +584,9 @@ class SurrealFs:
             return FileEntry.from_row(row)
 
         parent_id = await self._ensure_parent(normalized, create=create_parents)
-        return await self._create(filename, parent_id, resolved_type, content=content)
+        return await self._create(
+            filename, parent_id, resolved_type, path=normalized, content=content
+        )
 
     async def write_bytes(
         self,
@@ -411,6 +606,7 @@ class SurrealFs:
         if existing is not None:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
+            self._check(existing, WRITE, "write to")
             rows = await self._query(
                 f"UPDATE $id SET file = $data, content = NONE, "
                 f"content_type = $content_type RETURN {_FIELDS}",
@@ -420,7 +616,9 @@ class SurrealFs:
             return FileEntry.from_row(row)
 
         parent_id = await self._ensure_parent(normalized, create=create_parents)
-        return await self._create(filename, parent_id, content_type, data=data)
+        return await self._create(
+            filename, parent_id, content_type, path=normalized, data=data
+        )
 
     async def touch(self, path: str, *, create_parents: bool = True) -> FileEntry:
         """Create an empty file if it does not exist; otherwise leave it alone.
@@ -440,7 +638,9 @@ class SurrealFs:
         self, path: str, old: str, new: str, *, replace_all: bool = False
     ) -> str:
         """Replace text in a file and return a unified diff of the change."""
-        entry = await self._require_file(path, fields=_FIELDS_WITH_CONTENT)
+        entry = await self._require_file(
+            path, fields=_FIELDS_WITH_CONTENT, need=READ | WRITE, verb="edit"
+        )
         if entry.content is None:
             raise NotATextFile(f"Not a text file ({entry.content_type}): {entry.path}")
         if old == "":
@@ -476,10 +676,14 @@ class SurrealFs:
             raise InvalidPath(
                 f"cannot move {entry.path} into its own subtree ({dst_normalized})"
             )
+        # Removing the entry from its old folder is a write to that folder --
+        # unix keys rename on the two directories, not on the file. Both checks
+        # run before the existence probe below, so a destination this user
+        # cannot write to cannot be used to discover what is already in it.
+        await self._require_writable_dir(paths.parent_of(entry.path), entry.path)
+        parent_id = await self._parent_id(dst_normalized, write=True)
         if await self._resolve(dst_normalized) is not None:
             raise AlreadyExists(f"File exists: {dst_normalized}")
-
-        parent_id = await self._parent_id(dst_normalized)
         rows = await self._query(
             f"UPDATE $id SET filename = $filename, parent = $parent RETURN {_FIELDS}",
             {"id": entry.id, "filename": filename, "parent": parent_id},
@@ -490,10 +694,14 @@ class SurrealFs:
     async def cp(self, src: str, dst: str, *, recursive: bool = False) -> FileEntry:
         """Copy a file, or a whole folder with ``recursive=True``."""
         entry = await self._require(src, fields=_FIELDS_WITH_CONTENT)
+        self._check(entry, READ, "read")
         dst_normalized = paths.normalize(dst)
         filename = paths.basename(dst_normalized)
         if not filename:
             raise InvalidPath("cannot copy onto the root directory")
+        await self._require_writable_dir(
+            paths.parent_of(dst_normalized), dst_normalized
+        )
         if await self._resolve(dst_normalized) is not None:
             raise AlreadyExists(f"File exists: {dst_normalized}")
 
@@ -503,8 +711,10 @@ class SurrealFs:
                 filename,
                 parent_id,
                 entry.content_type,
+                path=dst_normalized,
                 content=entry.content,
                 data=entry.data,
+                mode=entry.mode,
             )
 
         if not recursive:
@@ -524,10 +734,12 @@ class SurrealFs:
                 source = await self._require(child.path, fields=_FIELDS_WITH_CONTENT)
                 await self._create(
                     paths.basename(target),
-                    await self._parent_id(target),
+                    await self._parent_id(target, write=True),
                     source.content_type,
+                    path=target,
                     content=source.content,
                     data=source.data,
+                    mode=source.mode,
                 )
         return root
 
@@ -541,6 +753,9 @@ class SurrealFs:
         Returns the number of records removed.
         """
         entry = await self._require(path)
+        # Unix keys deletion on the containing folder, not on the entry: a
+        # read-only file in a folder you can write is yours to remove.
+        await self._require_writable_dir(paths.parent_of(entry.path), entry.path)
         if not entry.is_folder:
             await self._query("DELETE $id", {"id": entry.id})
             return 1
@@ -553,6 +768,37 @@ class SurrealFs:
         ids.append(entry.id)
         await self._query("DELETE $ids", {"ids": ids})
         return len(ids)
+
+    async def chmod(self, path: str, mode: int, *, recursive: bool = False) -> int:
+        """Change the mode bits of a file or folder. Returns the count changed.
+
+        Only the owner and root may. Unix allows no more than that, and allowing
+        more here would make every other check pointless: anyone who can chmod
+        a folder can open it and read what is inside.
+
+        With ``recursive``, applies the same mode to everything underneath, like
+        ``chmod -R``. The listing it walks is itself permission-filtered, so this
+        cannot reach into a subtree the caller could not otherwise see.
+        """
+        if not 0 <= mode <= 0o777:
+            raise ValueError(f"mode must be between 0o000 and 0o777, got {mode:o}")
+
+        entry = await self._require(path)
+        targets = [entry]
+        if recursive and entry.is_folder:
+            targets += await self.ls(entry.path, recursive=True)
+
+        for target in targets:
+            if not self.is_root and target.owner != self.user:
+                raise PermissionDenied(
+                    f"Permission denied: {target.path} is owned by {target.owner}"
+                )
+
+        await self._query(
+            "UPDATE $ids SET mode = $mode",
+            {"ids": [t.id for t in targets], "mode": mode},
+        )
+        return len(targets)
 
     # ------------------------------------------------------------------ search
 
@@ -595,12 +841,18 @@ class SurrealFs:
         # "prefer" matched the file and then ranked it below files that did not
         # answer the question at all. `LET` plus a `$terms` column keeps this to
         # one round trip, since `_query` hands back the last statement.
+        where, extra = self._readable(f"content {operator} $query")
         rows = await self._query(
             "LET $terms = search::analyze($analyzer, $text);\n"
             f"SELECT {_FIELDS_WITH_CONTENT}, "
             "search::analyze($analyzer, content) AS tokens, $terms AS terms "
-            f"FROM {self.table} WHERE content {operator} $query",
-            {"query": query, "text": " ".join(words), "analyzer": ANALYZER},
+            f"FROM {self.table} WHERE {where}",
+            {
+                "query": query,
+                "text": " ".join(words),
+                "analyzer": ANALYZER,
+                **extra,
+            },
         )
         rows = rows or []
         if not rows:
@@ -643,15 +895,23 @@ class SurrealFs:
         k_literal, ef_literal = int(k), int(ef)
         if k_literal <= 0 or ef_literal <= 0:
             raise ValueError("k and ef must be positive")
+        # HNSW cuts to k *before* the permission predicate filters, so asking for
+        # k neighbours would return fewer than k readable ones. Over-fetch, then
+        # trim back in Python.
+        wanted = k_literal
+        if not self.is_root:
+            k_literal *= _KNN_OVERFETCH
+            ef_literal = max(ef_literal, k_literal)
+        where, extra = self._readable(f"embedding <|{k_literal},{ef_literal}|> $vector")
         rows = await self._query(
             f"SELECT {_FIELDS_WITH_CONTENT}, vector::distance::knn() AS distance "
             f"FROM {self.table} "
-            f"WHERE embedding <|{k_literal},{ef_literal}|> $vector "
+            f"WHERE {where} "
             "ORDER BY distance ASC",
-            {"vector": list(vector)},
+            {"vector": list(vector), **extra},
         )
         hits: list[SearchHit] = []
-        for row in rows or []:
+        for row in (rows or [])[:wanted]:
             entry = FileEntry.from_row(row)
             hits.append(
                 SearchHit(

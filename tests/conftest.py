@@ -27,6 +27,7 @@ import pytest
 from surrealdb import AsyncSurreal
 
 from surrealfs import SurrealFs, apply_schema
+from surrealfs.fs import ROOT as ROOT_USER
 from surrealfs.tools import ToolContext
 
 ROOT = {"username": "root", "password": "root"}
@@ -123,7 +124,14 @@ async def db(surreal_url, request):
 
 @pytest.fixture
 def fs(db) -> SurrealFs:
-    return SurrealFs(db)
+    """The filesystem as root: no permission checks, for tests about everything else."""
+    return SurrealFs(db, user=ROOT_USER)
+
+
+@pytest.fixture
+def as_user(db):
+    """Build a filesystem acting as a named user, for the permission tests."""
+    return lambda name: SurrealFs(db, user=name)
 
 
 @pytest.fixture

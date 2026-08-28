@@ -68,12 +68,18 @@ profile's own `.env`.
 outside `/home` altogether. `_is_mine` is written to stay correct when it points
 somewhere with no home in it.
 
-**Recall drops whole homes, not just their `memories/`.** The narrower rule was
+**Recall dropped whole homes, not just their `memories/`.** The narrower rule was
 tempting — it preserves the "notes are shared, transcripts are not" line below
 verbatim — but a home is working space: an agent's scratch, to-dos, and half-finished
 drafts are not addressed to anyone else, and on a shared database "anyone else"
 now means other people. Everything outside `/home/` stays shared, and that is where
 the notes skill already points curated notes, so the handover path is unchanged.
+
+*Superseded:* homes are now enforced by the filesystem — `/home/<user>` is created
+`0700`, so another agent's home never reaches `_is_mine` in the first place, and
+`search` cannot return one. The clause was deleted rather than left as dead code.
+What stays is the sibling-*profile* rule below: those share an owner, so no file
+permission can tell them apart. See `docs/permissions.md`.
 
 Legacy `/memory/` is excluded explicitly rather than migrated. Left in, it would not
 merely go quiet: it sits outside the new memories dir, so `_rank` would read those
@@ -88,10 +94,10 @@ Turns are written under `<memories>/<profile>/`, and `_is_mine` drops other prof
 folders from recall.
 
 Both segments earn their place: the home separates agents, which have different
-owners; the profile separates one agent's own configurations, which share an account
-and a home. Ordering matters in `_is_mine` because of that nesting — the sibling
-profile test has to run before the home test, or another profile's transcripts read
-as ordinary files in a home that really is this agent's.
+owners — and now literally different file owners; the profile separates one agent's
+own configurations, which share an account and a home, and therefore share a file
+owner too. That is precisely why the profile rule cannot be handed to the
+filesystem the way the home rule was.
 
 Three things this deliberately does not do:
 
