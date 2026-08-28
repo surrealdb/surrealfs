@@ -243,6 +243,17 @@ browser run as root because they are meant to see the whole tree.
 a root/namespace/database *system* credential bypasses table permissions
 entirely, so the identity comes from the process.
 
+### Upgrading a database that already has files
+
+The schema applies itself, but rows written before `owner` and `mode` existed
+need a one-off backfill — including closing any existing `/home/<user>`:
+
+```bash
+python -m surrealfs.schema --migrate
+```
+
+A fresh database needs nothing. See `surrealfs/schema/migrate_permissions.surql`.
+
 ### Letting the database enforce it too (optional)
 
 The above is a real boundary for an agent — no tool exposes raw SurrealQL — but

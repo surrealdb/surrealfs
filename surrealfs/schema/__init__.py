@@ -5,7 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-__all__ = ["FILE_SCHEMA", "RECORD_AUTH_SCHEMA", "apply_schema", "schema_sql"]
+__all__ = [
+    "FILE_SCHEMA",
+    "MIGRATE_PERMISSIONS",
+    "RECORD_AUTH_SCHEMA",
+    "apply_schema",
+    "migrate",
+    "schema_sql",
+]
 
 _DIR = Path(__file__).resolve().parent
 
@@ -14,6 +21,11 @@ FILE_SCHEMA: str = (_DIR / "file.surql").read_text(encoding="utf-8")
 
 RECORD_AUTH_SCHEMA: str = (_DIR / "record_auth.surql").read_text(encoding="utf-8")
 """Optional ``user`` table and record access, so the database enforces too."""
+
+MIGRATE_PERMISSIONS: str = (_DIR / "migrate_permissions.surql").read_text(
+    encoding="utf-8"
+)
+"""One-off backfill for databases holding rows older than ``owner``/``mode``."""
 
 
 def schema_sql(*, record_auth: bool = False) -> str:
@@ -34,3 +46,19 @@ async def apply_schema(db: Any, *, record_auth: bool = False) -> None:
     from ..fs import raise_for_status
 
     raise_for_status(await db.query_raw(schema_sql(record_auth=record_auth)))
+
+
+async def migrate(db: Any) -> None:
+    """Backfill an existing database for the permissions schema.
+
+    Run once, after :func:`apply_schema`, on a database that holds rows written
+    before ``owner`` and ``mode`` existed. Until it has run, every read of those
+    rows fails: ``gate`` is computed from the parent's mode, and they have none.
+
+    A fresh database does not need this, and running it there does nothing.
+    It is safe to re-run; see ``migrate_permissions.surql`` for what each step
+    guards against.
+    """
+    from ..fs import raise_for_status
+
+    raise_for_status(await db.query_raw(MIGRATE_PERMISSIONS))

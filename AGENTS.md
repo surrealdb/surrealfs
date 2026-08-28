@@ -16,7 +16,8 @@ surrealfs/
   errors.py         exception hierarchy (dual-inherits builtin OSErrors)
   paths.py          normalisation + glob->regex
   embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
-  schema/           file.surql, record_auth.surql, apply_schema()
+  schema/           file.surql, record_auth.surql,
+                    migrate_permissions.surql, apply_schema()
   users.py          `python -m surrealfs.users` — record-auth provisioning
   tools/            args.py, handlers.py, registry, docs/*.md
   browser/          the `surrealfs-browser` web UI — page.html, the Starlette
@@ -225,6 +226,16 @@ many rows without resolving them — `ls`, `glob`, `search_text`,
 `search_semantic` — each have to append `fn::sfs_can_read` via `self._readable`,
 and `search` returns file *content*, so forgetting one hands another user's
 notes to a model. `tests/test_permissions.py` asserts all four.
+
+**A row with no `mode` must stay readable-by-root, never error and never open.**
+`NONE % 2` raises, and `gate` is recomputed whenever a row is rewritten, so the
+natural behaviour takes down every read *and* `migrate_permissions.surql`
+itself. `fn::sfs_gate`, `fn::sfs_bits` and `FileEntry.from_row` all coalesce a
+missing owner to `root` and a missing mode to no bits. Keep the three in step.
+
+**`FOR $x IN (SELECT ...)` is rejected** with "Cannot execute statement using
+value: <first row>". Bind the subquery with `LET` first. Bit us in the
+migration.
 
 **The `file` table's PERMISSIONS clause says `fn::sfs_gate(parent)`, and
 "tidying" it to `gate` opens the whole tree — silently.** A table permission is

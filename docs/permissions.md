@@ -201,6 +201,46 @@ Our BM25 runs in Python over rows the database has already returned, so unlike
 `search::score` it cannot leak corpus statistics about documents the caller
 cannot see.
 
+## Rolling it onto an existing database
+
+The DDL applies itself — every statement is `OVERWRITE` or `IF NOT EXISTS`.
+Rows do not, and a database holding files written before `owner` and `mode`
+existed needs one command:
+
+```bash
+python -m surrealfs.schema --migrate
+```
+
+This is required, not advisory, and it announces itself: `gate` is computed
+from the parent's mode, so until every row has one, reads of the affected rows
+fail rather than quietly returning something wrong.
+
+`migrate_permissions.surql` does four things. It backfills `owner = 'root'` and
+the ordinary shared defaults, because that is what the tree already was and
+silently tightening somebody's existing files would break their agents. It then
+closes every `/home/<name>` to 0700 owned by the name it carries — the step
+that actually secures an existing tree — and hands each home's *contents* to
+that user too, or they could not `chmod` their own files. Finally it removes
+the `email` field and unique index left behind by the old
+`apply_schema(include_user=True)`: `DEFINE TABLE OVERWRITE` does not drop field
+definitions, so a stale required `email` makes `surrealfs.users add` fail.
+
+It is safe to re-run — each step is guarded, so a mode somebody has since
+changed with `chmod` is left alone.
+
+### Half-migrated is fail-closed, not fail-open, and not fatal
+
+A row with no `mode` is treated as belonging to root with no permission bits:
+`fn::sfs_gate` reads a mode-less parent as opaque, and `fn::sfs_bits` coalesces
+a missing owner to `root` and a missing mode to `0`. `FileEntry.from_row`
+coalesces the same way, so both implementations still agree.
+
+Three options were available and only one is right. Erroring — what `NONE % 2`
+does naturally — takes down every read *and the migration itself*, because
+rewriting a row recomputes `gate`. Treating a missing mode as traversable
+exposes the un-migrated tree. Treating it as root's own exposes nothing, keeps
+the database usable, and lets the backfill run in any order.
+
 ## Known ceilings
 
 Both are marked `ponytail:` where they live.

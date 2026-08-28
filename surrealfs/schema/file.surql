@@ -37,6 +37,12 @@ DEFINE FUNCTION OVERWRITE fn::sfs_me() {
 DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
     RETURN IF $parent IS NONE THEN NONE
         ELSE IF $parent.gate IS NOT NONE THEN $parent.gate
+        -- A row written before `mode` existed belongs to nobody but root until
+        -- `migrate_permissions.surql` has run. Treating a missing mode as
+        -- traversable would expose an un-migrated tree; erroring on it -- which
+        -- is what `NONE % 2` does -- takes the whole database down, including
+        -- the migration itself, because re-writing a row recomputes this.
+        ELSE IF $parent.mode IS NONE THEN ($parent.owner ?? 'root')
         ELSE IF $parent.mode % 2 = 0 THEN $parent.owner
         ELSE NONE END;
 };
@@ -56,16 +62,24 @@ DEFINE FUNCTION OVERWRITE fn::sfs_reachable($gate: option<string>, $me: option<s
 -- round-trips through `chmod`, but is never consulted -- nothing in SurrealFS
 -- has a group concept to consult it with. Add a group table if teams ever need
 -- a folder outsiders cannot see.
-DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: int, $me: option<string>) {
-    RETURN IF $owner = $me
-        THEN math::floor($mode / 64) % 8
-        ELSE $mode % 8
+-- `$owner` and `$mode` are optional for one reason only: a row written before
+-- those fields existed has neither, and it must fail *closed* -- no owner reads
+-- as root's, no mode as no permissions -- until
+-- `migrate_permissions.surql` has run. `SurrealFs.from_row` coalesces the same
+-- way, so the two implementations still agree.
+DEFINE FUNCTION OVERWRITE fn::sfs_bits(
+    $owner: option<string>, $mode: option<int>, $me: option<string>
+) {
+    RETURN IF ($owner ?? 'root') = $me
+        THEN math::floor(($mode ?? 0) / 64) % 8
+        ELSE ($mode ?? 0) % 8
     END;
 };
 
 -- Readable by `$me`: reachable through every ancestor, and the read bit set.
 DEFINE FUNCTION OVERWRITE fn::sfs_can_read(
-    $gate: option<string>, $owner: string, $mode: int, $me: option<string>
+    $gate: option<string>, $owner: option<string>, $mode: option<int>,
+    $me: option<string>
 ) {
     RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_bits($owner, $mode, $me) >= 4;
 };
