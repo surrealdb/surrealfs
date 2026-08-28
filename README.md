@@ -4,8 +4,8 @@
     <img width=120 src="https://raw.githubusercontent.com/surrealdb/icons/main/surreal.svg" />
 </p>
 
-<h1 align="center">SurrealFS</h1><br/>
-<p align="center">A filesystem for agents, backed by SurrealDB.</p>
+<h1 align="center">SurrealDB file system</h1><br/>
+<p align="center">A filesystem-based memory layer for agents, with hybrid search, backed by SurrealDB.</p>
 
 <br>
 
