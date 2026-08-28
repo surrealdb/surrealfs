@@ -16,7 +16,8 @@ surrealfs/
   errors.py         exception hierarchy (dual-inherits builtin OSErrors)
   paths.py          normalisation + glob->regex
   embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
-  schema/           file.surql, apply_schema()
+  schema/           file.surql, record_auth.surql, apply_schema()
+  users.py          `python -m surrealfs.users` — record-auth provisioning
   tools/            args.py, handlers.py, registry, docs/*.md
   browser/          the `surrealfs-browser` web UI — page.html, the Starlette
                     app, its chat agent, and the CLI in __main__.py
@@ -225,6 +226,15 @@ many rows without resolving them — `ls`, `glob`, `search_text`,
 and `search` returns file *content*, so forgetting one hands another user's
 notes to a model. `tests/test_permissions.py` asserts all four.
 
+**The `file` table's PERMISSIONS clause says `fn::sfs_gate(parent)`, and
+"tidying" it to `gate` opens the whole tree — silently.** A table permission is
+evaluated against the raw record *before* computed fields run, so a same-table
+COMPUTED field reads NONE there, and a NONE `gate` means "no closed ancestor",
+i.e. readable. Verified on 3.2.4. Traversing to a *linked* record is fine — a
+permission predicate reads links with permissions off and does compute their
+fields — which is why the indirection exists. The clause is inert under a system
+credential, so only `tests/test_record_auth.py` can catch a regression here.
+
 **`gate` is COMPUTED, so it cannot be indexed — and a COMPUTED field reading
 NULL through an index would silently disable filtering rather than error.** That
 is why the permission tests exercise the FULLTEXT and HNSW paths specifically,
@@ -257,8 +267,9 @@ expect, and it is easy to "fix" into a bug.
   lifecycle hooks, so it connects per tool call from the `SURREALDB_*` env vars.
 - No working directory. Every path is absolute; `cd`/`pwd` do not exist.
 - Permissions are unix ones, enforced in `SurrealFs` and nowhere else. `user` is
-  a required constructor argument; `ROOT` bypasses every check. Read
-  `docs/permissions.md` before touching `owner`, `mode` or `gate`.
+  a required constructor argument; `ROOT` bypasses every check. Record auth is
+  opt-in and adds a database-level backstop. Read `docs/permissions.md` before
+  touching `owner`, `mode`, `gate` or any `fn::sfs_*`.
 - The core returns dataclasses; only `tools/handlers.py` formats strings for a
   model.
 - Adding a tool means one entry in `surrealfs/tools/__init__.py`, an args model,

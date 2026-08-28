@@ -4,7 +4,7 @@ SurrealFS files carry a unix `owner` and `mode`. `/home/<user>` is private,
 everything else is shared, and `chmod` moves things between the two. This
 records why it is built the way it is.
 
-## Enforcement is in `SurrealFs`, not in a table PERMISSIONS clause
+## Enforcement is in `SurrealFs`, with the database as an optional backstop
 
 The `file` table used to carry `PERMISSIONS ... WHERE owner = $auth.id`, and it
 never did anything. Every surface — the browser, the Hermes plugin, the
@@ -12,26 +12,21 @@ indexer, the examples — signs in as a root, namespace or database *system*
 user, and those bypass table permissions entirely. `$auth.id` was NONE, so
 `owner` defaulted to NONE on every row ever written.
 
-The obvious fix is record authentication, and it was deliberately rejected once
-before (see the note this replaced in `integrations/_connect.py`): a person
-signed in as a `user` record would see only files that record owned, and
-everything the agents wrote would be invisible. That objection is dead now —
-shared-by-default is exactly what mode bits express — but the cost is not. It
-would mean provisioning a `user` row and a signin for every agent and every
-person, in every deployment, before anything worked at all.
+Record authentication would make the clause live, and it was rejected as the
+*default* — not as an option. Making it mandatory would mean provisioning a
+`user` row and a signin for every agent and every person, in every deployment,
+before anything worked at all. Most people running SurrealFS have one agent and
+one database and need none of that.
 
 So the checks live in `SurrealFs`. That is a real boundary rather than a
 courtesy one, for a specific reason: **no tool exposes raw SurrealQL**. The
-fourteen tools, the browser and every integration all funnel through this one
+fifteen tools, the browser and every integration all funnel through this one
 class, so an agent has no path into the tree that skips it.
 
-What this does *not* defend against is someone querying the database directly
-with the same credentials. That is the same trust boundary the browser already
-documents — anyone who can reach the port has whatever access the credentials
-do — and it is a deployment question, not a code one. The `user` table, the
-`account` record access and the `--include-user` flag were all deleted rather
-than left lying around: nothing used them, and a permission system with two
-half-wired enforcement points is worse than one with a clear boundary.
+What that alone does *not* defend against is someone querying the database
+directly with the credential. For deployments that care — several agents, one
+database — record auth closes it, opt-in, and the section at the end of this
+document describes it.
 
 ## Identity is required, and comes from the process
 
@@ -111,6 +106,100 @@ fails loudly rather than silently doing something harmless.
 surprises people, and it is what unix does: a read-only file in a folder you can
 write is yours to remove. Agents rely on it more than they realise — it is why
 `rm` on a 0444 file in a shared folder works.
+
+## Record auth, optionally
+
+`apply_schema(db, record_auth=True)` plus `python -m surrealfs.users add alice`
+plus `SURREALDB_AUTH_LEVEL=record` makes SurrealDB enforce the tree itself, so
+the credential alone is no longer a way around the mode bits.
+
+**There is almost nothing extra to maintain, by construction.** The rule already
+lived once, in `fn::sfs_can_read`. The table's PERMISSIONS clause calls the same
+function the four bulk queries in `fs.py` call, substituting the signed-in user
+for `$me`. Two small extractions made that possible, and both *reduced* the
+total expression: the ancestry rule moved into `fn::sfs_gate($parent)`, shared
+by the `gate` COMPUTED field and the clause; and "who is asking" moved into
+`fn::sfs_me()`, shared by the clause and `resolve_user()`.
+
+The clause is defined **unconditionally**. A table permission is inert for
+system users, so it costs non-adopters nothing and there is no conditional DDL
+to keep in step. `record_auth.surql` adds only the identity half.
+
+### The clause must say `fn::sfs_gate(parent)`, never `gate`
+
+This is the one line to be careful with, and the failure is silent.
+
+SurrealDB evaluates a table permission against the **raw record, before
+computed fields run**. `gate` is a COMPUTED field on `file`, so inside `file`'s
+own clause it reads NONE — and NONE means "no closed ancestor", which means
+readable. Verified on 3.2.4: the naive version hands every private file to
+every record user, with no error. It **fails open**.
+
+Traversing to a *linked* record is the opposite: a permission predicate reads
+links with permissions off (`skip_fetch_perms`), and that path explicitly does
+compute the fetched record's computed fields. So `fn::sfs_gate(parent)` resolves
+correctly and recurses the whole way up. The same flag is what stops the
+recursion looping — a nested permission check encountered while already inside
+one returns true rather than re-entering.
+
+`tests/test_record_auth.py` covers a four-deep chain specifically so that
+"tidying" the clause back to `gate` fails a test instead of opening the tree.
+
+### The two layers do different jobs
+
+| | Python (`SurrealFs`) | The PERMISSIONS clause |
+|---|---|---|
+| `select` | exact unix bits | exact — the same `fn::sfs_can_read` |
+| create / update / delete | exact unix bits | reachability only |
+
+Writes are deliberately looser in the database, and the reason is that unix
+keys `rm` and `mv` on the **containing directory**, not on the file. A
+row-level clause cannot see the directory without traversing to it, and an
+exact one would start *rejecting operations Python allows* — removing a 0444
+file from a folder you can write, for instance. A conflict between the layers
+is a confusing error, not a safe failure. Reachability-only can never conflict,
+because Python is strictly stricter, and it still guarantees the thing that
+matters: **nothing inside another user's private subtree can be touched.**
+
+What it does not cover is the mode bits on files in *shared* folders against an
+attacker writing raw SurrealQL. Python covers those; the database does not.
+
+### Two behaviours that differ under record auth
+
+Both are stricter, never looser, and both are asserted in the tests.
+
+*Listing hides names.* `ls /home` shows every user's home under a system
+credential — unix lists a directory you can read, whatever the entries' own
+modes say. Under record auth the database filters per row, so other homes
+vanish entirely. Matching it would mean granting select on any child of a
+readable folder, which would expose the *content* of a 0600 file in a shared
+folder. Hiding the name is the better trade.
+
+*Errors are vaguer.* `_resolve` walks a path segment by segment. When the
+database hides an intermediate folder the walk dead-ends, so you get `NotFound`
+where a system credential would resolve the row and raise `PermissionDenied`.
+Less informative, and it leaks less.
+
+### No SIGNUP
+
+Self-service registration would let anyone claim any unused username, and
+`/home/<name>` belongs to the name it carries — so registering `alice` would
+hand over alice's home. That is exactly the squatting hole `_guard_home` closes
+on the Python side. Provisioning is an admin operation against a system
+credential, which is also why the `user` table's own permissions are
+`FOR create, update, delete NONE`.
+
+The username **is** the record id (`user:alice`). That keeps `fn::sfs_me()` a
+pure read of `$auth` with no row fetch — `$auth` is bound to a record *id*, not
+an object, so dereferencing a field on it outside a permission clause would
+re-enter the `user` table's permissions — and it means a username cannot drift
+from the home it names.
+
+### One thing we get for free
+
+Our BM25 runs in Python over rows the database has already returned, so unlike
+`search::score` it cannot leak corpus statistics about documents the caller
+cannot see.
 
 ## Known ceilings
 

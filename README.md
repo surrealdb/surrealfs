@@ -240,10 +240,33 @@ Only the owner may `chmod`. `ROOT` bypasses every check, and the indexer and the
 browser run as root because they are meant to see the whole tree.
 
 `user` is required on the constructor because the database cannot supply it —
-every shipped credential is a root/namespace/database *system* credential, and
-those bypass table permissions entirely. `docs/permissions.md` records why the
-checks live in Python, how the computed `gate` field does ancestor traversal in
-one column, and the two things deliberately left out.
+a root/namespace/database *system* credential bypasses table permissions
+entirely, so the identity comes from the process.
+
+### Letting the database enforce it too (optional)
+
+The above is a real boundary for an agent — no tool exposes raw SurrealQL — but
+not one against anyone holding the database credential. If several agents share
+a database, opt in:
+
+```bash
+python -m surrealfs.schema --record-auth   # adds the `user` table + record access
+python -m surrealfs.users add alice        # creates alice and /home/alice (0700)
+```
+
+```bash
+SURREALDB_AUTH_LEVEL=record SURREALDB_USER=alice SURREALDB_PASS=…
+```
+
+Now SurrealDB itself refuses to return or modify anything in another user's
+home, whatever query it is asked. Nothing else changes: the tools, the modes
+and `chmod` behave the same, and `SurrealFs` picks its identity up from the
+credential instead of the environment. Deployments that do not opt in are
+unaffected — the permissions clause is inert for system credentials.
+
+`docs/permissions.md` records why the checks live in Python, how the computed
+`gate` field does ancestor traversal in one column, what the database layer
+does and does not cover, and the two things deliberately left out.
 
 ## The schema
 

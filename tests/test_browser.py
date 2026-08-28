@@ -93,6 +93,9 @@ def test_session_paths_are_slugged_and_dated():
         ("namespace", {"username", "password", "namespace"}),
         ("database", {"username", "password", "namespace", "database"}),
         ("DATABASE", {"username", "password", "namespace", "database"}),
+        # Record signin is a different shape: an access method, and the
+        # credentials as `variables` matching the SIGNIN clause's $user/$pass.
+        ("record", {"namespace", "database", "access", "variables"}),
     ],
 )
 def test_the_signin_payload_matches_the_auth_level(monkeypatch, level, expected):
@@ -103,9 +106,18 @@ def test_the_signin_payload_matches_the_auth_level(monkeypatch, level, expected)
 
 
 def test_an_unknown_auth_level_is_rejected_by_name(monkeypatch):
-    monkeypatch.setenv("SURREALDB_AUTH_LEVEL", "record")
-    with pytest.raises(ValueError, match="root, namespace, database"):
+    monkeypatch.setenv("SURREALDB_AUTH_LEVEL", "wizard")
+    with pytest.raises(ValueError, match="root, namespace, database, record"):
         _connect._credentials()
+
+
+def test_the_record_payload_carries_the_access_method(monkeypatch):
+    monkeypatch.setenv("SURREALDB_AUTH_LEVEL", "record")
+    monkeypatch.setenv("SURREALDB_USER", "alice")
+    monkeypatch.setenv("SURREALDB_PASS", "hunter2")
+    creds = _connect._credentials()
+    assert creds["access"] == _connect.RECORD_ACCESS
+    assert creds["variables"] == {"user": "alice", "pass": "hunter2"}
 
 
 @pytest.mark.asyncio

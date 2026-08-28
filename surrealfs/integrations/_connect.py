@@ -34,13 +34,20 @@ from websockets.exceptions import ConnectionClosed
 
 from ..schema import apply_schema
 
-__all__ = ["agent_user", "connect", "connected"]
+__all__ = ["agent_user", "connect", "connected", "resolve_user"]
 
-# Which kind of user the credentials belong to. All three are *system* users, so
-# they bypass table permissions entirely. That is deliberate, and it is why
-# SurrealFS enforces its own: the identity a `SurrealFs` acts as comes from
-# `agent_user()` below, not from the database. See `docs/permissions.md`.
-AUTH_LEVELS = ("root", "namespace", "database")
+# Which kind of user the credentials belong to. The first three are *system*
+# users: they bypass table permissions entirely, so the identity a `SurrealFs`
+# acts as comes from `agent_user()` below rather than from the database.
+#
+# `record` is the opt-in fourth. It signs in as a `user` record, which makes the
+# `file` table's PERMISSIONS clause live, and then the identity comes from the
+# credential itself via `resolve_user()`. Needs `apply_schema(record_auth=True)`
+# and a provisioned user. See `docs/permissions.md`.
+AUTH_LEVELS = ("root", "namespace", "database", "record")
+
+# The `DEFINE ACCESS` in schema/record_auth.surql.
+RECORD_ACCESS = "account"
 
 _schema_applied = False
 
@@ -94,27 +101,51 @@ def _database() -> str:
     return os.environ.get("SURREALDB_DATABASE", "demo")
 
 
-def _credentials() -> dict[str, str]:
+def _credentials() -> dict[str, Any]:
     """The signin payload for the configured auth level.
 
     The server infers the level from which keys are present -- the SDK forwards
     this dict to the signin RPC untouched -- so a root credential must *not*
-    carry a namespace, and a database user must carry both.
+    carry a namespace, and a database user must carry both. A record signin is
+    a different shape again: it names an access method, and the username and
+    password travel as `variables`, matching the SIGNIN clause's `$user` and
+    `$pass`.
     """
     level = os.environ.get("SURREALDB_AUTH_LEVEL", "root").strip().lower()
     if level not in AUTH_LEVELS:
         raise ValueError(
             f"SURREALDB_AUTH_LEVEL must be one of {', '.join(AUTH_LEVELS)}: {level!r}"
         )
-    creds = {
-        "username": os.environ.get("SURREALDB_USER", "root"),
-        "password": os.environ.get("SURREALDB_PASS", "root"),
-    }
+    username = os.environ.get("SURREALDB_USER", "root")
+    password = os.environ.get("SURREALDB_PASS", "root")
+    if level == "record":
+        return {
+            "namespace": _namespace(),
+            "database": _database(),
+            "access": RECORD_ACCESS,
+            "variables": {"user": username, "pass": password},
+        }
+    creds: dict[str, Any] = {"username": username, "password": password}
     if level in ("namespace", "database"):
         creds["namespace"] = _namespace()
     if level == "database":
         creds["database"] = _database()
     return creds
+
+
+async def resolve_user(db: Any) -> str:
+    """Who this connection is, for :class:`SurrealFs`.
+
+    Asks the database first. Under record auth that returns the signed-in user,
+    so the identity can never disagree with the credential it was issued for.
+    Under a system credential the database has no answer and the configured
+    `agent_user()` stands -- which is why record auth needs no per-surface
+    wiring: every caller uses this one helper either way.
+    """
+    from ..fs import raise_for_status
+
+    results = raise_for_status(await db.query_raw("RETURN fn::sfs_me();"))
+    return (results[-1] if results else None) or agent_user()
 
 
 async def _authenticate(db: AsyncSurreal) -> None:

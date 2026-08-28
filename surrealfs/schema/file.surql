@@ -9,14 +9,90 @@
 -- (`mem://`, `file://`) parses them but returns NULL for computed fields on any
 -- indexed read -- which is most of them. See tests/conftest.py.
 
-DEFINE TABLE OVERWRITE file SCHEMAFULL;
+-- Permission predicates
+--
+-- The rule lives here once. `SurrealFs` mirrors the bit arithmetic in Python
+-- for single-path operations (better errors, and it works under a system
+-- credential where table permissions are bypassed); these are what the four
+-- bulk queries in `fs.py` and the table's own PERMISSIONS clause both call.
+-- `tests/test_permissions.py` asserts the two implementations agree.
 
--- Ownership and unix mode bits. Enforced by `SurrealFs`, not by a table
--- PERMISSIONS clause: every shipped surface signs in as a root/namespace/
--- database *system* user, and those bypass table permissions entirely, so a
--- clause here would be decorative. `SurrealFs` is the only way in -- no tool
--- exposes raw SurrealQL -- and it is where the checks live. See
--- `docs/permissions.md`.
+-- Who is asking: the record user's name, or NONE under a system credential.
+-- The username *is* the record id (`user:alice`), so this reads the id without
+-- fetching the row -- no `user` table select permission needed, and usernames
+-- are unique by construction. See `schema/record_auth.surql`.
+DEFINE FUNCTION OVERWRITE fn::sfs_me() {
+    RETURN IF $auth IS NONE THEN NONE ELSE record::id($auth) END;
+};
+
+-- The owner of the nearest ancestor of `$parent`'s child that is not
+-- world-traversable, or NONE when the whole chain is. Recurses through
+-- `$parent.gate`, which is that parent's own COMPUTED field.
+--
+-- `% 2` is the other-execute bit; SurrealQL has no bitwise operators, so the
+-- digit arithmetic here and in `fn::sfs_bits` uses `math::floor` and `%`.
+-- ponytail: only the *other* x bit gates. A directory with its owner-x bit
+-- clear (0600) does not block its own owner, which real unix would. Track the
+-- owner bit too if anyone ever writes such a mode on purpose.
+DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
+    RETURN IF $parent IS NONE THEN NONE
+        ELSE IF $parent.gate IS NOT NONE THEN $parent.gate
+        ELSE IF $parent.mode % 2 = 0 THEN $parent.owner
+        ELSE NONE END;
+};
+
+-- Whether `$me` can traverse to a row gated by `$gate`. An unauthenticated
+-- caller is nobody and gets nothing: without this guard `$gate IS NONE` would
+-- read as "unguarded" and hand the shared tree to an anonymous connection.
+DEFINE FUNCTION OVERWRITE fn::sfs_reachable($gate: option<string>, $me: option<string>) {
+    RETURN $me IS NOT NONE AND ($gate IS NONE OR $gate = $me);
+};
+
+-- The octal digit that applies to `$me`: the owner digit for the owner,
+-- otherwise the other digit. Within a digit, `r` is `d >= 4`, `w` is
+-- `math::floor(d / 2) % 2`, and `x` is `d % 2`.
+--
+-- ponytail: the group digit (`math::floor($mode / 8) % 8`) is stored and
+-- round-trips through `chmod`, but is never consulted -- nothing in SurrealFS
+-- has a group concept to consult it with. Add a group table if teams ever need
+-- a folder outsiders cannot see.
+DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: int, $me: option<string>) {
+    RETURN IF $owner = $me
+        THEN math::floor($mode / 64) % 8
+        ELSE $mode % 8
+    END;
+};
+
+-- Readable by `$me`: reachable through every ancestor, and the read bit set.
+DEFINE FUNCTION OVERWRITE fn::sfs_can_read(
+    $gate: option<string>, $owner: string, $mode: int, $me: option<string>
+) {
+    RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_bits($owner, $mode, $me) >= 4;
+};
+
+-- Ownership and unix mode bits are enforced in two places, and the split is
+-- deliberate. `SurrealFs` applies the exact unix rules and is the only way an
+-- agent gets in -- no tool exposes raw SurrealQL. The PERMISSIONS clause below
+-- is a *containment* backstop for anyone holding a database credential
+-- directly; it is inert unless you opt into record auth, because system users
+-- bypass table permissions entirely. See `docs/permissions.md`.
+--
+-- The clause says `fn::sfs_gate(parent)` and must never be "tidied" to `gate`.
+-- A table permission is evaluated against the raw record *before* computed
+-- fields run, so `gate` reads NONE there -- and NONE means "no closed
+-- ancestor", i.e. readable. That fails open: verified on 3.2.4, the naive
+-- version hands every private file to every record user, silently.
+-- `fn::sfs_gate(parent)` dereferences a *linked* record, which does compute.
+DEFINE TABLE OVERWRITE file SCHEMAFULL
+    PERMISSIONS
+        FOR select
+            WHERE fn::sfs_can_read(fn::sfs_gate(parent), owner, mode, fn::sfs_me())
+        FOR create
+            WHERE owner = fn::sfs_me()
+              AND fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me())
+        FOR update, delete
+            WHERE fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me());
+
 DEFINE FIELD OVERWRITE owner ON TABLE file TYPE string DEFAULT 'root';
 DEFINE FIELD OVERWRITE mode  ON TABLE file TYPE int    DEFAULT 438;  -- 0o666
 DEFINE FIELD OVERWRITE filename ON TABLE file TYPE string;
@@ -51,17 +127,10 @@ DEFINE FIELD OVERWRITE is_folder ON TABLE file COMPUTED (
 -- NULL there, `search` would silently stop filtering, so `tests/
 -- test_permissions.py` asserts it through both indexes.
 --
--- `% 2` is the other-execute bit; SurrealQL has no bitwise operators, so the
--- digit arithmetic in fn::sfs_bits below uses `math::floor` and `%` throughout.
--- ponytail: only the *other* x bit gates. A directory with its owner-x bit
--- clear (0600) does not block its own owner, which real unix would. Track the
--- owner bit too if anyone ever writes such a mode on purpose.
-DEFINE FIELD OVERWRITE gate ON TABLE file TYPE option<string> COMPUTED (
-    IF $this.parent IS NONE THEN NONE
-    ELSE IF $this.parent.gate IS NOT NONE THEN $this.parent.gate
-    ELSE IF $this.parent.mode % 2 = 0 THEN $this.parent.owner
-    ELSE NONE END
-);
+-- The rule itself lives in `fn::sfs_gate` so that this field and the table's
+-- PERMISSIONS clause share one definition rather than two that must agree.
+DEFINE FIELD OVERWRITE gate ON TABLE file TYPE option<string>
+    COMPUTED fn::sfs_gate($this.parent);
 
 -- File content (folders are defined by leaving all of these empty)
 DEFINE FIELD OVERWRITE file       ON TABLE file TYPE option<bytes> DEFAULT NONE;
@@ -129,30 +198,3 @@ DEFINE INDEX IF NOT EXISTS idx_file_content ON file
     FIELDS content
     FULLTEXT ANALYZER fts_simple
     BM25(1.2,0.75);
-
--- Permission predicates
-
--- The octal digit that applies to `$me`: the owner digit for the owner,
--- otherwise the other digit. Within a digit, `r` is `d >= 4`, `w` is
--- `math::floor(d / 2) % 2`, and `x` is `d % 2`.
---
--- ponytail: the group digit (`math::floor($mode / 8) % 8`) is stored and
--- round-trips through `chmod`, but is never consulted -- nothing in SurrealFS
--- has a group concept to consult it with. Add a group table if teams ever need
--- a folder outsiders cannot see.
-DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: int, $me: string) {
-    RETURN IF $owner = $me
-        THEN math::floor($mode / 64) % 8
-        ELSE $mode % 8
-    END;
-};
-
--- Readable by `$me`: reachable through every ancestor, and the read bit set.
--- Defined once here and referenced by the four bulk queries in `fs.py` that
--- cannot filter row by row -- ls, glob, search_text, search_semantic.
-DEFINE FUNCTION OVERWRITE fn::sfs_can_read(
-    $gate: option<string>, $owner: string, $mode: int, $me: string
-) {
-    RETURN ($gate IS NONE OR $gate = $me)
-        AND fn::sfs_bits($owner, $mode, $me) >= 4;
-};
