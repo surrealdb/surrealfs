@@ -35,6 +35,7 @@ class _Args(BaseModel):
 class LsArgs(_Args):
     path: str = Field("/", description="Folder to list. Absolute, defaults to /")
     recursive: bool = Field(False, description="Descend into subfolders")
+    long: bool = Field(False, description="Also show mode and owner, like `ls -l`")
 
 
 class GlobArgs(_Args):

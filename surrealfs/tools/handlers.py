@@ -53,29 +53,35 @@ class ToolContext:
     embed: Embedder | None = None
 
 
-def _format_entry(entry: FileEntry, owner_width: int = 10) -> str:
-    """One `ls -l` line: mode, owner, size, path.
+def _format_entry(
+    entry: FileEntry, owner_width: int = 10, *, long: bool = False
+) -> str:
+    """One listing line: size and path, plus mode and owner when `long`.
 
-    The mode is always shown rather than hidden behind a flag, because a model
-    that cannot see the bits cannot know when to reach for `chmod`.
+    Size stays in the short form because `cat` returns a whole file with no
+    truncation, so it is the only warning a model gets before reading a
+    multi-megabyte one.
     """
     size = "-" if entry.is_folder else str(entry.size)
     slash = "/" if entry.is_folder else ""
+    if not long:
+        return f"{size:>8}  {entry.path}{slash}"
     owner = entry.owner.ljust(owner_width)
     return f"{entry.permissions}  {owner}  {size:>8}  {entry.path}{slash}"
 
 
-def _format_listing(entries: Sequence[FileEntry]) -> str:
+def _format_listing(entries: Sequence[FileEntry], *, long: bool = False) -> str:
     if not entries:
         return "(empty)"
     # Sized to the listing: agent usernames run long (`hermes-martin`), and a
     # fixed column would push the size out of line for exactly those.
-    width = max(len(e.owner) for e in entries)
-    return "\n".join(_format_entry(e, width) for e in entries)
+    width = max(len(e.owner) for e in entries) if long else 0
+    return "\n".join(_format_entry(e, width, long=long) for e in entries)
 
 
 async def ls(ctx: ToolContext, args: LsArgs) -> str:
-    return _format_listing(await ctx.fs.ls(args.path, recursive=args.recursive))
+    entries = await ctx.fs.ls(args.path, recursive=args.recursive)
+    return _format_listing(entries, long=args.long)
 
 
 async def glob(ctx: ToolContext, args: GlobArgs) -> str:

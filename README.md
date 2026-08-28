@@ -230,8 +230,8 @@ await fs.chmod("/projects/draft", 0o700)  # mine only
 await fs.chmod("/notes/policy.md", 0o644)  # everyone reads, I write
 ```
 
-Agents get the same thing as a `chmod` tool, and `ls` prints the mode and owner
-so a model can see what it is changing.
+Agents get the same thing as a `chmod` tool, and `ls` with `long` prints the
+mode and owner — as above — so a model can see what it is changing.
 
 The rules are the unix ones an agent already expects. A folder's bits govern
 everything inside it, so a `0700` folder hides its whole subtree whatever the
