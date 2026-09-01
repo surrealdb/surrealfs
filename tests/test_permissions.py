@@ -115,6 +115,38 @@ async def test_a_file_is_hidden_by_its_ancestor_not_its_own_bits(tree, as_user):
         await bob.read_text("/home/alice/notes/secret.md")
 
 
+async def test_every_closed_ancestor_gates_not_just_the_outermost(tree, fs):
+    """`gate` collapses the whole chain, so it must consult every link in it.
+
+    Short-circuiting on the parent's inherited `gate` reported the *outermost*
+    closed ancestor: bob closing his own `/projects` then made the gate on
+    everything below it say "bob", and handed him alice's 0700 folder inside.
+    """
+    alice, bob = tree
+    await alice.mkdir("/projects/secret")
+    await alice.write_text("/projects/secret/notes.md", SECRET)
+    await alice.chmod("/projects/secret", 0o700)
+
+    # One closure, alice's: she gets in, bob does not.
+    assert await alice.read_text("/projects/secret/notes.md") == SECRET
+    with pytest.raises(PermissionDenied):
+        await bob.read_text("/projects/secret/notes.md")
+
+    # Two closures, two owners: neither can traverse both, so the gate matches
+    # nobody -- including the owner of the outer folder.
+    await bob.chmod("/projects", 0o700)
+    assert (await fs.stat("/projects/secret/notes.md")).gate == "!closed"
+    for user in (alice, bob):
+        with pytest.raises(PermissionDenied):
+            await user.read_text("/projects/secret/notes.md")
+        # Not just `read_text`: the bulk read paths share `fn::sfs_can_read`.
+        # (Alice's own copy in her home is a legitimate hit for her.)
+        hits = [h.path for h in await user.search_text("hunter2")]
+        assert "/projects/secret/notes.md" not in hits
+    # Root still gets through, as it does on a real machine.
+    assert await fs.read_text("/projects/secret/notes.md") == SECRET
+
+
 # -------------------------------------------------------------------- writing
 
 
@@ -139,6 +171,28 @@ async def test_root_seeding_a_home_does_not_lock_its_user_out(fs, as_user):
     alice = as_user("alice")
     await alice.write_text("/home/alice/notes/mine.md", "mine")
     assert await alice.read_text("/home/alice/notes/mine.md") == "mine"
+
+
+async def test_home_itself_belongs_to_root(as_user):
+    """`/home` is seeded root-owned by the schema, and no user may take it.
+
+    `_guard_home` only guards the level *below* `/home`, and `/` is not a row
+    with an owner to deny anything -- so without the seed the first user to
+    `mkdir -p /home/<name>` owned `/home` at 0777, and could then `chmod 700`
+    it: everyone else locked out of their own home, and their files gated to
+    the squatter. Removing or renaming it re-opens the same hole, so those are
+    guarded too.
+    """
+    bob = as_user("bob")
+    home = await bob.stat("/home")
+    assert (home.owner, home.mode) == ("root", 0o777)
+    for hijack in (
+        bob.chmod("/home", 0o700),
+        bob.rm("/home", recursive=True),
+        bob.mv("/home", "/hijacked"),
+    ):
+        with pytest.raises(PermissionDenied):
+            await hijack
 
 
 async def test_a_home_cannot_be_squatted(as_user):

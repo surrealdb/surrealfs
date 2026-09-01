@@ -344,6 +344,23 @@ def test_the_home_belongs_to_the_agent_not_the_machine(monkeypatch):
     assert hermes_memory._memory_dir() == "/shared/turns"
 
 
+def test_the_agent_is_never_root(monkeypatch):
+    """`root` is SurrealFs's permission bypass, and the default unix account in
+    a container -- so inheriting it from the machine would silently hand every
+    dockerised agent the whole tree. It has to fail loudly instead."""
+    from surrealfs.integrations import _connect
+
+    monkeypatch.delenv("SURREALFS_AGENT_USER", raising=False)
+    monkeypatch.setattr(_connect, "_machine_user", lambda: "root")
+    with pytest.raises(RuntimeError, match="non-root"):
+        _connect.agent_user()
+
+    # Nor by asking for it: the bypass is not something an env var may grant.
+    monkeypatch.setenv("SURREALFS_AGENT_USER", "root")
+    with pytest.raises(RuntimeError, match="non-root"):
+        _connect.agent_user()
+
+
 def test_another_agents_home_is_never_recalled(memory):
     """The point of the home: a shared database is not a shared memory.
 

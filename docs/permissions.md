@@ -53,8 +53,13 @@ string is now the only home the process can read or write.
 Unix needs the `x` bit on *every* directory above a file. A permission check
 cannot loop, and walking the chain per row would cost a query per level.
 
-`gate` is a recursive COMPUTED field holding the owner of the nearest ancestor
-that is not world-traversable, or NONE when the whole chain is. It is the same
+`gate` is a recursive COMPUTED field collapsing that chain into one column:
+NONE when every ancestor is world-traversable, the owner when every closed one
+belongs to that same owner, and `'!closed'` — a value no username can equal —
+when two owners have each closed a directory in the chain, since nobody may
+traverse both. It consults each parent's own mode *before* the value it
+inherits; the other order reports the outermost closed ancestor and leaves a
+nested private folder readable by whoever owns something above it. It is the same
 trick `path` already uses, and it buys the same thing: writes stay a single
 row, and `mv` re-gates an entire subtree for free. A 0666 file inside a 0700
 home is unreachable because its `gate` says so, not because anything walked up

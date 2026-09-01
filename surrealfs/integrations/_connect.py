@@ -88,9 +88,24 @@ def agent_user() -> str:
 
     This is now an access-control boundary, not just a path convention: whatever
     it returns is the only home this process can read or write.
+
+    Never ``root``: that is `SurrealFs`'s permission bypass, and root is the
+    *default* account in a container, so inheriting it from the unix user would
+    hand every agent in a Docker image the whole tree with nothing said. Refuses
+    rather than picking another name, because silently acting as somebody else
+    files an agent's memory in the wrong home.
     """
+    from ..fs import ROOT
+
     name = os.environ.get("SURREALFS_AGENT_USER", "").strip()
-    return _slug(name) if name else _machine_user()
+    user = _slug(name) if name else _machine_user()
+    if user == ROOT:
+        raise RuntimeError(
+            f"SURREALFS_AGENT_USER must name a non-root user: {ROOT!r} bypasses "
+            "every SurrealFS permission check. This process runs as unix root "
+            "(the default in a container), which is not a deliberate grant."
+        )
+    return user
 
 
 def _namespace() -> str:

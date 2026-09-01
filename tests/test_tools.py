@@ -154,13 +154,15 @@ async def test_chmod_round_trips_through_dispatch(ctx):
 
 
 async def test_ls_is_short_by_default_and_long_on_request(ctx):
-    await call_tool(ctx, "write_file", {"path": "/notes.md", "content": "hi"})
-    line = await call_tool(ctx, "ls", {"path": "/"})
-    assert line.strip() == "2  /notes.md"
+    # In a subfolder: the schema seeds a root-owned `/home`, so a root listing
+    # is never a single line.
+    await call_tool(ctx, "write_file", {"path": "/n/notes.md", "content": "hi"})
+    line = await call_tool(ctx, "ls", {"path": "/n"})
+    assert line.strip() == "2  /n/notes.md"
 
-    line = await call_tool(ctx, "ls", {"path": "/", "long": True})
+    line = await call_tool(ctx, "ls", {"path": "/n", "long": True})
     assert line.startswith("-rw-rw-rw-  root")
-    assert line.endswith("2  /notes.md")
+    assert line.endswith("2  /n/notes.md")
 
 
 async def test_binary_tools_use_base64(ctx):

@@ -36,9 +36,10 @@ class FileEntry:
     (``read_text``/``read_bytes``); listing methods leave them ``None`` and set
     ``size`` instead.
 
-    ``gate`` is the schema's computed ancestry check: the owner of the nearest
-    directory above this row that is not world-traversable, or ``None`` when the
-    whole chain is. It is what lets a permission check cost no extra queries.
+    ``gate`` is the schema's computed ancestry check: who may traverse down to
+    this row -- ``None`` when every directory above it is world-traversable,
+    otherwise the owner of the closed ones (see ``fn::sfs_gate``). It is what
+    lets a permission check cost no extra queries.
     """
 
     id: RecordID

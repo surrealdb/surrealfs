@@ -57,6 +57,10 @@ ROOT = "root"
 READ, WRITE, EXEC = 4, 2, 1
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# A username is one path segment, and it must never collide with the
+# `'!closed'` sentinel `fn::sfs_gate` uses for "closed by two owners".
+# Matches `_slug` in `integrations/_connect.py`.
+_USERNAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # How much wider than `k` a non-root vector search casts, so that the
 # permission filter -- which HNSW applies only after its own cut -- still has k
@@ -193,8 +197,8 @@ class SurrealFs:
     def __init__(self, db: Any, *, user: str, table: str = "file") -> None:
         if not _IDENT.match(table):
             raise InvalidPath(f"invalid table name: {table!r}")
-        if not user or not user.strip():
-            raise InvalidPath("user must be a non-empty username, or ROOT")
+        if not _USERNAME.match(user or ""):
+            raise InvalidPath(f"user must be [A-Za-z0-9_-], or ROOT: {user!r}")
         self.db = db
         self.table = table
         self.user = user
@@ -211,10 +215,9 @@ class SurrealFs:
     def _allowed(self, entry: FileEntry, need: int) -> bool:
         if self.is_root:
             return True
-        # `gate` is the ancestry check: the owner of the nearest directory above
-        # this row that is not world-traversable. Non-NONE and not ours means
-        # some parent is closed, and nothing below it is reachable whatever its
-        # own bits say.
+        # `gate` is the ancestry check: who may traverse down to this row.
+        # Non-NONE and not ours means some parent is closed to us, and nothing
+        # below it is reachable whatever its own bits say.
         if entry.gate is not None and entry.gate != self.user:
             return False
         return self._bits(entry) & need == need
@@ -354,15 +357,22 @@ class SurrealFs:
         self._guard_home(new_path)
 
     def _guard_home(self, path: str) -> None:
-        """Refuse to create somebody else's home directory.
+        """Refuse to create, remove or move somebody else's home directory.
 
         `/home` is 0777 like the rest of the shared tree, so without this anyone
         could squat `/home/alice` before alice first connects and would own it
         -- and owning it means reading everything she later puts in it.
+
+        `/home` itself belongs to root, seeded by `schema/file.surql`. It is
+        guarded here too: the root directory is not a row, so nothing above
+        `/home` can deny a delete, and removing it lets the same squat happen
+        one level up.
         """
         if self.is_root:
             return
         normalized = paths.normalize(path)
+        if normalized == paths.HOME_ROOT:
+            raise PermissionDenied(f"Permission denied: {normalized} belongs to root")
         if paths.parent_of(normalized) == paths.HOME_ROOT:
             if paths.basename(normalized) != self.user:
                 raise PermissionDenied(

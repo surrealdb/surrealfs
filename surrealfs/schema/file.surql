@@ -25,9 +25,22 @@ DEFINE FUNCTION OVERWRITE fn::sfs_me() {
     RETURN IF $auth IS NONE THEN NONE ELSE record::id($auth) END;
 };
 
--- The owner of the nearest ancestor of `$parent`'s child that is not
--- world-traversable, or NONE when the whole chain is. Recurses through
--- `$parent.gate`, which is that parent's own COMPUTED field.
+-- The gate on `$parent`'s children: who -- if anyone -- may traverse down to
+-- them. NONE when every directory above is world-traversable, the owner when
+-- every closed one above is that same owner, and `'!closed'` when two closed
+-- directories with different owners are in the chain.
+--
+-- Unix needs the `x` bit on *every* ancestor, and a permission check cannot
+-- loop, so the whole chain has to collapse into this one column. It recurses
+-- through `$parent.gate` -- that parent's own COMPUTED field -- but only
+-- *after* consulting `$parent`'s own mode: short-circuiting on the inherited
+-- value instead would report the outermost closed ancestor and let a nested
+-- private folder be read by whoever owns something above it.
+--
+-- `'!closed'` matches nobody: `_slug` in `integrations/_connect.py` and
+-- `SurrealFs.__init__` both restrict a username to [A-Za-z0-9_-], so
+-- `fn::sfs_reachable` denies every caller -- which is right, since no single
+-- user can traverse two folders closed by two different owners.
 --
 -- `% 2` is the other-execute bit; SurrealQL has no bitwise operators, so the
 -- digit arithmetic here and in `fn::sfs_bits` uses `math::floor` and `%`.
@@ -35,16 +48,20 @@ DEFINE FUNCTION OVERWRITE fn::sfs_me() {
 -- clear (0600) does not block its own owner, which real unix would. Track the
 -- owner bit too if anyone ever writes such a mode on purpose.
 DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
-    RETURN IF $parent IS NONE THEN NONE
-        ELSE IF $parent.gate IS NOT NONE THEN $parent.gate
-        -- A row written before `mode` existed belongs to nobody but root until
-        -- `docs/migrate_permissions.surql` has run. Treating a missing mode as
-        -- traversable would expose an un-migrated tree; erroring on it -- which
-        -- is what `NONE % 2` does -- takes the whole database down, including
-        -- the migration itself, because re-writing a row recomputes this.
-        ELSE IF $parent.mode IS NONE THEN ($parent.owner ?? 'root')
-        ELSE IF $parent.mode % 2 = 0 THEN $parent.owner
+    -- `$parent`'s own contribution: its owner if it is closed, else NONE.
+    --
+    -- A row written before `mode` existed belongs to nobody but root until
+    -- `docs/migrate_permissions.surql` has run. Treating a missing mode as
+    -- traversable would expose an un-migrated tree; erroring on it -- which
+    -- is what `NONE % 2` does -- takes the whole database down, including
+    -- the migration itself, because re-writing a row recomputes this.
+    LET $own = IF $parent IS NONE THEN NONE
+        ELSE IF $parent.mode IS NONE OR $parent.mode % 2 = 0
+        THEN ($parent.owner ?? 'root')
         ELSE NONE END;
+    RETURN IF $own IS NONE THEN $parent.gate
+        ELSE IF $parent.gate IS NONE OR $parent.gate = $own THEN $own
+        ELSE '!closed' END;
 };
 
 -- Whether `$me` can traverse to a row gated by `$gate`. An unauthenticated
@@ -130,10 +147,10 @@ DEFINE FIELD OVERWRITE is_folder ON TABLE file COMPUTED (
     $this.file IS NONE AND $this.content IS NONE AND $this.symlink IS NONE
 );
 
--- The owner of the nearest ancestor directory that is not world-traversable,
--- or NONE when every directory above this row is. This is what makes a 0666
--- file inside a 0700 home unreachable: unix needs the `x` bit on *every*
--- ancestor, and a permission check cannot loop.
+-- Who may traverse down to this row: NONE when every directory above it is
+-- world-traversable, otherwise the owner of the closed ones (see
+-- `fn::sfs_gate`). This is what makes a 0666 file inside a 0700 home
+-- unreachable.
 --
 -- Recursive, exactly like `path` above, and for the same payoff: a write stays
 -- a single row and `mv` re-derives a whole subtree for free. Verified on 3.2.4
@@ -212,3 +229,27 @@ DEFINE INDEX IF NOT EXISTS idx_file_content ON file
     FIELDS content
     FULLTEXT ANALYZER fts_simple
     BM25(1.2,0.75);
+
+-- Seed: /home
+--
+-- `/home` has to exist and belong to root *before* anyone creates a home
+-- inside it. `SurrealFs._guard_home` only guards the level below -- and the
+-- root directory is not a row, so it has no owner to inherit -- which left
+-- `/home` up for grabs: the first user to `mkdir -p /home/<name>` owned it at
+-- 0777 and could then `chmod 700 /home`, locking every other user out of
+-- their own home and (through `gate`) reading into it.
+--
+-- Two statements, both idempotent, so this is safe on an existing database:
+-- the UPDATE reclaims a `/home` somebody already squatted (whatever its record
+-- id), and the INSERT creates it when there is none -- ignored when the UPDATE
+-- already found one, because `child_unique` rejects the duplicate.
+UPDATE file SET owner = 'root', mode = 511  -- 0o777
+    WHERE parent_key = 'root' AND filename = 'home';
+INSERT IGNORE INTO file {
+    id: file:home,
+    filename: 'home',
+    parent: NONE,
+    owner: 'root',
+    mode: 511,  -- 0o777
+    content_type: 'inode/directory'
+};

@@ -24,6 +24,9 @@ from surrealfs import ROOT, PermissionDenied, SurrealFs, apply_schema
 async def make_legacy(db) -> None:
     """Seed rows with no `owner` and no `mode`, as the previous release wrote."""
     await db.query_raw("REMOVE FIELD mode ON file; REMOVE FIELD owner ON file;")
+    # Drop the schema-seeded `/home` first: the database being simulated here
+    # predates it, and re-applying the schema below must reclaim the legacy row.
+    await db.query_raw("DELETE file WHERE parent_key = 'root' AND filename = 'home';")
     await db.query_raw("""
         LET $home = (CREATE ONLY file SET filename='home',
                      content_type='inode/directory');
@@ -51,6 +54,11 @@ async def test_an_unmigrated_row_is_opaque_rather_than_fatal(db):
     await make_legacy(db)
     root = SurrealFs(db, user=ROOT)
     assert await root.read_text("/home/martin/notes/diary.md") == "personal thoughts"
+
+    # Re-applying the schema reclaimed the legacy `/home` for root, so no user
+    # can chmod it shut and gate everyone else out of their own home.
+    home = await root.stat("/home")
+    assert (home.owner, home.mode) == ("root", 0o777)
 
     martin = SurrealFs(db, user="martin")
     with pytest.raises((PermissionDenied, FileNotFoundError)):
