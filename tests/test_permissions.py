@@ -345,6 +345,39 @@ async def test_chmod_recursive(tree, as_user):
     assert (await alice.stat("/projects/tree/inner/a.md")).mode == 0o700
 
 
+async def test_chmod_recursive_skips_what_it_does_not_own(tree, fs, as_user):
+    """`chmod -R` used to refuse the whole tree over one foreign file.
+
+    A shared folder legitimately holds other people's work -- alice writing into
+    bob's /projects is the documented default -- so an agent asked to lock down
+    a folder it owns got a denial naming somebody else's file and changed
+    nothing. Unix skips those and carries on.
+    """
+    alice, bob = tree
+    await alice.mkdir("/projects/mine", parents=True)
+    await alice.write_text("/projects/mine/a.md", "a")
+    await bob.write_text("/projects/mine/from-bob.md", "b")
+
+    # The folder and alice's own file: two of the three rows underneath.
+    assert await alice.chmod("/projects/mine", 0o700, recursive=True) == 2
+    assert (await alice.stat("/projects/mine")).mode == 0o700
+    assert (await alice.stat("/projects/mine/a.md")).mode == 0o700
+    assert (await fs.stat("/projects/mine/from-bob.md")).mode == 0o666
+
+    # Quiet skipping is safe because the folder is what hides the contents:
+    # bob's file keeps its 0666 bits and is unreachable to everyone anyway --
+    # bob included, since he cannot traverse alice's folder either.
+    for user in (as_user("carol"), bob):
+        with pytest.raises(PermissionDenied):
+            await user.read_text("/projects/mine/from-bob.md")
+    assert await fs.read_text("/projects/mine/from-bob.md") == "b"
+
+    # And the path actually named is still an error when it is not yours: that
+    # one is the request, not a skip.
+    with pytest.raises(PermissionDenied):
+        await alice.chmod("/projects/mine/from-bob.md", 0o600)
+
+
 async def test_chmod_rejects_out_of_range(tree):
     alice, _ = tree
     with pytest.raises(ValueError):

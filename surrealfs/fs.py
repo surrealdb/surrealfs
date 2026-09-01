@@ -238,6 +238,14 @@ class SurrealFs:
             return False
         return self._bits(entry) & need == need
 
+    def _owns(self, entry: FileEntry) -> bool:
+        """Whether this user may change the row itself, rather than its content.
+
+        Ownership, not mode bits: `chmod` is the one operation no bit grants,
+        because anyone who could chmod a folder could open it and read inside.
+        """
+        return self.is_root or entry.owner == self.user
+
     def _check(self, entry: FileEntry, need: int, verb: str) -> None:
         if not self._allowed(entry, need):
             raise PermissionDenied(f"Permission denied: cannot {verb} {entry.path}")
@@ -851,23 +859,35 @@ class SurrealFs:
         more here would make every other check pointless: anyone who can chmod
         a folder can open it and read what is inside.
 
-        With ``recursive``, applies the same mode to everything underneath, like
-        ``chmod -R``. The listing it walks is itself permission-filtered, so this
-        cannot reach into a subtree the caller could not otherwise see.
+        With ``recursive``, applies the same mode to everything underneath the
+        caller owns, and *skips* what it does not -- exactly as ``chmod -R``
+        does. Refusing the whole tree instead was worse than useless: a shared
+        folder legitimately holds other people's files, so an agent asked to
+        lock down a folder it owns got a flat denial naming somebody else's file
+        and changed nothing at all.
+
+        Skipping is safe to leave quiet because of `gate`: the folder's own mode
+        is what makes its contents unreachable, whatever bits they carry. What
+        the caller asked to close is closed. The count returned is what actually
+        changed, so a caller that cares can compare.
+
+        The listing it walks is itself permission-filtered, so this cannot reach
+        into a subtree the caller could not otherwise see.
         """
         if not 0 <= mode <= 0o777:
             raise ValueError(f"mode must be between 0o000 and 0o777, got {mode:o}")
 
         entry = await self._require(path)
+        # The path the caller named *is* the request, so not owning that one is
+        # an error rather than a skip.
+        if not self._owns(entry):
+            raise PermissionDenied(
+                f"Permission denied: {entry.path} is owned by {entry.owner}"
+            )
         targets = [entry]
         if recursive and entry.is_folder:
-            targets += await self.ls(entry.path, recursive=True)
-
-        for target in targets:
-            if not self.is_root and target.owner != self.user:
-                raise PermissionDenied(
-                    f"Permission denied: {target.path} is owned by {target.owner}"
-                )
+            children = await self.ls(entry.path, recursive=True)
+            targets += [c for c in children if self._owns(c)]
 
         await self._query(
             "UPDATE $ids SET mode = $mode",
