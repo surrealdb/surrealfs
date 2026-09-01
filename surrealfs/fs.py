@@ -702,7 +702,13 @@ class SurrealFs:
         return FileEntry.from_row(row)
 
     async def cp(self, src: str, dst: str, *, recursive: bool = False) -> FileEntry:
-        """Copy a file, or a whole folder with ``recursive=True``."""
+        """Copy a file, or a whole folder with ``recursive=True``.
+
+        ``recursive`` is all-or-nothing, like `rm`: if any part of the source
+        subtree is one this user could not read by hand, nothing is copied. A
+        `cp` that returned a tree with a subtree quietly missing would be worse
+        than a failure, because the caller believes it has a copy.
+        """
         entry = await self._require(src, fields=_FIELDS_WITH_CONTENT)
         self._check(entry, READ, "read")
         dst_normalized = paths.normalize(dst)
@@ -734,14 +740,30 @@ class SurrealFs:
                 f"cannot copy {entry.path} into its own subtree ({dst_normalized})"
             )
 
+        children = await self.ls(entry.path, recursive=True)
+        # Vet the whole source subtree before writing anything at the
+        # destination. `ls` names a folder's children whatever their own bits
+        # say and only refuses to *descend*, so a folder without r+x here is
+        # exactly one whose contents are missing from `children`: copying it
+        # would put an empty folder where a subtree belongs and report success.
+        # Files need the read bit for the plainer reason -- a copy hands their
+        # content to whoever can read the destination.
+        for child in (entry, *children):
+            if child.is_folder:
+                self._check(child, READ | EXEC, "copy")
+            else:
+                self._check(child, READ, "read")
+
         root = await self.mkdir(dst_normalized, parents=True)
-        for child in await self.ls(entry.path, recursive=True):
+        for child in children:
             relative = child.path[len(entry.path) :]
             target = dst_normalized + relative
             if child.is_folder:
                 await self.mkdir(target, parents=True)
             else:
-                source = await self._require(child.path, fields=_FIELDS_WITH_CONTENT)
+                source = await self._require_file(
+                    child.path, fields=_FIELDS_WITH_CONTENT
+                )
                 await self._create(
                     paths.basename(target),
                     await self._parent_id(target, write=True),

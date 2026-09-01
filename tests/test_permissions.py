@@ -253,6 +253,40 @@ async def test_recursive_rm_cannot_delete_a_subtree_it_cannot_see(tree, fs):
     ]
 
 
+async def test_recursive_cp_does_not_silently_skip_what_it_cannot_read(tree, fs):
+    """`cp -r` walked the same filtered `ls`, so it reported a partial copy.
+
+    Alice's 0700 folder was listed but not descended into, so bob got a
+    "backup" containing an empty `/backup/secret` and no error -- the worst
+    shape for this bug, since the caller believes it has a copy. A 0600 file in
+    a shared folder was worse still: `cp` never checked the read bit, so it
+    handed bob the content in a file of his own.
+    """
+    alice, bob = tree
+    await alice.mkdir("/projects/secret")
+    await alice.write_text("/projects/secret/notes.md", SECRET)
+    await alice.chmod("/projects/secret", 0o700)
+
+    with pytest.raises(PermissionDenied):
+        await bob.cp("/projects", "/backup", recursive=True)
+    with pytest.raises(PermissionDenied):
+        await bob.cp("/projects/secret", "/backup", recursive=True)
+    # Nothing written at the destination, not even the folder.
+    assert not await fs.exists("/backup")
+
+    # A file bob may not read is not copyable either, whatever the folder says.
+    await alice.chmod("/projects/secret", 0o777)
+    await alice.chmod("/projects/secret/notes.md", 0o600)
+    with pytest.raises(PermissionDenied):
+        await bob.cp("/projects", "/backup", recursive=True)
+    assert not await fs.exists("/backup")
+
+    # Readable throughout: a real copy, with everything in it.
+    await alice.chmod("/projects/secret/notes.md", 0o666)
+    await bob.cp("/projects", "/backup", recursive=True)
+    assert await bob.read_text("/backup/secret/notes.md") == SECRET
+
+
 # ---------------------------------------------------------------------- chmod
 
 
