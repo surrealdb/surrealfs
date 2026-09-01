@@ -34,7 +34,7 @@ from websockets.exceptions import ConnectionClosed
 
 from ..schema import apply_schema
 
-__all__ = ["agent_user", "connect", "connected", "resolve_user"]
+__all__ = ["agent_user", "connect", "connected"]
 
 # Which kind of user the credentials belong to. The first three are *system*
 # users: they bypass table permissions entirely, so the identity a `SurrealFs`
@@ -42,9 +42,10 @@ __all__ = ["agent_user", "connect", "connected", "resolve_user"]
 #
 # `record` is the opt-in fourth. It signs in as a `user` record, which makes the
 # `file` table's PERMISSIONS clause live, and then the identity comes from the
-# credential itself via `resolve_user()`. Needs `apply_schema(record_auth=True)`
+# credential itself -- see `agent_user()`. Needs `apply_schema(record_auth=True)`
 # and a provisioned user. See `docs/permissions.md`.
-AUTH_LEVELS = ("root", "namespace", "database", "record")
+RECORD_LEVEL = "record"
+AUTH_LEVELS = ("root", "namespace", "database", RECORD_LEVEL)
 
 # The `DEFINE ACCESS` in schema/record_auth.surql.
 RECORD_ACCESS = "account"
@@ -89,6 +90,15 @@ def agent_user() -> str:
     This is now an access-control boundary, not just a path convention: whatever
     it returns is the only home this process can read or write.
 
+    Under record auth the credential *is* the identity -- the database enforces
+    the user it was issued for -- so the name comes from ``SURREALDB_USER`` and
+    nothing else. Deriving it from the machine account there would have
+    `SurrealFs` apply one user's permissions to another user's rows and file an
+    agent's memory in a home it cannot write. Verbatim, not slugged: the record
+    id is the name as provisioned, and `SurrealFs.__init__` rejects one that is
+    not a clean path segment rather than quietly rewriting it into somebody
+    else's.
+
     Never ``root``: that is `SurrealFs`'s permission bypass, and root is the
     *default* account in a container, so inheriting it from the unix user would
     hand every agent in a Docker image the whole tree with nothing said. Refuses
@@ -97,15 +107,33 @@ def agent_user() -> str:
     """
     from ..fs import ROOT
 
-    name = os.environ.get("SURREALFS_AGENT_USER", "").strip()
-    user = _slug(name) if name else _machine_user()
+    if _auth_level() == RECORD_LEVEL:
+        user = _credential_user()
+    else:
+        name = os.environ.get("SURREALFS_AGENT_USER", "").strip()
+        user = _slug(name) if name else _machine_user()
     if user == ROOT:
         raise RuntimeError(
-            f"SURREALFS_AGENT_USER must name a non-root user: {ROOT!r} bypasses "
-            "every SurrealFS permission check. This process runs as unix root "
-            "(the default in a container), which is not a deliberate grant."
+            f"no agent may act as {ROOT!r}: it bypasses every SurrealFS "
+            "permission check. Name a real user in SURREALFS_AGENT_USER, or in "
+            "SURREALDB_USER under record auth. The default unix account in a "
+            "container is root, which is not a deliberate grant."
         )
     return user
+
+
+def _auth_level() -> str:
+    """Which kind of credential this process signs in with."""
+    level = os.environ.get("SURREALDB_AUTH_LEVEL", "root").strip().lower()
+    if level not in AUTH_LEVELS:
+        raise ValueError(
+            f"SURREALDB_AUTH_LEVEL must be one of {', '.join(AUTH_LEVELS)}: {level!r}"
+        )
+    return level
+
+
+def _credential_user() -> str:
+    return os.environ.get("SURREALDB_USER", "root")
 
 
 def _namespace() -> str:
@@ -126,14 +154,10 @@ def _credentials() -> dict[str, Any]:
     password travel as `variables`, matching the SIGNIN clause's `$user` and
     `$pass`.
     """
-    level = os.environ.get("SURREALDB_AUTH_LEVEL", "root").strip().lower()
-    if level not in AUTH_LEVELS:
-        raise ValueError(
-            f"SURREALDB_AUTH_LEVEL must be one of {', '.join(AUTH_LEVELS)}: {level!r}"
-        )
-    username = os.environ.get("SURREALDB_USER", "root")
+    level = _auth_level()
+    username = _credential_user()
     password = os.environ.get("SURREALDB_PASS", "root")
-    if level == "record":
+    if level == RECORD_LEVEL:
         return {
             "namespace": _namespace(),
             "database": _database(),
@@ -146,21 +170,6 @@ def _credentials() -> dict[str, Any]:
     if level == "database":
         creds["database"] = _database()
     return creds
-
-
-async def resolve_user(db: Any) -> str:
-    """Who this connection is, for :class:`SurrealFs`.
-
-    Asks the database first. Under record auth that returns the signed-in user,
-    so the identity can never disagree with the credential it was issued for.
-    Under a system credential the database has no answer and the configured
-    `agent_user()` stands -- which is why record auth needs no per-surface
-    wiring: every caller uses this one helper either way.
-    """
-    from ..fs import raise_for_status
-
-    results = raise_for_status(await db.query_raw("RETURN fn::sfs_me();"))
-    return (results[-1] if results else None) or agent_user()
 
 
 async def _authenticate(db: AsyncSurreal) -> None:
@@ -235,9 +244,15 @@ async def connected() -> AsyncIterator[AsyncSurreal]:
     db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
     try:
         await _authenticate(db)
-        if not _schema_applied:
+        if not _schema_applied and _auth_level() != RECORD_LEVEL:
             # Once per process, so a first call works against a bare database
             # without the user running `python -m surrealfs.schema` first.
+            #
+            # Not under record auth: a record user has no DDL rights, so this
+            # raises "Not enough permissions" on *every* call -- the flag is
+            # only set on success -- and takes the whole surface down. Defining
+            # the schema there is an admin's job, once:
+            # `python -m surrealfs.schema --record-auth`.
             await apply_schema(db)
             _schema_applied = True
         yield db

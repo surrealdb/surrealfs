@@ -42,8 +42,10 @@ defaults to root because it is an admin view over the whole tree.
 
 Agent surfaces call `agent_user()`, lifted out of the Hermes memory provider so
 that the tool plugin, the CLI and the provider cannot disagree about who they
-are. It reads `SURREALFS_AGENT_USER`, falling back to the machine account,
-and its reasoning is unchanged from when it was only a path convention: the
+are. It reads `SURREALFS_AGENT_USER`, falling back to the machine account —
+except under record auth, where the credential *is* the identity and the name
+comes from `SURREALDB_USER` alone, so the two can never disagree about which
+user's permissions apply to whose rows. Its reasoning is otherwise unchanged from when it was only a path convention: the
 home belongs to the *agent*, not the human, because two agents owned by two
 different people collide otherwise. What has changed is the stakes — that
 string is now the only home the process can read or write.
@@ -118,13 +120,18 @@ write is yours to remove. Agents rely on it more than they realise — it is why
 plus `SURREALDB_AUTH_LEVEL=record` makes SurrealDB enforce the tree itself, so
 the credential alone is no longer a way around the mode bits.
 
+Applying the schema is an admin's job here, once, and `connected()` will not do
+it for you: a record user has no DDL rights, so a `connected()` that tried
+would fail *every* call rather than the first. Run
+`python -m surrealfs.schema --record-auth` with a system credential first.
+
 **There is almost nothing extra to maintain, by construction.** The rule already
 lived once, in `fn::sfs_can_read`. The table's PERMISSIONS clause calls the same
 function the four bulk queries in `fs.py` call, substituting the signed-in user
 for `$me`. Two small extractions made that possible, and both *reduced* the
 total expression: the ancestry rule moved into `fn::sfs_gate($parent)`, shared
 by the `gate` COMPUTED field and the clause; and "who is asking" moved into
-`fn::sfs_me()`, shared by the clause and `resolve_user()`.
+`fn::sfs_me()`, used by the clause.
 
 The clause is defined **unconditionally**. A table permission is inert for
 system users, so it costs non-adopters nothing and there is no conditional DDL

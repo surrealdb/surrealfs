@@ -178,14 +178,56 @@ async def test_surrealfs_behaves_the_same_over_a_record_connection(tenants, db):
     assert await over_system.read_text("/projects/from-bob.md") == "hi"
 
 
-async def test_resolve_user_prefers_the_credential(tenants, db, monkeypatch):
-    from surrealfs.integrations._connect import resolve_user
+async def test_the_agent_surfaces_work_under_record_auth(
+    db, surreal_url, namespace, monkeypatch
+):
+    """The documented record-auth setup has to actually run.
 
+    `connected()` applied the schema on every call, which a record user has no
+    DDL rights for -- and the flag is only set on success, so it failed on
+    *every* call, not just the first: every Hermes tool call and every memory
+    write, dead. Applying it is an admin's job under record auth.
+
+    The identity has to come from the credential too. `agent_user()` used to
+    return the machine account, so `SurrealFs` enforced one user's permissions
+    over another user's rows -- and the denials surfaced as `IndexError` from
+    unpacking an empty write result.
+    """
+    from surrealfs.integrations import _connect
+
+    await apply_schema(db, record_auth=True)
+    await add_user(db, "erin", "pw-erin")
+
+    monkeypatch.setenv("SURREALDB_URL", surreal_url)
+    monkeypatch.setenv("SURREALDB_NAMESPACE", namespace)
+    monkeypatch.setenv("SURREALDB_DATABASE", "test")
+    monkeypatch.setenv("SURREALDB_AUTH_LEVEL", "record")
+    monkeypatch.setenv("SURREALDB_USER", "erin")
+    monkeypatch.setenv("SURREALDB_PASS", "pw-erin")
+    # Set, and outranked: the credential is what the database enforces.
     monkeypatch.setenv("SURREALFS_AGENT_USER", "not-me")
-    _, bob = tenants
-    assert await resolve_user(bob) == "bob"
-    # A system credential has no record identity, so the configured name stands.
-    assert await resolve_user(db) == "not-me"
+    monkeypatch.setattr(_connect, "_schema_applied", False)
+
+    assert _connect.agent_user() == "erin"
+    async with _connect.connected() as connection:
+        fs = SurrealFs(connection, user=_connect.agent_user())
+        await fs.write_text("/home/erin/notes.md", "mine")
+        assert await fs.read_text("/home/erin/notes.md") == "mine"
+
+
+def test_a_write_the_database_rejects_is_a_denial_not_an_indexerror():
+    """A rejected write is not an error: SurrealDB returns an empty result.
+
+    Only record auth can produce this -- a system credential bypasses the
+    clause -- and `SurrealFs`'s own checks should have refused first, so it
+    means the two disagreed about a row. It must still read as a denial.
+    """
+    from surrealfs.errors import PermissionDenied as Denied
+    from surrealfs.fs import _written
+
+    with pytest.raises(Denied, match="/a.md"):
+        _written([], "/a.md")
+    assert _written([{"filename": "a.md"}], "/a.md") == {"filename": "a.md"}
 
 
 async def test_a_system_credential_still_sees_everything(tenants, db):

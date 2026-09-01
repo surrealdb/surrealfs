@@ -181,6 +181,22 @@ def raise_for_status(raw: Any) -> list[Any]:
     ]
 
 
+def _written(rows: Any, path: str) -> Any:
+    """The single row a write returns, or `PermissionDenied` if it returned none.
+
+    A write the table's PERMISSIONS clause rejects is not reported as an error:
+    SurrealDB returns an empty result. Only record auth can produce that -- a
+    system credential bypasses the clause -- and `SurrealFs`'s own checks should
+    have refused first, so reaching here means the two disagreed about this row.
+    Either way it is a denial, and it must not surface as an ``IndexError`` from
+    the row unpacking two lines down.
+    """
+    row = (rows[0] if rows else None) if isinstance(rows, list) else rows
+    if not row:
+        raise PermissionDenied(f"Permission denied: {path}")
+    return row
+
+
 class SurrealFs:
     """A hierarchical filesystem stored in a SurrealDB ``file`` table.
 
@@ -554,8 +570,7 @@ class SurrealFs:
             f"CREATE {self.table} CONTENT $payload RETURN {_FIELDS}",
             {"payload": payload},
         )
-        row = rows[0] if isinstance(rows, list) else rows
-        return FileEntry.from_row(row)
+        return FileEntry.from_row(_written(rows, path))
 
     async def _ensure_parent(self, path: str, *, create: bool) -> RecordID | None:
         parent_path = paths.parent_of(path)
@@ -603,8 +618,7 @@ class SurrealFs:
                     "content_type": resolved_type,
                 },
             )
-            row = rows[0] if isinstance(rows, list) else rows
-            return FileEntry.from_row(row)
+            return FileEntry.from_row(_written(rows, normalized))
 
         parent_id = await self._ensure_parent(normalized, create=create_parents)
         return await self._create(
@@ -635,8 +649,7 @@ class SurrealFs:
                 f"content_type = $content_type RETURN {_FIELDS}",
                 {"id": existing.id, "data": data, "content_type": content_type},
             )
-            row = rows[0] if isinstance(rows, list) else rows
-            return FileEntry.from_row(row)
+            return FileEntry.from_row(_written(rows, normalized))
 
         parent_id = await self._ensure_parent(normalized, create=create_parents)
         return await self._create(
@@ -711,8 +724,7 @@ class SurrealFs:
             f"UPDATE $id SET filename = $filename, parent = $parent RETURN {_FIELDS}",
             {"id": entry.id, "filename": filename, "parent": parent_id},
         )
-        row = rows[0] if isinstance(rows, list) else rows
-        return FileEntry.from_row(row)
+        return FileEntry.from_row(_written(rows, dst_normalized))
 
     async def cp(self, src: str, dst: str, *, recursive: bool = False) -> FileEntry:
         """Copy a file, or a whole folder with ``recursive=True``.

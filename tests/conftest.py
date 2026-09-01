@@ -111,6 +111,12 @@ def _namespace_for(request) -> str:
 
 
 @pytest.fixture
+def namespace(request) -> str:
+    """The namespace `db` opened, for a test that also connects by environment."""
+    return _namespace_for(request)
+
+
+@pytest.fixture
 async def db(surreal_url, request):
     """A connection to a namespace unique to this test, with the schema applied."""
     connection = AsyncSurreal(surreal_url)

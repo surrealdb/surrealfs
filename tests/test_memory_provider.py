@@ -352,12 +352,12 @@ def test_the_agent_is_never_root(monkeypatch):
 
     monkeypatch.delenv("SURREALFS_AGENT_USER", raising=False)
     monkeypatch.setattr(_connect, "_machine_user", lambda: "root")
-    with pytest.raises(RuntimeError, match="non-root"):
+    with pytest.raises(RuntimeError, match="bypasses"):
         _connect.agent_user()
 
     # Nor by asking for it: the bypass is not something an env var may grant.
     monkeypatch.setenv("SURREALFS_AGENT_USER", "root")
-    with pytest.raises(RuntimeError, match="non-root"):
+    with pytest.raises(RuntimeError, match="bypasses"):
         _connect.agent_user()
 
 
