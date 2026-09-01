@@ -472,8 +472,17 @@ class SurrealFs:
 
     # ------------------------------------------------------------------- write
 
-    async def mkdir(self, path: str, *, parents: bool = False) -> FileEntry:
-        """Create a folder. With ``parents``, create missing ancestors too."""
+    async def mkdir(
+        self, path: str, *, parents: bool = False, mode: int | None = None
+    ) -> FileEntry:
+        """Create a folder. With ``parents``, create missing ancestors too.
+
+        ``mode`` applies to the folder ``path`` names and not to any ancestor
+        created on the way to it, the same split as ``mkdir -m``. It defaults to
+        `default_mode`, which is what makes a home private.
+        """
+        if mode is not None and not 0 <= mode <= 0o777:
+            raise ValueError(f"mode must be between 0o000 and 0o777, got {mode:o}")
         segments = paths.split(path)
         if not segments:
             raise InvalidPath("cannot create the root directory")
@@ -501,7 +510,11 @@ class SurrealFs:
                 )
             await self._require_writable_dir(paths.parent_of(partial), partial)
             created = await self._create(
-                segment, parent_id, FOLDER_CONTENT_TYPE, path=partial
+                segment,
+                parent_id,
+                FOLDER_CONTENT_TYPE,
+                path=partial,
+                mode=mode if is_last else None,
             )
             parent_id = created.id
 
@@ -754,12 +767,15 @@ class SurrealFs:
             else:
                 self._check(child, READ, "read")
 
-        root = await self.mkdir(dst_normalized, parents=True)
+        # `mode=` on both mkdirs, or a copy quietly opens up what it copied:
+        # a folder recreated at `default_mode` comes out 0777 however private
+        # the original was.
+        root = await self.mkdir(dst_normalized, parents=True, mode=entry.mode)
         for child in children:
             relative = child.path[len(entry.path) :]
             target = dst_normalized + relative
             if child.is_folder:
-                await self.mkdir(target, parents=True)
+                await self.mkdir(target, parents=True, mode=child.mode)
             else:
                 source = await self._require_file(
                     child.path, fields=_FIELDS_WITH_CONTENT

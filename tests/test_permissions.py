@@ -287,6 +287,27 @@ async def test_recursive_cp_does_not_silently_skip_what_it_cannot_read(tree, fs)
     assert await bob.read_text("/backup/secret/notes.md") == SECRET
 
 
+async def test_a_copied_folder_keeps_its_mode(tree):
+    """`cp -r` recreated every folder with a bare `mkdir`, so the copy came out
+    at `default_mode` -- 0777 -- however private the original was, and handed
+    its contents to everyone."""
+    alice, bob = tree
+    await alice.mkdir("/projects/work/private", parents=True)
+    await alice.write_text("/projects/work/private/notes.md", SECRET)
+    await alice.chmod("/projects/work/private", 0o700)
+    await alice.chmod("/projects/work", 0o750)
+    with pytest.raises(PermissionDenied):
+        await bob.read_text("/projects/work/private/notes.md")
+
+    await alice.cp("/projects/work", "/projects/copy", recursive=True)
+    # The copy root and the folder inside it, not just the files.
+    assert (await alice.stat("/projects/copy")).mode == 0o750
+    assert (await alice.stat("/projects/copy/private")).mode == 0o700
+    assert await alice.read_text("/projects/copy/private/notes.md") == SECRET
+    with pytest.raises(PermissionDenied):
+        await bob.read_text("/projects/copy/private/notes.md")
+
+
 # ---------------------------------------------------------------------- chmod
 
 

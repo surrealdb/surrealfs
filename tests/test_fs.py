@@ -80,6 +80,15 @@ async def test_mkdir_requires_parents_flag(fs):
     assert (await fs.stat("/a/b/c")).is_folder
 
 
+async def test_mkdir_mode_applies_to_the_named_folder_only(fs):
+    """Like `mkdir -m`: ancestors made on the way there keep the default."""
+    await fs.mkdir("/a/b", parents=True, mode=0o700)
+    assert (await fs.stat("/a")).mode == 0o777
+    assert (await fs.stat("/a/b")).mode == 0o700
+    with pytest.raises(ValueError):
+        await fs.mkdir("/c", mode=0o1000)
+
+
 async def test_mkdir_rejects_existing(fs):
     await fs.mkdir("/a")
     with pytest.raises(AlreadyExists):
