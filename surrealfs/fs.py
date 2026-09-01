@@ -761,6 +761,12 @@ class SurrealFs:
         would permanently block recreating a file under the same name.
 
         Returns the number of records removed.
+
+        ``recursive`` is all-or-nothing: if any folder in the subtree is one
+        this user could not empty by hand, nothing is deleted. Real ``rm -r`` is
+        best-effort and reports per-entry failures, which is not expressible in
+        a single return count -- and a partial delete here is worse than none,
+        because what survives is a row whose parent is gone.
         """
         entry = await self._require(path)
         # Unix keys deletion on the containing folder, not on the entry: a
@@ -771,8 +777,17 @@ class SurrealFs:
             return 1
 
         children = await self.ls(entry.path, recursive=True)
-        if children and not recursive:
-            raise DirectoryNotEmpty(f"Directory not empty: {entry.path}")
+        if children:
+            if not recursive:
+                raise DirectoryNotEmpty(f"Directory not empty: {entry.path}")
+            # Every folder being emptied needs the bits to enumerate *and*
+            # unlink. `ls` names a folder's children whatever their own bits
+            # say but only descends into ones it may enter, so a folder failing
+            # this check is exactly one whose contents are missing from
+            # `children` -- deleting it would leave them behind with a dangling
+            # parent, unreachable to everyone and no longer in any listing.
+            for folder in (entry, *(c for c in children if c.is_folder)):
+                self._check(folder, READ | WRITE | EXEC, "delete from")
         # Deepest first, so no row is ever orphaned mid-delete.
         ids = [c.id for c in sorted(children, key=lambda c: c.path, reverse=True)]
         ids.append(entry.id)

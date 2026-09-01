@@ -214,6 +214,45 @@ async def test_rm_is_keyed_on_the_parent_folder_not_the_file(tree, as_user):
     assert await bob.rm("/projects/readonly.md") == 1
 
 
+async def test_recursive_rm_cannot_delete_a_subtree_it_cannot_see(tree, fs):
+    """`rm -r` checked only the parent folder, so it destroyed private subtrees.
+
+    `ls` names a folder's children whatever their own bits say, so alice's 0700
+    folder was in bob's delete list -- while its contents, which `ls` refuses to
+    descend into, were not. Bob deleted a folder he could not open and left the
+    file inside it with a dangling parent: gone from every listing, its computed
+    `path` collapsed to the top level, unreachable to alice and to root.
+    """
+    alice, bob = tree
+    await alice.mkdir("/projects/secret")
+    await alice.write_text("/projects/secret/notes.md", SECRET)
+    await alice.chmod("/projects/secret", 0o700)
+
+    with pytest.raises(PermissionDenied):
+        await bob.rm("/projects", recursive=True)
+    # Straight at it, too -- the folder looks empty to bob, which is not the
+    # same as being empty.
+    with pytest.raises(PermissionDenied):
+        await bob.rm("/projects/secret", recursive=True)
+    # All-or-nothing: bob's own files in /projects are still there.
+    assert await bob.read_text("/projects/public.md") == PUBLIC
+    assert await alice.read_text("/projects/secret/notes.md") == SECRET
+
+    # 0733 is the subtle one: bob may unlink entries but cannot enumerate them,
+    # so `rm -r` would orphan whatever it never listed.
+    await alice.chmod("/projects/secret", 0o733)
+    with pytest.raises(PermissionDenied):
+        await bob.rm("/projects/secret", recursive=True)
+
+    # Opened up, it is bob's to remove -- and alice's owner bits never blocked
+    # her own.
+    await alice.chmod("/projects/secret", 0o777)
+    assert await bob.rm("/projects/secret", recursive=True) == 2
+    assert [e.path for e in await fs.ls("/projects", recursive=True)] == [
+        "/projects/public.md"
+    ]
+
+
 # ---------------------------------------------------------------------- chmod
 
 
