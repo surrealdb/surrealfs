@@ -228,13 +228,21 @@ class SurrealFs:
             return (entry.mode >> 6) & 7
         return entry.mode & 7
 
+    def _reachable(self, entry: FileEntry) -> bool:
+        """Whether every directory above ``entry`` is traversable by this user.
+
+        `gate` is the ancestry check: who may traverse down to this row. Non-NONE
+        and not ours means some parent is closed to us, and nothing below it is
+        reachable whatever its own bits say. Mirrors `fn::sfs_reachable`, and
+        costs no queries because `gate` collapses the whole chain into one
+        column. Says nothing about the row's own bits.
+        """
+        return self.is_root or entry.gate is None or entry.gate == self.user
+
     def _allowed(self, entry: FileEntry, need: int) -> bool:
         if self.is_root:
             return True
-        # `gate` is the ancestry check: who may traverse down to this row.
-        # Non-NONE and not ours means some parent is closed to us, and nothing
-        # below it is reachable whatever its own bits say.
-        if entry.gate is not None and entry.gate != self.user:
+        if not self._reachable(entry):
             return False
         return self._bits(entry) & need == need
 
@@ -333,7 +341,7 @@ class SurrealFs:
         entry = await self._resolve(path, fields=fields)
         if entry is None:
             raise NotFound(f"No such file or directory: {paths.normalize(path)}")
-        if not self.is_root and entry.gate is not None and entry.gate != self.user:
+        if not self._reachable(entry):
             raise PermissionDenied(f"Permission denied: {entry.path}")
         return entry
 
@@ -429,9 +437,17 @@ class SurrealFs:
         return "\n".join((await self.read_text(path)).splitlines()[-n:])
 
     async def exists(self, path: str) -> bool:
+        """Whether ``path`` is there *and* reachable by this user.
+
+        False for anything behind somebody else's private folder, which is the
+        answer `os.path.exists` gives on EACCES and the only safe one here: a
+        True would confirm the name of a file inside another user's home, which
+        `stat` on the same path correctly refuses to.
+        """
         if paths.normalize(path) == "/":
             return True
-        return await self._resolve(path) is not None
+        entry = await self._resolve(path)
+        return entry is not None and self._reachable(entry)
 
     async def stat(self, path: str) -> FileEntry:
         """Metadata for a path, without fetching its content."""

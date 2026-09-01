@@ -67,6 +67,24 @@ async def test_another_home_cannot_be_read(tree):
         await bob.ls("/home/alice")
 
 
+async def test_exists_does_not_confirm_a_name_in_another_home(tree):
+    """`exists` skipped the gate check every other read goes through.
+
+    It resolved the path directly, so it answered True for a file `stat` on the
+    same path refuses to describe -- confirming the *name* of something inside
+    alice's private home. False is what `os.path.exists` gives on EACCES.
+    """
+    alice, bob = tree
+    assert await alice.exists("/home/alice/notes/secret.md")
+    assert not await bob.exists("/home/alice/notes/secret.md")
+    with pytest.raises(PermissionDenied):
+        await bob.stat("/home/alice/notes/secret.md")
+    # Not a blanket False: the shared tree still answers, and so does the home
+    # itself, which `ls /home` shows anyway.
+    assert await bob.exists("/projects/public.md")
+    assert await bob.exists("/home/alice")
+
+
 async def test_search_does_not_leak_another_home(tree):
     """The worst path: full-text search returns content, not just a path."""
     alice, bob = tree
