@@ -125,13 +125,36 @@ it for you: a record user has no DDL rights, so a `connected()` that tried
 would fail *every* call rather than the first. Run
 `python -m surrealfs.schema --record-auth` with a system credential first.
 
-**There is almost nothing extra to maintain, by construction.** The rule already
+**Reads cost nothing extra to maintain, by construction.** The rule already
 lived once, in `fn::sfs_can_read`. The table's PERMISSIONS clause calls the same
 function the four bulk queries in `fs.py` call, substituting the signed-in user
 for `$me`. Two small extractions made that possible, and both *reduced* the
 total expression: the ancestry rule moved into `fn::sfs_gate($parent)`, shared
 by the `gate` COMPUTED field and the clause; and "who is asking" moved into
 `fn::sfs_me()`, used by the clause.
+
+**Writes cost more, because a permission clause cannot see what changed.**
+`$before` is not bound in one (verified on 3.2.4), so the clause cannot tell a
+content write from a rename — and unix keys those on different things: `w` on
+the file, versus `w`+`x` on the folder. The split that resolves it:
+
+- The table's `FOR update` is the coarse union of the two rules. It is evaluated
+  against the before state **and** the after state, which is what makes it able
+  to check a rename's source folder *and* its destination.
+- Per-field `PERMISSIONS` make it precise: `content`, `file`, `content_type` and
+  `symlink` need the write bit; `mode` needs ownership; `owner` is immutable,
+  because there is no `chown`.
+- `FOR create` and `FOR delete` are keyed on the containing folder via
+  `fn::sfs_can_enter`, exactly as `SurrealFs._require_writable_dir` is.
+- `fn::sfs_home_ok` is `_guard_home` restated for the database: `/home` is
+  root's, and a home under it belongs to the name it carries.
+
+A field permission is evaluated against the **after** state only, which is a
+trap worth knowing: `owner` guarded by `WHERE owner = fn::sfs_me()` reads as
+true the instant somebody writes their own name into it, so it has to be
+`WHERE false`. With `owner` immutable, `mode`'s self-reference is then sound.
+A denied *field* write is also silent — the row comes back with that field
+unchanged rather than an error — where a denied *statement* returns no rows.
 
 The clause is defined **unconditionally**. A table permission is inert for
 system users, so it costs non-adopters nothing and there is no conditional DDL

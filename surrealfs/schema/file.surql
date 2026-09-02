@@ -101,12 +101,67 @@ DEFINE FUNCTION OVERWRITE fn::sfs_can_read(
     RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_bits($owner, $mode, $me) >= 4;
 };
 
+-- The write bit of the digit that applies to `$me`. Within a digit `w` is
+-- `math::floor(d / 2) % 2`; see `fn::sfs_bits`.
+DEFINE FUNCTION OVERWRITE fn::sfs_w(
+    $owner: option<string>, $mode: option<int>, $me: option<string>
+) {
+    RETURN math::floor(fn::sfs_bits($owner, $mode, $me) / 2) % 2 = 1;
+};
+
+-- Writable by `$me`: reachable through every ancestor, and the write bit set.
+DEFINE FUNCTION OVERWRITE fn::sfs_can_write(
+    $gate: option<string>, $owner: option<string>, $mode: option<int>,
+    $me: option<string>
+) {
+    RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_w($owner, $mode, $me);
+};
+
+-- Whether `$me` may add or remove an *entry* in `$parent`: write and execute on
+-- the folder, which is what unix keys create, delete and rename on -- never the
+-- entry's own bits. This is the rule `SurrealFs._require_writable_dir` applies.
+--
+-- NONE is the root directory. It is not a row (see `_resolve`) and behaves as
+-- 0777 owned by root, so anyone signed in may make a top-level entry -- which is
+-- the shared tree the whole design rests on. `fn::sfs_home_ok` is what stops
+-- that from including `/home`.
+DEFINE FUNCTION OVERWRITE fn::sfs_can_enter(
+    $parent: option<record<file>>, $me: option<string>
+) {
+    RETURN IF $me IS NONE THEN false
+        ELSE IF $parent IS NONE THEN true
+        ELSE fn::sfs_reachable($parent.gate, $me)
+             -- w and x are the low two bits of the digit, so both set is `% 4 = 3`.
+             AND fn::sfs_bits($parent.owner, $parent.mode, $me) % 4 = 3
+    END;
+};
+
+-- `SurrealFs._guard_home`, written for the database: `/home` belongs to root,
+-- and a home directly under it belongs to the name it carries.
+--
+-- Without this one CREATE squats an unprovisioned `/home/alice` -- and since
+-- `/home` is 0777 so that a user can make their own home, one DELETE takes
+-- `/home` itself, orphaning every home to the top level with a dangling parent.
+DEFINE FUNCTION OVERWRITE fn::sfs_home_ok(
+    $parent: option<record<file>>, $filename: string, $me: option<string>
+) {
+    RETURN IF $parent IS NONE THEN $filename != 'home'
+        ELSE IF $parent.parent IS NONE AND $parent.filename = 'home'
+        THEN $filename = $me
+        ELSE true
+    END;
+};
+
 -- Ownership and unix mode bits are enforced in two places, and the split is
--- deliberate. `SurrealFs` applies the exact unix rules and is the only way an
--- agent gets in -- no tool exposes raw SurrealQL. The PERMISSIONS clause below
--- is a *containment* backstop for anyone holding a database credential
--- directly; it is inert unless you opt into record auth, because system users
--- bypass table permissions entirely. See `docs/permissions.md`.
+-- deliberate. `SurrealFs` applies the exact unix rules with the exact errors,
+-- and is the only way an agent gets in -- no tool exposes raw SurrealQL. The
+-- clauses below are the same rules for anyone holding a record credential and a
+-- client of their own; they are inert unless you opt into record auth, because
+-- system users bypass table and field permissions entirely.
+--
+-- They enforce reads *and* writes. An earlier version checked only ancestry on
+-- update and delete, which let any record user rewrite, chmod, chown or delete
+-- any row it could reach -- including `/home`. See `docs/permissions.md`.
 --
 -- The clause says `fn::sfs_gate(parent)` and must never be "tidied" to `gate`.
 -- A table permission is evaluated against the raw record *before* computed
@@ -120,16 +175,51 @@ DEFINE TABLE OVERWRITE file SCHEMAFULL
             WHERE fn::sfs_can_read(fn::sfs_gate(parent), owner, mode, fn::sfs_me())
         FOR create
             WHERE owner = fn::sfs_me()
-              AND fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me())
-        FOR update, delete
-            WHERE fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me());
+              AND fn::sfs_can_enter(parent, fn::sfs_me())
+              AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
+        -- An update clause is evaluated against the before state *and* the after
+        -- state -- verified on 3.2.4 -- so `parent` here means the source folder
+        -- on one pass and the destination on the other, which is exactly what a
+        -- rename needs. The disjunction is deliberate: unix keys a content write
+        -- on the file's own `w` and a rename on the folder's `w`+`x`, and a
+        -- permission clause cannot tell which field a statement touched
+        -- (`$before` is not bound in one). The per-field clauses below are what
+        -- make it precise; this is the coarse union of the two rules.
+        FOR update
+            WHERE fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me())
+              AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
+              AND (fn::sfs_w(owner, mode, fn::sfs_me())
+                   OR fn::sfs_can_enter(parent, fn::sfs_me()))
+        -- ponytail: the union is loose in one direction. A record user holding
+        -- the `w` bit on a row satisfies it on both passes, so they can also
+        -- *move* that row without `w`+`x` on either folder, which `SurrealFs.mv`
+        -- requires. It buys them nothing they did not already have -- the `w` bit
+        -- lets them overwrite the content outright -- and tightening it means
+        -- requiring `w`+`x` on the parent for every content write, which is
+        -- stricter than unix and than the Python layer. Revisit if a rename ever
+        -- becomes more consequential than a rewrite.
+        -- Keyed on the containing folder, never the row: a read-only file in a
+        -- folder you can write is yours to remove, same as `SurrealFs.rm`.
+        FOR delete
+            WHERE fn::sfs_can_enter(parent, fn::sfs_me())
+              AND fn::sfs_home_ok(parent, filename, fn::sfs_me());
 
-DEFINE FIELD OVERWRITE owner ON TABLE file TYPE string DEFAULT 'root';
-DEFINE FIELD OVERWRITE mode  ON TABLE file TYPE int    DEFAULT 438;  -- 0o666
+-- There is no `chown`, so `owner` is immutable once written -- and it has to be,
+-- because a field permission is evaluated only against the *after* state
+-- (verified on 3.2.4): `FOR update WHERE owner = fn::sfs_me()` reads as true the
+-- moment somebody writes their own name into it, which let any record user take
+-- a file they could reach. `FOR update WHERE false` has no such hole, and leaves
+-- `create` alone -- the table clause above already pins `owner` to the creator.
+--
+-- With `owner` pinned, the self-reference in `mode`'s clause is sound: the
+-- after-state owner is always the before-state owner, so this really is "only
+-- the owner may chmod", the rule `SurrealFs.chmod` applies.
+DEFINE FIELD OVERWRITE owner ON TABLE file TYPE string DEFAULT 'root'
+    PERMISSIONS FOR update WHERE false;
+DEFINE FIELD OVERWRITE mode  ON TABLE file TYPE int    DEFAULT 438  -- 0o666
+    PERMISSIONS FOR update WHERE owner = fn::sfs_me();
 DEFINE FIELD OVERWRITE filename ON TABLE file TYPE string;
 DEFINE FIELD OVERWRITE parent ON file TYPE option<record<file>> DEFAULT NONE;
-DEFINE FIELD OVERWRITE content_type ON TABLE file TYPE string;
-
 -- Stored mirror of `parent`, with the root spelled 'root' instead of NONE.
 -- This exists because a composite UNIQUE index skips any row where one of its
 -- fields is NONE: indexing (parent, filename) directly would leave every
@@ -164,9 +254,24 @@ DEFINE FIELD OVERWRITE gate ON TABLE file TYPE option<string>
     COMPUTED fn::sfs_gate($this.parent);
 
 -- File content (folders are defined by leaving all of these empty)
-DEFINE FIELD OVERWRITE file       ON TABLE file TYPE option<bytes> DEFAULT NONE;
-DEFINE FIELD OVERWRITE content    ON TABLE file TYPE option<string> DEFAULT NONE;
-DEFINE FIELD OVERWRITE symlink    ON TABLE file TYPE option<file> DEFAULT NONE;
+--
+-- The write bit, per field, because the table clause above cannot be this
+-- precise: it has to stay permissive enough for a rename, which unix keys on
+-- the folder instead. These are what a content write actually touches.
+--
+-- ponytail: `hash` and the embedding fields below are left open. They are
+-- derived -- `evt_file_hash` recomputes `hash` on any content change, and a
+-- wrong `embedded_hash` only makes the indexer re-embed -- and none of them
+-- gates access. Guard them too if anything ever trusts them for more than
+-- staleness.
+DEFINE FIELD OVERWRITE file       ON TABLE file TYPE option<bytes> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE content    ON TABLE file TYPE option<string> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE symlink    ON TABLE file TYPE option<file> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE content_type ON TABLE file TYPE string
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT '';
 
 -- Timestamps
