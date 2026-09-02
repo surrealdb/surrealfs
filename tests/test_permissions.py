@@ -68,11 +68,11 @@ async def test_another_home_cannot_be_read(tree):
 
 
 async def test_exists_does_not_confirm_a_name_in_another_home(tree):
-    """`exists` skipped the gate check every other read goes through.
+    """`exists` has to take the gate check every other read goes through.
 
-    It resolved the path directly, so it answered True for a file `stat` on the
-    same path refuses to describe -- confirming the *name* of something inside
-    alice's private home. False is what `os.path.exists` gives on EACCES.
+    Resolving the path directly answers True for a file `stat` on the same path
+    refuses to describe, which confirms the *name* of something inside alice's
+    private home. False is what `os.path.exists` gives on EACCES.
     """
     alice, bob = tree
     assert await alice.exists("/home/alice/notes/secret.md")
@@ -83,6 +83,39 @@ async def test_exists_does_not_confirm_a_name_in_another_home(tree):
     # itself, which `ls /home` shows anyway.
     assert await bob.exists("/projects/public.md")
     assert await bob.exists("/home/alice")
+
+
+async def test_touch_does_not_confirm_a_name_in_another_home(tree):
+    """The same oracle as `exists`, one method over, and worse.
+
+    `touch` returns the row untouched when the path is already there, so
+    without the gate check it hands back a full `FileEntry` for a file in
+    alice's private home -- path, size, hash, owner, mode, timestamps -- and
+    the `touch` tool prints the path back as `Ready:`. A name that is *not*
+    there takes the create branch and is denied, so the two are cleanly
+    distinguishable: both have to deny.
+    """
+    alice, bob = tree
+    assert (await alice.touch("/home/alice/notes/secret.md")).size == len(SECRET)
+    with pytest.raises(PermissionDenied):
+        await bob.touch("/home/alice/notes/secret.md")
+    with pytest.raises(PermissionDenied):
+        await bob.touch("/home/alice/notes/absent.md")
+
+
+async def test_write_does_not_confirm_a_folder_in_another_home(tree):
+    """`IsADirectory` before the permission check is the oracle again: it
+    separates "a folder of that name is there" from "nothing is"."""
+    alice, bob = tree
+    await alice.mkdir("/home/alice/finances")
+    with pytest.raises(PermissionDenied):
+        await bob.write_text("/home/alice/finances", "x")
+    with pytest.raises(PermissionDenied):
+        await bob.write_text("/home/alice/absent", "x")
+    with pytest.raises(PermissionDenied):
+        await bob.write_bytes("/home/alice/finances", b"x")
+    with pytest.raises(PermissionDenied):
+        await bob.write_bytes("/home/alice/absent", b"x")
 
 
 async def test_search_does_not_leak_another_home(tree):
@@ -272,13 +305,13 @@ async def test_recursive_rm_cannot_delete_a_subtree_it_cannot_see(tree, fs):
 
 
 async def test_recursive_cp_does_not_silently_skip_what_it_cannot_read(tree, fs):
-    """`cp -r` walked the same filtered `ls`, so it reported a partial copy.
+    """`cp -r` walks a permission-filtered `ls`, so it must vet before writing.
 
-    Alice's 0700 folder was listed but not descended into, so bob got a
-    "backup" containing an empty `/backup/secret` and no error -- the worst
-    shape for this bug, since the caller believes it has a copy. A 0600 file in
-    a shared folder was worse still: `cp` never checked the read bit, so it
-    handed bob the content in a file of his own.
+    Alice's 0700 folder is listed but not descended into, so a copy that trusts
+    the listing gives bob a "backup" holding an empty `/backup/secret` and no
+    error -- the worst shape for it, since the caller believes it has a copy.
+    A 0600 file in a shared folder is worse: without a read-bit check of its
+    own, `cp` hands bob the content in a file he owns.
     """
     alice, bob = tree
     await alice.mkdir("/projects/secret")
@@ -306,9 +339,9 @@ async def test_recursive_cp_does_not_silently_skip_what_it_cannot_read(tree, fs)
 
 
 async def test_a_copied_folder_keeps_its_mode(tree):
-    """`cp -r` recreated every folder with a bare `mkdir`, so the copy came out
-    at `default_mode` -- 0777 -- however private the original was, and handed
-    its contents to everyone."""
+    """A bare `mkdir` per folder would recreate the copy at `default_mode` --
+    0777 -- however private the original was, handing its contents to
+    everyone."""
     alice, bob = tree
     await alice.mkdir("/projects/work/private", parents=True)
     await alice.write_text("/projects/work/private/notes.md", SECRET)
@@ -324,6 +357,46 @@ async def test_a_copied_folder_keeps_its_mode(tree):
     assert await alice.read_text("/projects/copy/private/notes.md") == SECRET
     with pytest.raises(PermissionDenied):
         await bob.read_text("/projects/copy/private/notes.md")
+
+
+async def test_recursive_cp_completes_for_a_folder_without_its_write_bit(tree):
+    """`cp -r` is all-or-nothing, and a read-only source folder must not break
+    that.
+
+    The children go in through the ordinary `mkdir`/`_create` checks, which
+    need w+x on the destination folder -- so recreating a 0555 folder at its
+    source mode leaves a destination the copy cannot write into, and the first
+    child fails with a partial tree already on disk. The bits are restored
+    afterwards, so the copy still matches the source exactly.
+    """
+    alice, _ = tree
+    await alice.mkdir("/projects/ro/inner", parents=True)
+    await alice.write_text("/projects/ro/inner/notes.md", PUBLIC)
+    await alice.chmod("/projects/ro/inner", 0o555)
+    await alice.chmod("/projects/ro", 0o500)
+
+    copy = await alice.cp("/projects/ro", "/projects/ro-copy", recursive=True)
+    assert copy.mode == 0o500
+    assert (await alice.stat("/projects/ro-copy/inner")).mode == 0o555
+    assert await alice.read_text("/projects/ro-copy/inner/notes.md") == PUBLIC
+
+
+async def test_only_root_may_reindex_embeddings(tree, fs):
+    """The one bulk read with no permission predicate.
+
+    `reindex_embeddings` has to read every text file in the tree to embed it,
+    so it cannot carry the read filter and still be an index of the whole tree
+    -- which makes "only root may run it" the whole of its access control. The
+    browser takes a `--user` flag, so this is reachable as a non-root user
+    unless the boundary itself refuses.
+    """
+    alice, _ = tree
+
+    async def embed(text: str) -> list[float]:
+        raise AssertionError(f"read a file it should not have: {text!r}")
+
+    with pytest.raises(PermissionDenied):
+        await alice.reindex_embeddings(embed, version="test")
 
 
 # ---------------------------------------------------------------------- chmod
@@ -364,12 +437,12 @@ async def test_chmod_recursive(tree, as_user):
 
 
 async def test_chmod_recursive_skips_what_it_does_not_own(tree, fs, as_user):
-    """`chmod -R` used to refuse the whole tree over one foreign file.
+    """Skipping, not refusing the whole tree over one foreign file.
 
     A shared folder legitimately holds other people's work -- alice writing into
-    bob's /projects is the documented default -- so an agent asked to lock down
-    a folder it owns got a denial naming somebody else's file and changed
-    nothing. Unix skips those and carries on.
+    bob's /projects is the documented default -- so refusing would leave an
+    agent asked to lock down a folder it owns with a denial naming somebody
+    else's file and nothing changed at all. Unix skips those and carries on.
     """
     alice, bob = tree
     await alice.mkdir("/projects/mine", parents=True)

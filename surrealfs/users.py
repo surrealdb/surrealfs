@@ -33,7 +33,17 @@ async def add(db, name: str, password: str) -> str:
     The home is made by the ordinary `mkdir`, as root, because `default_owner`
     already hands a `/home/<name>` folder to the name it carries -- there is no
     separate ownership rule to keep in step here.
+
+    :data:`~surrealfs.fs.ROOT` is refused. It is the bypass identity, not a
+    name: `owner` DEFAULTs to it and `/home` is seeded to it, so a record user
+    called `root` would own every row nobody claimed -- including `/home`, which
+    `mode`'s field permission would then let them chmod to 0700, gating every
+    other user out of their own home. The guard is here rather than in the CLI
+    so that no caller can go around it; `record_auth.surql` refuses the signin
+    as well.
     """
+    if name == ROOT:
+        raise ValueError(f"{ROOT!r} is the bypass identity, not a record user")
     raise_for_status(
         await db.query_raw(
             "CREATE type::record('user', $name) "

@@ -331,6 +331,21 @@ class SurrealFs:
         row = await self._query("\n".join(lines), variables)
         return FileEntry.from_row(row) if row else None
 
+    async def _resolve_reachable(self, path: str) -> FileEntry | None:
+        """Resolve a path, or None -- refusing a row behind a closed ancestor.
+
+        The "does this already exist" branch every write takes. `_resolve`
+        answers from the index alone, so on its own it hands back a full row
+        from inside somebody else's private home: an existence and metadata
+        oracle for exactly the path `stat` refuses. Raising keeps that outcome
+        indistinguishable from the not-found one, which `_ensure_parent` denies
+        a few lines later anyway.
+        """
+        entry = await self._resolve(path)
+        if entry is not None and not self._reachable(entry):
+            raise PermissionDenied(f"Permission denied: {paths.normalize(path)}")
+        return entry
+
     async def _require(self, path: str, *, fields: str = _FIELDS) -> FileEntry:
         """Resolve a path, or raise. Enforces ancestry, not the row's own bits.
 
@@ -628,7 +643,7 @@ class SurrealFs:
             raise InvalidPath("cannot write to the root directory")
         resolved_type = content_type or _sniff_content_type(filename, content)
 
-        existing = await self._resolve(normalized)
+        existing = await self._resolve_reachable(normalized)
         if existing is not None:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
@@ -663,7 +678,7 @@ class SurrealFs:
         if not filename:
             raise InvalidPath("cannot write to the root directory")
 
-        existing = await self._resolve(normalized)
+        existing = await self._resolve_reachable(normalized)
         if existing is not None:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
@@ -687,7 +702,7 @@ class SurrealFs:
         ``is_folder`` is computed as "no content, no bytes, no symlink", so a
         NONE-content row would come back as a directory.
         """
-        existing = await self._resolve(paths.normalize(path))
+        existing = await self._resolve_reachable(paths.normalize(path))
         if existing is not None:
             return existing
         return await self.write_text(
@@ -711,10 +726,14 @@ class SurrealFs:
         updated = (
             current.replace(old, new) if replace_all else current.replace(old, new, 1)
         )
-        await self._query(
-            "UPDATE $id SET content = $content",
+        rows = await self._query(
+            "UPDATE $id SET content = $content RETURN id",
             {"id": entry.id, "content": updated},
         )
+        # Or the diff below describes a change that did not happen; see
+        # `_written`. `RETURN id` rather than the full field list: nothing here
+        # needs the row back, only proof that one was written.
+        _written(rows, entry.path)
         return _unified_diff(current, updated, entry.path)
 
     # ------------------------------------------------------------ move / delete
@@ -803,15 +822,24 @@ class SurrealFs:
             else:
                 self._check(child, READ, "read")
 
-        # `mode=` on both mkdirs, or a copy quietly opens up what it copied:
-        # a folder recreated at `default_mode` comes out 0777 however private
-        # the original was.
-        root = await self.mkdir(dst_normalized, parents=True, mode=entry.mode)
+        # Every folder is created at its source mode with the *owner* bits
+        # forced open, then chmod'd down once the tree is in place. It cannot
+        # simply be created at `entry.mode`: the children go in through the
+        # ordinary `mkdir`/`_create` checks, which need w+x, so a 0555 or 0500
+        # folder would fail on its first child and leave a partial tree at
+        # the destination -- and it cannot be created at `default_mode`,
+        # which comes out 0777 however private the original was. Widening only
+        # the owner digit exposes nothing in between: `fn::sfs_gate` reads the
+        # *other* x bit, so what the source closed to everyone else stays
+        # closed the whole way through.
+        folders = [(dst_normalized, entry.mode)]
+        await self.mkdir(dst_normalized, parents=True, mode=entry.mode | 0o700)
         for child in children:
             relative = child.path[len(entry.path) :]
             target = dst_normalized + relative
             if child.is_folder:
-                await self.mkdir(target, parents=True, mode=child.mode)
+                folders.append((target, child.mode))
+                await self.mkdir(target, parents=True, mode=child.mode | 0o700)
             else:
                 source = await self._require_file(
                     child.path, fields=_FIELDS_WITH_CONTENT
@@ -825,7 +853,13 @@ class SurrealFs:
                     data=source.data,
                     mode=source.mode,
                 )
-        return root
+        # Order does not matter: the caller owns every row it just created, and
+        # `gate` is the owner's own name for a folder closed to others, so each
+        # path stays reachable to them whatever the mode lands on.
+        for path, mode in folders:
+            if mode & 0o700 != 0o700:
+                await self.chmod(path, mode)
+        return await self.stat(dst_normalized)
 
     async def rm(self, path: str, *, recursive: bool = False) -> int:
         """Delete a file, or a folder and its contents with ``recursive=True``.
@@ -905,10 +939,18 @@ class SurrealFs:
             children = await self.ls(entry.path, recursive=True)
             targets += [c for c in children if self._owns(c)]
 
-        await self._query(
-            "UPDATE $ids SET mode = $mode",
+        changed = await self._query(
+            "UPDATE $ids SET mode = $mode RETURN mode",
             {"ids": [t.id for t in targets], "mode": mode},
         )
+        # `_written`'s problem, for a statement that touches many rows -- and
+        # one turn worse: `mode`'s field permission fails by *reverting* the
+        # value rather than by dropping the row, so the count alone would not
+        # notice. Neither failure raises, so both have to be read back.
+        if len(changed or []) != len(targets) or any(
+            int(row["mode"]) != mode for row in changed
+        ):
+            raise PermissionDenied(f"Permission denied: cannot chmod {entry.path}")
         return len(targets)
 
     # ------------------------------------------------------------------ search
@@ -1086,7 +1128,17 @@ class SurrealFs:
         Staleness is keyed on ``embedded_hash`` rather than ``embedded_at``:
         ``updated_at`` is bumped by *every* write, including the indexer's own,
         so a timestamp comparison would mark every row stale forever.
+
+        Root only. Indexing has to read every text file in the tree to embed
+        it, and the query cannot carry `_readable` and still be an index of the
+        whole tree -- so this is the one bulk read that is not filtered, and it
+        must not be reachable as anyone else. Searching what root indexed is
+        filtered as usual, in :meth:`search_semantic`.
         """
+        if not self.is_root:
+            raise PermissionDenied(
+                f"Permission denied: only {ROOT} may reindex embeddings"
+            )
         total = 0
         seen: set[Any] = set()
         while True:

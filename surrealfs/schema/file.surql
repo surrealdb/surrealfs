@@ -49,15 +49,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_me() {
 -- owner bit too if anyone ever writes such a mode on purpose.
 DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
     -- `$parent`'s own contribution: its owner if it is closed, else NONE.
-    --
-    -- A row written before `mode` existed belongs to nobody but root until
-    -- `docs/migrate_permissions.surql` has run. Treating a missing mode as
-    -- traversable would expose an un-migrated tree; erroring on it -- which
-    -- is what `NONE % 2` does -- takes the whole database down, including
-    -- the migration itself, because re-writing a row recomputes this.
     LET $own = IF $parent IS NONE THEN NONE
-        ELSE IF $parent.mode IS NONE OR $parent.mode % 2 = 0
-        THEN ($parent.owner ?? 'root')
+        ELSE IF $parent.mode % 2 = 0 THEN $parent.owner
         ELSE NONE END;
     RETURN IF $own IS NONE THEN $parent.gate
         ELSE IF $parent.gate IS NONE OR $parent.gate = $own THEN $own
@@ -75,44 +68,38 @@ DEFINE FUNCTION OVERWRITE fn::sfs_reachable($gate: option<string>, $me: option<s
 -- otherwise the other digit. Within a digit, `r` is `d >= 4`, `w` is
 -- `math::floor(d / 2) % 2`, and `x` is `d % 2`.
 --
+-- `$owner` and `$mode` are required, not optional: every row has both, by
+-- `DEFAULT`, so a row reaching here without one is a schema that did not apply
+-- rather than a row to guess a permission for. Coalescing them to root's would
+-- turn that into a silent wrong answer.
+--
 -- ponytail: the group digit (`math::floor($mode / 8) % 8`) is stored and
 -- round-trips through `chmod`, but is never consulted -- nothing in SurrealFS
 -- has a group concept to consult it with. Add a group table if teams ever need
 -- a folder outsiders cannot see.
--- `$owner` and `$mode` are optional for one reason only: a row written before
--- those fields existed has neither, and it must fail *closed* -- no owner reads
--- as root's, no mode as no permissions -- until
--- `docs/migrate_permissions.surql` has run. `SurrealFs.from_row` coalesces the same
--- way, so the two implementations still agree.
-DEFINE FUNCTION OVERWRITE fn::sfs_bits(
-    $owner: option<string>, $mode: option<int>, $me: option<string>
-) {
-    RETURN IF ($owner ?? 'root') = $me
-        THEN math::floor(($mode ?? 0) / 64) % 8
-        ELSE ($mode ?? 0) % 8
+DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: int, $me: option<string>) {
+    RETURN IF $owner = $me
+        THEN math::floor($mode / 64) % 8
+        ELSE $mode % 8
     END;
 };
 
 -- Readable by `$me`: reachable through every ancestor, and the read bit set.
 DEFINE FUNCTION OVERWRITE fn::sfs_can_read(
-    $gate: option<string>, $owner: option<string>, $mode: option<int>,
-    $me: option<string>
+    $gate: option<string>, $owner: string, $mode: int, $me: option<string>
 ) {
     RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_bits($owner, $mode, $me) >= 4;
 };
 
 -- The write bit of the digit that applies to `$me`. Within a digit `w` is
 -- `math::floor(d / 2) % 2`; see `fn::sfs_bits`.
-DEFINE FUNCTION OVERWRITE fn::sfs_w(
-    $owner: option<string>, $mode: option<int>, $me: option<string>
-) {
+DEFINE FUNCTION OVERWRITE fn::sfs_w($owner: string, $mode: int, $me: option<string>) {
     RETURN math::floor(fn::sfs_bits($owner, $mode, $me) / 2) % 2 = 1;
 };
 
 -- Writable by `$me`: reachable through every ancestor, and the write bit set.
 DEFINE FUNCTION OVERWRITE fn::sfs_can_write(
-    $gate: option<string>, $owner: option<string>, $mode: option<int>,
-    $me: option<string>
+    $gate: option<string>, $owner: string, $mode: int, $me: option<string>
 ) {
     RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_w($owner, $mode, $me);
 };
@@ -134,6 +121,27 @@ DEFINE FUNCTION OVERWRITE fn::sfs_can_enter(
              -- w and x are the low two bits of the digit, so both set is `% 4 = 3`.
              AND fn::sfs_bits($parent.owner, $parent.mode, $me) % 4 = 3
     END;
+};
+
+-- Whether `$row` still has children. A DELETE is keyed on the containing
+-- folder (`fn::sfs_can_enter`), which says nothing about what is *inside* the
+-- row being removed -- and for a top-level row `can_enter` is unconditionally
+-- true. Without this, one `DELETE` of a 0777 folder leaves every child holding
+-- a `parent` link and a stored `parent_key` pointing at a dead record: absent
+-- from every listing, unreachable to `_resolve`, and undeletable, while still
+-- occupying its name in `child_unique`.
+--
+-- `SurrealFs.rm` refuses the same thing with `DirectoryNotEmpty` and deletes a
+-- tree deepest-first, which satisfies this on every row it touches.
+--
+-- The SELECT is *not* permission-filtered -- a statement inside a permission
+-- clause runs unrestricted, verified on 3.2.4 and asserted in
+-- `tests/test_record_auth.py`. That is the only reason this is sound: were it
+-- filtered, a child the deleter cannot select would read as absent and the
+-- guard would fail open on precisely the rows it exists for.
+DEFINE FUNCTION OVERWRITE fn::sfs_has_children($row: record<file>) {
+    RETURN (SELECT VALUE id FROM ONLY file
+            WHERE parent_key = <string>$row LIMIT 1) IS NOT NONE;
 };
 
 -- `SurrealFs._guard_home`, written for the database: `/home` belongs to root,
@@ -159,9 +167,10 @@ DEFINE FUNCTION OVERWRITE fn::sfs_home_ok(
 -- client of their own; they are inert unless you opt into record auth, because
 -- system users bypass table and field permissions entirely.
 --
--- They enforce reads *and* writes. An earlier version checked only ancestry on
--- update and delete, which let any record user rewrite, chmod, chown or delete
--- any row it could reach -- including `/home`. See `docs/permissions.md`.
+-- They enforce reads *and* writes, and both halves are load-bearing. Ancestry
+-- alone on update and delete is not a permission check: it lets any record user
+-- rewrite, chmod, chown or delete any row it can *reach*, `/home` included. See
+-- `docs/permissions.md`.
 --
 -- The clause says `fn::sfs_gate(parent)` and must never be "tidied" to `gate`.
 -- A table permission is evaluated against the raw record *before* computed
@@ -202,7 +211,8 @@ DEFINE TABLE OVERWRITE file SCHEMAFULL
         -- folder you can write is yours to remove, same as `SurrealFs.rm`.
         FOR delete
             WHERE fn::sfs_can_enter(parent, fn::sfs_me())
-              AND fn::sfs_home_ok(parent, filename, fn::sfs_me());
+              AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
+              AND !fn::sfs_has_children(id);
 
 -- There is no `chown`, so `owner` is immutable once written -- and it has to be,
 -- because a field permission is evaluated only against the *after* state

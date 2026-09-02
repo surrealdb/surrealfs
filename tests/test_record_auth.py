@@ -119,10 +119,11 @@ async def alice_file(db, path, mode):
 
 
 async def test_a_record_user_cannot_rewrite_a_file_it_cannot_write(tenants, db):
-    """The clause used to check ancestry alone, so any reachable row was writable.
+    """Ancestry alone would make every reachable row writable.
 
-    Worse, the UPDATE came back empty because the *select* permission hid the row
-    it had just rewritten -- it looked like nothing had happened.
+    And silently: the UPDATE comes back empty either way, because the *select*
+    permission hides the row it would have rewritten, so a caller sees the same
+    thing whether it was refused or succeeded.
     """
     _, bob = tenants
     await alice_file(db, "/projects/alice.md", 0o644)
@@ -167,8 +168,8 @@ async def test_a_record_user_cannot_create_or_delete_in_a_folder_it_cannot_write
 ):
     """Create and delete are keyed on the containing folder, as unix keys them.
 
-    `FOR create` checked only ancestry, and `FOR delete` the same, so a 0555
-    folder held nothing back.
+    Ancestry alone in `FOR create` and `FOR delete` makes a 0555 folder hold
+    nothing back.
     """
     _, bob = tenants
     alice = SurrealFs(db, user="alice")
@@ -197,9 +198,9 @@ async def test_a_record_user_cannot_create_or_delete_in_a_folder_it_cannot_write
 async def test_the_home_root_is_immutable_to_record_users(tenants, db):
     """/home is root's, and has to survive a record user with a raw client.
 
-    It is 0777 so that a user can create their own home, which meant its own
-    other-write bit let anyone take it -- and one DELETE orphaned every home to
-    the top level with a dangling parent.
+    It is 0777 so that a user can create their own home, so its own other-write
+    bit is what would otherwise let anyone take it -- and one DELETE would
+    orphan every home to the top level with a dangling parent.
     """
     _, bob = tenants
     at_home = "WHERE parent_key='root' AND filename='home'"
@@ -312,6 +313,17 @@ async def test_surrealfs_behaves_the_same_over_a_record_connection(tenants, db):
     await over_record.write_text("/projects/from-bob.md", "hi")
     assert await over_system.read_text("/projects/from-bob.md") == "hi"
 
+    # `rm -r` sends one `DELETE $ids` with the subtree sorted deepest-first, and
+    # `FOR delete` refuses a row that still has children -- so this only works
+    # if the statement applies the list in order. `chmod -R` sends one
+    # `UPDATE $ids` past `mode`'s field permission the same way.
+    await over_record.mkdir("/projects/tree/inner", parents=True)
+    await over_record.write_text("/projects/tree/inner/a.md", "a")
+    assert await over_record.chmod("/projects/tree", 0o700, recursive=True) == 3
+    assert (await over_system.stat("/projects/tree/inner")).mode == 0o700
+    assert await over_record.rm("/projects/tree", recursive=True) == 3
+    assert await paths(db, "WHERE filename IN ['tree', 'inner', 'a.md']") == []
+
 
 async def test_the_agent_surfaces_work_under_record_auth(
     db, surreal_url, namespace, monkeypatch
@@ -381,6 +393,31 @@ async def test_add_user_creates_a_private_home_owned_by_them(db):
     assert home.mode == 0o700
 
 
+async def test_a_record_user_cannot_be_called_root(db, signed_in):
+    """`root` is the bypass identity, not a name that is free to take.
+
+    `file.owner` DEFAULTs to it and `/home` is seeded to it, so `user:root`
+    owns every row nobody claimed. `mode`'s field permission is keyed on the
+    owner, which would let that user chmod `/home` to 0700 and -- through
+    `gate` -- lock every other user out of their own home. Refused twice: the
+    row is never created, and the signin would not accept the name either.
+    """
+    from surrealdb.errors import SurrealDBMethodError
+
+    await apply_schema(db, record_auth=True)
+    with pytest.raises(ValueError):
+        await add_user(db, "root", "pw")
+    assert await rows(db, "SELECT VALUE id FROM user") == []
+
+    # Even with the row planted by hand, the access method refuses the name.
+    await rows(
+        db,
+        "CREATE user:root SET password = crypto::argon2::generate('pw')",
+    )
+    with pytest.raises(SurrealDBMethodError):
+        await signed_in("root", "pw")
+
+
 async def test_signin_fails_on_a_bad_password(db, signed_in):
     from surrealdb.errors import SurrealDBMethodError
 
@@ -388,3 +425,47 @@ async def test_signin_fails_on_a_bad_password(db, signed_in):
     await add_user(db, "dave", "right")
     with pytest.raises(SurrealDBMethodError):
         await signed_in("dave", "wrong")
+
+
+async def test_a_record_user_cannot_orphan_a_subtree(tenants, db):
+    """A delete is keyed on the containing folder, which says nothing about
+    what is inside the row being removed.
+
+    `/projects` is 0777 and top-level, where `fn::sfs_can_enter` is
+    unconditionally true, so nothing in the folder rules stops one `DELETE`
+    from taking a whole non-empty folder. What it leaves is worse than a leak:
+    every child keeps a `parent_key` pointing at a dead record, so it is gone
+    from every listing, unreachable to `_resolve`, and undeletable -- while
+    still holding its name in `child_unique`. `SurrealFs.rm` refuses this with
+    `DirectoryNotEmpty`; the clause is the same rule for a raw client.
+    """
+    _, bob = tenants
+    alice = SurrealFs(db, user="alice")
+    await alice.write_text("/projects/plans/q3.md", PUBLIC)
+
+    await rows(bob, "DELETE file WHERE filename = 'plans'")
+    assert "/projects/plans/q3.md" in await paths(db)
+
+    # Deepest-first is what `rm -r` does, and it satisfies the clause on every
+    # row -- so this is a restriction on the order, not on the ability.
+    await rows(bob, "DELETE file WHERE filename = 'q3.md'")
+    await rows(bob, "DELETE file WHERE filename = 'plans'")
+    assert await paths(db, "WHERE filename IN ['plans', 'q3.md']") == []
+
+
+async def test_children_the_deleter_cannot_see_still_block_the_delete(tenants, db):
+    """The subquery in `FOR delete` must not itself be permission-filtered.
+
+    If it were, a child the deleter cannot select would read as absent and the
+    guard would fail open on exactly the rows it matters for. Verified here
+    rather than reasoned about: bob may enter 0777 `/shared` but cannot see
+    alice's 0600 file inside it, and the delete still has to be refused.
+    """
+    _, bob = tenants
+    alice = SurrealFs(db, user="alice")
+    await alice.write_text("/shared/private.md", SECRET)
+    await alice.chmod("/shared/private.md", 0o600)
+
+    assert await paths(bob, "WHERE filename = 'private.md'") == []
+    await rows(bob, "DELETE file WHERE filename = 'shared'")
+    assert "/shared" in await paths(db)

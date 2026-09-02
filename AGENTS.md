@@ -226,16 +226,14 @@ many rows without resolving them — `ls`, `glob`, `search_text`,
 and `search` returns file *content*, so forgetting one hands another user's
 notes to a model. `tests/test_permissions.py` asserts all four.
 
-**A row with no `mode` must stay readable-by-root, never error and never open.**
-`NONE % 2` raises, and `gate` is recomputed whenever a row is rewritten, so the
-natural behaviour takes down every read *and* `docs/migrate_permissions.surql`
-itself. `fn::sfs_gate`, `fn::sfs_bits` and `FileEntry.from_row` all coalesce a
-missing owner to `root` and a missing mode to no bits. Keep the three in step.
-Delete all three once no pre-permissions database is left to migrate.
+**A statement inside a permission clause runs with permissions off.** Verified
+on 3.2.4: the `SELECT` in `fn::sfs_has_children` sees rows the caller cannot
+select, which is the only reason `FOR delete` can use it — a filtered subquery
+would read an invisible child as absent and fail open. `tests/
+test_record_auth.py` asserts it, because nothing else would notice.
 
 **`FOR $x IN (SELECT ...)` is rejected** with "Cannot execute statement using
-value: <first row>". Bind the subquery with `LET` first. Bit us in the
-migration.
+value: <first row>". Bind the subquery with `LET` first.
 
 **The `file` table's PERMISSIONS clause says `fn::sfs_gate(parent)`, and
 "tidying" it to `gate` opens the whole tree — silently.** A table permission is

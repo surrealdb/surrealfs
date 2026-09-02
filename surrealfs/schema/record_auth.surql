@@ -34,9 +34,14 @@ DEFINE FIELD OVERWRITE created_at ON TABLE user TYPE datetime VALUE time::now() 
 -- owned by the name it carries. That is the squatting hole `_guard_home` closes
 -- on the Python side, and it would be wide open here. Provisioning is an admin
 -- operation: `python -m surrealfs.users add <name>`.
+-- `root` is refused by name. It is the identity `SurrealFs` treats as the
+-- permission bypass, and the value `file.owner` DEFAULTs to, so a record user
+-- holding it owns `/home` and every unclaimed row. `surrealfs.users.add` will
+-- not create the row; this makes the invariant local to the schema, where the
+-- rest of the anti-squatting argument lives.
 DEFINE ACCESS OVERWRITE account ON DATABASE TYPE RECORD
     SIGNIN (
         SELECT * FROM ONLY type::record('user', $user)
-        WHERE crypto::argon2::compare(password, $pass)
+        WHERE $user != 'root' AND crypto::argon2::compare(password, $pass)
     )
     DURATION FOR TOKEN 15m, FOR SESSION 12h;

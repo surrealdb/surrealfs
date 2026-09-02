@@ -6,13 +6,12 @@ records why it is built the way it is.
 
 ## Enforcement is in `SurrealFs`, with the database as an optional backstop
 
-The `file` table used to carry `PERMISSIONS ... WHERE owner = $auth.id`, and it
-never did anything. Every surface — the browser, the Hermes plugin, the
-indexer, the examples — signs in as a root, namespace or database *system*
-user, and those bypass table permissions entirely. `$auth.id` was NONE, so
-`owner` defaulted to NONE on every row ever written.
+A `PERMISSIONS` clause on the `file` table is inert on its own. Every surface —
+the browser, the Hermes plugin, the indexer, the examples — signs in as a root,
+namespace or database *system* user, and those bypass table permissions
+entirely, leaving `$auth` NONE.
 
-Record authentication would make the clause live, and it was rejected as the
+Record authentication is what makes the clause live, and it was rejected as the
 *default* — not as an option. Making it mandatory would mean provisioning a
 `user` row and a signin for every agent and every person, in every deployment,
 before anything worked at all. Most people running SurrealFS have one agent and
@@ -107,12 +106,39 @@ path rather than of timing removes the whole class of problem, and it is what
 `_guard_home` still refuses to let bob create `/home/alice`, so the mistake
 fails loudly rather than silently doing something harmless.
 
-## Deletion is keyed on the parent folder
+## Deletion is keyed on the parent folder, and never orphans
 
 `rm` checks write and execute on the *containing folder*, not on the file. This
 surprises people, and it is what unix does: a read-only file in a folder you can
 write is yours to remove. Agents rely on it more than they realise — it is why
 `rm` on a 0444 file in a shared folder works.
+
+The folder rule says nothing about what is *inside* the row being removed, and
+for a top-level row `fn::sfs_can_enter` is unconditionally true — so on its own
+it allows deleting a non-empty folder. What that leaves is worse than a denial:
+every child keeps a `parent` link and a stored `parent_key` pointing at a dead
+record, so it is absent from every listing, unreachable to `_resolve`, and
+undeletable, while still holding its name in `child_unique`. `SurrealFs.rm`
+raises `DirectoryNotEmpty`; `fn::sfs_has_children` is the same rule for a raw
+client. A recursive delete goes deepest-first, which satisfies both.
+
+## Only root may reindex embeddings
+
+`reindex_embeddings` has to read every text file in the tree in order to embed
+it, so it is the one bulk read that cannot carry `fn::sfs_can_read` and still be
+an index of the whole tree. "Root only" is therefore the whole of its access
+control, and it is enforced in `SurrealFs`, not left to the caller — the browser
+takes a `--user` flag, so a non-root path into it exists. Searching what root
+indexed is filtered as usual, in `search_semantic`.
+
+## `root` is not a username anyone can take
+
+`root` is the identity `SurrealFs` treats as the bypass, and the value
+`file.owner` DEFAULTs to. A record user holding that name would own `/home` and
+every row nobody claimed — and since `mode`'s field permission is keyed on the
+owner, they could chmod `/home` to 0700 and, through `gate`, lock every other
+user out of their own home. `surrealfs.users.add` refuses the name and the
+`SIGNIN` clause refuses it again.
 
 ## Record auth, optionally
 
@@ -145,7 +171,11 @@ the file, versus `w`+`x` on the folder. The split that resolves it:
   `symlink` need the write bit; `mode` needs ownership; `owner` is immutable,
   because there is no `chown`.
 - `FOR create` and `FOR delete` are keyed on the containing folder via
-  `fn::sfs_can_enter`, exactly as `SurrealFs._require_writable_dir` is.
+  `fn::sfs_can_enter`, exactly as `SurrealFs._require_writable_dir` is, and
+  `FOR delete` also requires the row to be childless (`fn::sfs_has_children`).
+  The `SELECT` inside that predicate runs with permissions **off** — verified on
+  3.2.4 — which is the only reason it is sound: filtered, a child the deleter
+  cannot select would read as absent and the guard would fail open.
 - `fn::sfs_home_ok` is `_guard_home` restated for the database: `/home` is
   root's, and a home under it belongs to the name it carries.
 
@@ -155,6 +185,9 @@ true the instant somebody writes their own name into it, so it has to be
 `WHERE false`. With `owner` immutable, `mode`'s self-reference is then sound.
 A denied *field* write is also silent — the row comes back with that field
 unchanged rather than an error — where a denied *statement* returns no rows.
+Neither raises, so every write path in `fs.py` reads its result back: `_written`
+for the single-row writes, and `chmod` compares the returned `mode` against what
+it asked for, because a reverted field would not change the row count.
 
 The clause is defined **unconditionally**. A table permission is inert for
 system users, so it costs non-adopters nothing and there is no conditional DDL

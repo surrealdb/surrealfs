@@ -350,8 +350,13 @@ class Browser:
             return None
 
     async def _reindex(self) -> None:
-        """Re-embed what just changed. Incremental: unchanged rows are skipped."""
-        if self.embed is None:
+        """Re-embed what just changed. Incremental: unchanged rows are skipped.
+
+        Skipped entirely unless this browser is root: `reindex_embeddings` reads
+        every text file to embed it, which is not a thing `--user alice` may do.
+        Semantic *search* still works for them against what root has indexed.
+        """
+        if self.embed is None or not self.fs.is_root:
             return
         try:
             await self.fs.reindex_embeddings(self.embed, version=INDEXER_VERSION)

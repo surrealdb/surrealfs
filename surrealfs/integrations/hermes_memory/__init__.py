@@ -619,12 +619,12 @@ class SurrealFsMemory(_Base):
         from surrealfs.embed import make_embedder
         from surrealfs.integrations._connect import connected
 
-        # The same call the `surrealfs_search` tool makes, deliberately: recall
-        # used to run its own fan-out, one search per keyword rarest-first, which
-        # measured marginally better (MRR 0.854 against 0.833 over eight queries)
-        # only because `search` ranked badly. Now that ranking is BM25, the
-        # difference is inside the noise of an eight-query sample, and one shared
-        # retrieval path that both surfaces improve together beats two.
+        # The same call the `surrealfs_search` tool makes, deliberately. A
+        # fan-out of its own -- one search per keyword, rarest first -- measured
+        # marginally better (MRR 0.854 against 0.833 over eight queries) back
+        # when `search` ranked badly; against BM25 ranking the difference is
+        # inside the noise of an eight-query sample, and one shared retrieval
+        # path that both surfaces improve together beats two.
         async with connected() as db:
             fs = SurrealFs(db, user=_agent_user())
             # Whole filesystem, not just the memory folder: the notes the agent
@@ -672,14 +672,13 @@ class SurrealFsMemory(_Base):
     def _is_mine(self, path: str) -> bool:
         """Whether `path` is this agent's to recall.
 
-        One thing it drops now: another *profile's* filed turns — raw
-        transcripts are what must not cross over, and sibling profiles live
-        inside this agent's own home, under the same owner, so no file
-        permission can tell them apart.
-
-        Other agents' homes used to be dropped here too. They no longer reach
-        this method: `/home/<user>` is created 0700, so `search` never returns
-        anything from one. Filtering them again would be dead code.
+        Two things it drops. Another *profile's* filed turns — raw transcripts
+        are what must not cross over, and sibling profiles live inside this
+        agent's own home, under the same owner, so no file permission can tell
+        them apart. And anything under another agent's home: `/home/<user>` is
+        created 0700, so `search` should not return one at all, but a mode is a
+        thing somebody can chmod and `cp -r` can inherit, and a transcript leak
+        is not worth resting on one bit that a two-line check covers.
 
         Outside `/home/` nothing is dropped. `/preferences/` and `/projects/` are
         the shared root the notes skill points at, and they are the handover point
@@ -688,6 +687,8 @@ class SurrealFsMemory(_Base):
         """
         if path.startswith(f"{self.root()}/"):
             return True
+        if path.startswith(f"{HOME_ROOT}/") and not path.startswith(f"{_home()}/"):
+            return False
         return not (
             path.startswith(f"{_memory_dir()}/")
             or path.startswith(f"{LEGACY_MEMORY_DIR}/")

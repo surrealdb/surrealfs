@@ -80,12 +80,12 @@ class FileEntry:
             filename=row.get("filename", ""),
             content_type=row.get("content_type", ""),
             is_folder=bool(row.get("is_folder", False)),
-            owner=row.get("owner") or "root",
-            # No mode means a row older than the permissions schema, not a
-            # permissive one: it reads as no bits at all, so only root sees it
-            # until `docs/migrate_permissions.surql` has run. Mirrors the `?? 0` in
-            # `fn::sfs_bits`.
-            mode=int(row["mode"]) if row.get("mode") is not None else 0,
+            # Not coalesced: `owner` and `mode` have DEFAULTs, so every row
+            # has both, and a row without one is a schema that did not apply.
+            # Guessing a permission for it is how a wrong answer stays quiet --
+            # `fn::sfs_bits` requires them for the same reason.
+            owner=row["owner"],
+            mode=int(row["mode"]),
             gate=row.get("gate"),
             size=int(size or 0),
             hash=row.get("hash") or "",

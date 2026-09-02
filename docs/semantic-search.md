@@ -8,6 +8,11 @@ count = await fs.reindex_embeddings(embed, version="openai:text-embedding-3-smal
 hits = await fs.search("how do I get paid", vector=await embed("how do I get paid"))
 ```
 
+`reindex_embeddings` is root only: it reads every text file in the tree to embed
+it, so it is the one bulk read that cannot be permission-filtered and still be an
+index of the whole tree. Searching what root indexed is filtered as usual, per
+caller. See [permissions.md](permissions.md).
+
 `fs.search` runs both arms and fuses them by rank — full-text scores are BM25 and
 vector scores are distances, so there is nothing sane to normalise. Without a
 `vector` it is full-text only. `search_text` and `search_semantic` remain
