@@ -25,11 +25,11 @@ pydantic-ai = ["pydantic-ai-slim>=2.0"]
 embed = ["openai>=2.0"]
 # The file browser (`surrealfs-browser`). starlette is listed explicitly because
 # it reaches the tree today only as a transitive of pydantic-ai's `web` extra,
-# and markdown-it-py only as one of rich's -- both are imported directly here.
+# and it is imported directly here. The page itself is a React SPA -- see
+# `surrealfs/browser/ui/` -- so nothing renders markdown on this side any more.
 browser = [
     "starlette>=0.37",
     "uvicorn>=0.30",
-    "markdown-it-py>=3",
     "pydantic-ai-slim[anthropic]>=2.0",
     "python-dotenv>=1",
     "openai>=2.0",
@@ -66,10 +66,15 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["surrealfs"]
+# The page's TypeScript source. `static/` below is what it compiles to, and that
+# is what ships; nobody installing the wheel builds it.
+exclude = ["surrealfs/browser/ui"]
 
 [tool.hatch.build]
 artifacts = [
-    "surrealfs/browser/*.html",
+    # The vite build output, which is gitignored: `just ui` before `hatch build`
+    # or the wheel ships an API with no page in front of it.
+    "surrealfs/browser/static/**",
     "surrealfs/schema/*.surql",
     "surrealfs/tools/docs/*.md",
     "surrealfs/integrations/*/README.md",

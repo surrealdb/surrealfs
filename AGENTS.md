@@ -19,8 +19,9 @@ surrealfs/
   schema/           file.surql, record_auth.surql, apply_schema()
   users.py          `python -m surrealfs.users` — record-auth provisioning
   tools/            args.py, handlers.py, registry, docs/*.md
-  browser/          the `surrealfs-browser` web UI — page.html, the Starlette
-                    app, its chat agent, and the CLI in __main__.py
+  browser/          the `surrealfs-browser` web UI — the Starlette JSON API,
+                    the React page under ui/ (built into the gitignored
+                    static/), its chat agent, and the CLI in __main__.py
   integrations/     _connect.py (env connection, shared by the browser and the
                     Hermes surfaces), and one dir per integration, each with its
                     own README.md: pydantic_ai/, json_tools/, hermes/ (plugin +
@@ -108,6 +109,20 @@ Two constraints the recipe exists to satisfy: the script must resolve inside
 `$HERMES_HOME/scripts/`, and cron sanitizes the subprocess env against a
 provider-credential blocklist that `OPENAI_API_KEY` is on — so the key comes from a
 sourced file, never from the gateway's environment.
+
+**The browser page is a build artefact, and it is gitignored.** `surrealfs/browser/ui/`
+is a vite + React app on `@surrealdb/ui`; `surrealfs/browser/static/` is what it emits
+and what Starlette serves. A fresh clone has no `static/`, so `serve()` checks for it and
+says `run just ui` rather than letting every asset 404. `just browser` depends on `just ui`,
+and `hatch build` needs one too — the wheel picks `static/**` up from `[tool.hatch.build]
+artifacts`, and packages an API with no page in front of it if you skip it.
+
+**Vite emits every asset a dependency *imports*, tree-shaking or not.** `@surrealdb/ui`
+imports ~800 picto and brand images at the top of its entry point and the page uses one,
+but the asset is emitted when the module is loaded, which happens before the unused
+bindings are dropped — 31 MB of build output. `pruneUnreferencedAssets` in
+`ui/vite.config.ts` deletes what no chunk or stylesheet names, which takes it to 2 MB.
+Fonts survive because the bundled CSS references them.
 
 **The browser's `.env` must be found with `find_dotenv(usecwd=True)`.** Plain
 `load_dotenv()` walks up from the *calling module's* directory, not the working

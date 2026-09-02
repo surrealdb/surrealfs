@@ -4,7 +4,7 @@
     <img width=120 src="https://raw.githubusercontent.com/surrealdb/icons/main/surreal.svg" />
 </p>
 
-<h1 align="center">SurrealDB file system</h1><br/>
+<h1 align="center">SurrealDB filesystem</h1><br/>
 <p align="center">A filesystem-based memory layer for agents, with hybrid search, backed by SurrealDB.</p>
 
 <br>
@@ -155,6 +155,21 @@ private home. Every variable has a command-line form too
 The server binds loopback. `--host 0.0.0.0` exposes it, and then anyone who can
 reach the port has whatever access those credentials do. The page has no login
 of its own.
+
+The page is a React app built on the [SurrealDB UI Kit][ui-kit]. Its source is
+in `surrealfs/browser/ui/`, and the build output it serves is gitignored, so
+working on this repo needs [bun][bun]:
+
+```bash
+just ui        # build the page into surrealfs/browser/static
+just ui-dev    # vite dev server, proxying the API to `just browser`
+```
+
+`just browser` builds it for you. Nothing else in the project needs bun --
+`just check` stays Python-only.
+
+[ui-kit]: https://github.com/surrealdb/ui-kit
+[bun]: https://bun.sh
 
 ## Semantic search
 

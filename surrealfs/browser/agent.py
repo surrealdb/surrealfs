@@ -14,7 +14,7 @@ from ..tools import ToolContext
 
 INSTRUCTIONS = """\
 You organise the user's thoughts, conversations, and notes into a well-structured
-file system. You have a persistent filesystem; treat it as your memory.
+filesystem. You have a persistent filesystem; treat it as your memory.
 
 The user reads this filesystem too, so it is also how you hand over a plan, a
 document, or a to-do list. Write files they can open on their own.

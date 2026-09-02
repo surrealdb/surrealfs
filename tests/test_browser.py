@@ -1,9 +1,9 @@
-"""Guards on the file browser: the XSS-relevant settings, the chat transcript
-round trip, and the signin payload each auth level produces."""
+"""Guards on the file browser: the JSON API the page is written against, the
+chat transcript round trip, and the signin payload each auth level produces."""
 
 from datetime import datetime
-from pathlib import Path
 
+import httpx
 import pytest
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
@@ -22,21 +22,94 @@ from websockets.exceptions import ConnectionClosedError
 from surrealfs import browser
 from surrealfs.integrations import _connect
 
-PAGE = Path(browser.__file__).with_name("page.html")
 
+def client(fs) -> httpx.AsyncClient:
+    """Talk to the app in this test's event loop.
 
-def test_server_markdown_reaches_the_dom_only_through_the_scrubber():
-    # Rendered markdown carries agent output and file contents. `setMarkdown`
-    # strips event handlers and script-y URLs; a raw sink bypasses all of it.
-    source = PAGE.read_text()
-    assert "innerHTML" not in source
-    assert "setMarkdown(" in source
-
-
-def test_the_markdown_renderer_still_escapes_raw_html():
-    assert browser.MD.render("<img src=x onerror=alert(1)>").strip() == (
-        "<p>&lt;img src=x onerror=alert(1)&gt;</p>"
+    Not starlette's `TestClient`: it drives the app from a thread with its own
+    loop, and a SurrealDB WebSocket belongs to the loop it was opened on -- the
+    same reason `serve()` runs uvicorn by hand instead of `uvicorn.run()`.
+    """
+    return httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=browser.build_app(fs)),
+        base_url="http://browser",
     )
+
+
+async def test_the_json_api_the_page_is_written_against(fs):
+    """The page has no other contract with the server than these shapes."""
+    async with client(fs) as http:
+        made = await http.post(
+            "/api/file", json={"path": "/notes/a.md", "folder": False}
+        )
+        assert made.status_code == 200, made.text
+        assert made.json().keys() == {
+            "path",
+            "filename",
+            "is_folder",
+            "content_type",
+            "size",
+            "updated_at",
+        }
+        assert made.json()["content_type"] == "text/markdown"
+
+        # The tree is flat and recursive: the page builds the hierarchy itself,
+        # including the `/notes` folder, which was created implicitly.
+        tree = (await http.get("/api/tree")).json()
+        assert {"/notes", "/notes/a.md"} <= {e["path"] for e in tree}
+        assert [e["is_folder"] for e in tree if e["path"] == "/notes"] == [True]
+
+        again = await http.post(
+            "/api/file", json={"path": "/notes/a.md", "folder": False}
+        )
+        assert again.status_code == 409
+        assert "error" in again.json()
+
+        saved = await http.put(
+            "/api/file", json={"path": "/notes/a.md", "content": "# hi\n\nrefactor"}
+        )
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["size"] == len("# hi\n\nrefactor")
+
+        assert (await http.get("/raw", params={"path": "/notes/a.md"})).text == (
+            "# hi\n\nrefactor"
+        )
+
+        found = (await http.get("/api/search", params={"q": "refactor"})).json()
+        assert found["hybrid"] is False  # no embedder was passed
+        assert [hit["path"] for hit in found["results"]] == ["/notes/a.md"]
+        assert "refactor" in found["results"][0]["snippet"]
+
+        moved = await http.post(
+            "/api/move", json={"src": "/notes/a.md", "dst": "/b.md"}
+        )
+        assert moved.json()["path"] == "/b.md"
+
+        gone = await http.request("DELETE", "/api/file", params={"path": "/b.md"})
+        assert gone.json() == {"removed": 1}
+
+
+async def test_a_non_empty_folder_needs_the_recursive_flag(fs):
+    """The 409 is what drives the page's second confirmation."""
+    async with client(fs) as http:
+        await http.post("/api/file", json={"path": "/x/y.md", "folder": False})
+        refused = await http.request("DELETE", "/api/file", params={"path": "/x"})
+        assert refused.status_code == 409
+
+        forced = await http.request(
+            "DELETE", "/api/file", params={"path": "/x", "recursive": "1"}
+        )
+        assert forced.json() == {"removed": 2}
+
+
+def test_the_page_is_the_built_react_bundle():
+    """`static/` is gitignored, so a fresh clone has no UI until `just ui` runs.
+
+    Nothing here can build it; assert the path the app serves, which is what
+    `serve()` checks before it binds a port.
+    """
+    assert browser.INDEX.name == "index.html"
+    assert browser.INDEX.parent == browser.STATIC
 
 
 def test_a_denial_is_a_403_not_a_server_error():
@@ -81,9 +154,10 @@ def test_a_stored_conversation_replays_two_responses_as_one_bubble():
     assert [b["who"] for b in bubbles] == ["you", "agent"], bubbles
     # The note about the open file rides on the message; a reloaded transcript
     # shows what the user actually typed.
-    assert bubbles[0] == {"who": "you", "text": "hi", "html": ""}
+    assert bubbles[0] == {"who": "you", "text": "hi"}
     assert bubbles[1]["tools"] == ["ls"]
-    assert bubbles[1]["html"].strip() == "<p><strong>done</strong></p>"
+    # Markdown, not HTML: the page renders the agent's reply itself.
+    assert bubbles[1]["text"] == "**done**"
 
 
 def test_session_paths_are_slugged_and_dated():
