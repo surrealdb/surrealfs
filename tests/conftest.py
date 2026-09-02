@@ -27,6 +27,8 @@ import pytest
 from surrealdb import AsyncSurreal
 
 from surrealfs import SurrealFs, apply_schema
+from surrealfs.fs import ROOT as ROOT_USER
+from surrealfs.integrations import _connect
 from surrealfs.tools import ToolContext
 
 ROOT = {"username": "root", "password": "root"}
@@ -103,13 +105,23 @@ def surreal_url() -> str:
         process.wait(timeout=10)
 
 
+def _namespace_for(request) -> str:
+    """A fresh namespace per test, keeping them isolated and order-independent."""
+    return "t" + str(abs(hash(request.node.nodeid)))[:12]
+
+
+@pytest.fixture
+def namespace(request) -> str:
+    """The namespace `db` opened, for a test that also connects by environment."""
+    return _namespace_for(request)
+
+
 @pytest.fixture
 async def db(surreal_url, request):
     """A connection to a namespace unique to this test, with the schema applied."""
     connection = AsyncSurreal(surreal_url)
     await connection.signin(ROOT)
-    # A fresh namespace per test keeps them isolated and order-independent.
-    name = "t" + str(abs(hash(request.node.nodeid)))[:12]
+    name = _namespace_for(request)
     await connection.query_raw(
         f"REMOVE NAMESPACE IF EXISTS {name}; DEFINE NAMESPACE {name};"
     )
@@ -123,7 +135,43 @@ async def db(surreal_url, request):
 
 @pytest.fixture
 def fs(db) -> SurrealFs:
-    return SurrealFs(db)
+    """The filesystem as root: no permission checks, for tests about everything else."""
+    return SurrealFs(db, user=ROOT_USER)
+
+
+@pytest.fixture
+async def signed_in(surreal_url, request):
+    """Open a *second* connection to this test's namespace as a record user.
+
+    Record auth is opt-in, so the `db` fixture does not apply it; a test that
+    wants it calls `apply_schema(db, record_auth=True)` and provisions first.
+    """
+    opened = []
+
+    async def open_as(name: str, password: str):
+        connection = AsyncSurreal(surreal_url)
+        await connection.signin(
+            {
+                "namespace": _namespace_for(request),
+                "database": "test",
+                "access": _connect.RECORD_ACCESS,
+                "variables": {"user": name, "pass": password},
+            }
+        )
+        await connection.use(_namespace_for(request), "test")
+        opened.append(connection)
+        return connection
+
+    yield open_as
+    for connection in opened:
+        with contextlib.suppress(Exception):
+            await connection.close()
+
+
+@pytest.fixture
+def as_user(db):
+    """Build a filesystem acting as a named user, for the permission tests."""
+    return lambda name: SurrealFs(db, user=name)
 
 
 @pytest.fixture

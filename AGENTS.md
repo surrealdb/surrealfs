@@ -16,7 +16,8 @@ surrealfs/
   errors.py         exception hierarchy (dual-inherits builtin OSErrors)
   paths.py          normalisation + glob->regex
   embed.py          OpenAI embedder + `python -m surrealfs.embed` indexer daemon
-  schema/           file.surql, user.surql, apply_schema()
+  schema/           file.surql, record_auth.surql, apply_schema()
+  users.py          `python -m surrealfs.users` — record-auth provisioning
   tools/            args.py, handlers.py, registry, docs/*.md
   browser/          the `surrealfs-browser` web UI — page.html, the Starlette
                     app, its chat agent, and the CLI in __main__.py
@@ -54,7 +55,7 @@ Hermes has one flat tool namespace, and `tools/registry.py` rejects a name
 already owned by another toolset by *logging an error and returning* — no
 exception. Registering `write_file` would therefore lose to Hermes' built-in
 disk one, silently, and the model would go on calling that instead. `PREFIX` in
-`integrations/hermes/__init__.py` keeps all fourteen and disambiguates the two
+`integrations/hermes/__init__.py` keeps all fifteen and disambiguates the two
 filesystems for the model; `_describe` rewrites the cross-references inside the
 shared `docs/*.md` text to match, since `cat.md` telling the model to use
 `read_bytes` is a dead end when the tool is `surrealfs_read_bytes`.
@@ -123,18 +124,24 @@ duplicate note. Since this surface returns a ranked list of snippets, a weak hit
 cheap to dismiss and an unseen one is not. `match="all"` is there for callers that
 want a precise filter and read empty as a real answer.
 
-**Scoring must run on `search::analyze` output, or stemmed matches score zero.**
-This was the real defect behind a long detour. The index analyzes with
-`snowball(english)`, so a query for `prefer` matches a file saying "Prefers" — but the
-Python scorer counted *raw words*, found no literal "prefer", scored the file `0.000`,
-and sorted it below files that did not answer the question. Hence
-`search::analyze($analyzer, content) AS tokens` in the query, `$terms` for the
-analyzed query, and `ANALYZER` in `fs.py` kept in step with `schema/file.surql`.
-Ranking is Okapi BM25 (`_bm25`) over those tokens: `df` from the matched rows only,
-stopwords dropped from scoring but never from matching (`_scoring_terms`).
+**Retrieval lives in `schema/file.surql`, not in `fs.py`.** `fn::sfs_search_text`,
+`fn::sfs_search_semantic` and `fn::sfs_hybrid_search` are the queries; `SurrealFs`
+calls them and turns rows into `SearchHit`s. That is what gives a TS client or a raw
+`surreal sql` session the same ranked, permission-filtered retrieval Python gets,
+and it is why there is no second copy of BM25 or RRF to keep in step. The one part
+still done in Python is the snippet, because `search::highlight` and
+`search::offsets` are genuinely broken (below).
 
 Measured on `test_ranking_quality_over_a_realistic_corpus`, which exists to keep this
-honest: raw term counts scored **MRR 0.591**, BM25 on analyzer tokens **0.823**.
+honest: raw term counts scored **MRR 0.591**, Python BM25 over analyzer tokens
+**0.823**, and server-side `search::score` **0.833**.
+
+The Python scorer this replaced had one instructive defect worth not repeating: it
+counted *raw words*. The index analyzes with `snowball(english)`, so a query for
+`prefer` matches a file saying "Prefers" — but a raw-word scorer finds no literal
+"prefer", scores the file `0.000` and sorts it below files that do not answer the
+question at all. Anything that scores full-text results has to score whatever the
+analyzer produced, which server-side BM25 does by construction.
 
 Three things that look like fixes and measurably were not:
 
@@ -152,10 +159,9 @@ the question still pulls in files dense with it — "what does the user prefer" 
 term. That is what the vector arm is for. Do not tune BM25 to paper over it; a test
 asserting the opposite was deleted rather than have the scorer chase it.
 
-Related ceiling: `limit` is applied after Python ranking, so `search_text` fetches
-the content of every matching row and now asks the server to tokenise each one.
-Fine for notes; a corpus where one common term matches thousands of files needs
-server-side scoring before a SQL `LIMIT` can be trusted not to wreck the order.
+That ceiling used to be worse: `limit` was applied *after* Python ranking, so
+`search_text` fetched and tokenised every matching row. Ranking in the database
+fixed it — the `LIMIT` is now applied after `ORDER BY score`, inside the query.
 
 **`SurrealFs._query` goes through `query_raw()`, not `query()`.** The envelope is
 what carries each statement's error *kind*, which is how we tell a retryable
@@ -189,17 +195,45 @@ chains `LET $k = <string>$p`, and `<string>NONE` is the literal `"NONE"`, which
 matches no row. Substituting `'root'` as a fallback would make `/ghost/a.md`
 resolve to `/a.md`.
 
-**FTS scoring is broken upstream.** On 3.2.x `search::score` returns `0.0`,
-`search::highlight` returns the content unchanged, and `search::offsets` returns
-`null`. The match operator itself works and is index-backed, so `search_text`
-matches in SurrealQL and then ranks and snippets in Python. Revisit if a later
-release fixes the functions.
+**`search::score` is not broken — it clamps.** This was recorded here for a long
+time as broken upstream, on the evidence that it returned `0.0`. It does, constantly,
+and correctly: SurrealDB scores with the unsmoothed BM25 IDF, `ln((N - df + 0.5) /
+(df + 0.5))`, clamped at zero, so a term held by more than about half the corpus is
+worth nothing to any document. Every test corpus here was three files, where that is
+*every* term. On ten documents with the term in two, it scores fine (verified on
+3.2.4+20260803.93ab219, and `tests/test_search.py::_fill` exists to keep test corpora
+above that threshold).
+
+Two consequences. A `score` of `0.0` is normal, not a failure, and `path` is the
+documented tie-break when it happens. And Python's old `_bm25` used the *smoothed*
+`ln(1 + ...)` variant, which is always positive — so the two disagreed at the low end,
+which is why a couple of two-file ranking tests had to grow a corpus when ranking
+moved into the database.
+
+`search::highlight` (returns the content unchanged) and `search::offsets` (returns
+NONE) really are broken on 3.2.x, and there is no `string::index_of` or `string::find`
+to work around them with. Snippets therefore stay in Python (`_snippet`), which can
+centre the window on the first *unstemmed* match — better than anything the server
+could currently return.
 
 **HNSW needs `<|k,ef|>` with literal integers.** `<|k,COSINE|>` compiles to a
 brute-force `KnnTopK` over a table scan and ignores the index. And `k`/`ef` must
 be *literals*: binding them as parameters looks fine — it parses and returns the
 right rows — but the planner silently drops to a brute-force scan. Confirmed with
-`EXPLAIN` on both engines. They are interpolated after an `int()` cast.
+`EXPLAIN` on both engines.
+
+A **function argument is a parameter**, so `$k` cannot reach the operator from
+inside `DEFINE FUNCTION` either, and SurrealQL has no dynamic execution to build
+the literal per call. That is why `fn::sfs_search_semantic` hard-codes
+`<|80,160|>` and takes `$k` only as a `LIMIT`.
+
+**A second match reference on the same field is silently ignored.**
+`content @1,OR@ $q AND content @2@ $q` parses, plans, and returns exactly the
+reference-1 rows — reference 2 contributes nothing, so an "all terms" mode built
+that way is wrong while looking right. `@2@` *alone* filters correctly; it is only
+the combination that fails. `fn::sfs_search_text` therefore implements
+`match="all"` by comparing analyzed token sets with `array::intersect`. Verified on
+3.2.4.
 
 **`touch` must write `content = ""`, not NONE.** `is_folder` is computed as "no
 content, no bytes, no symlink", so a NONE-content row comes back as a directory.
@@ -217,6 +251,60 @@ indexer's own — a timestamp comparison marks every row stale forever and
 updates a row shortly after its content changes, so writing twice in quick
 succession races it. `_query` retries anything the store marks retryable.
 
+**Permission checks are in `SurrealFs`, and a missed one in a *bulk* query is a
+disclosure.** `_require` covers the ancestry of anything resolved by path, so
+single-path operations are safe by construction. The four queries that return
+many rows without resolving them — `ls`, `glob`, `search_text`,
+`search_semantic` — each have to append `fn::sfs_can_read` via `self._readable`,
+and `search` returns file *content*, so forgetting one hands another user's
+notes to a model. `tests/test_permissions.py` asserts all four.
+
+**A statement inside a permission clause runs with permissions off.** Verified
+on 3.2.4: the `SELECT` in `fn::sfs_has_children` sees rows the caller cannot
+select, which is the only reason `FOR delete` can use it — a filtered subquery
+would read an invisible child as absent and fail open. `tests/
+test_record_auth.py` asserts it, because nothing else would notice.
+
+**`FOR $x IN (SELECT ...)` is rejected** with "Cannot execute statement using
+value: <first row>". Bind the subquery with `LET` first.
+
+**The `file` table's PERMISSIONS clause says `fn::sfs_gate(parent)`, and
+"tidying" it to `gate` opens the whole tree — silently.** A table permission is
+evaluated against the raw record *before* computed fields run, so a same-table
+COMPUTED field reads NONE there, and a NONE `gate` means "no closed ancestor",
+i.e. readable. Verified on 3.2.4. Traversing to a *linked* record is fine — a
+permission predicate reads links with permissions off and does compute their
+fields — which is why the indirection exists. The clause is inert under a system
+credential, so only `tests/test_record_auth.py` can catch a regression here.
+
+**`gate` is COMPUTED, so it cannot be indexed — and a COMPUTED field reading
+NULL through an index would silently disable filtering rather than error.** That
+is why the permission tests exercise the FULLTEXT and HNSW paths specifically,
+and why `EXPLAIN` was checked (`idx_file_content` still drives a `FullTextScan`,
+with the predicate applied above it). Verified on 3.2.4; re-check it on a server
+upgrade.
+
+**HNSW applies its `k` cut before the permission filter.**
+`fn::sfs_search_semantic` therefore searches a pool of 80 and `LIMIT`s to `$k`
+after the predicate, or a filtered vector search would quietly return fewer hits
+than asked for. Root short-circuits the predicate but still pays for the pool: the
+`<|80,160|>` operands must be *literals* (below), so a function body cannot narrow
+them per call the way the old Python interpolation did. That is the price of having
+one definition, and `tests/test_permissions.py` asserts a full `k` of readable rows
+still comes back when the nearest vector of all is one the caller cannot read.
+
+**A home directory is owned by the user it is named after, not by whoever
+created it** (`default_owner`). Root seeds `/home/<x>` often — the indexer, the
+browser, test fixtures — and a home is 0700, so crediting the creator would lock
+that user out permanently. There is no `chown`.
+
+**`rm` checks the parent folder, not the file.** That is unix, it is what agents
+expect, and it is easy to "fix" into a bug.
+
+**SurrealQL has no bitwise operators.** The mode-bit arithmetic in
+`fn::sfs_bits` and the `gate` field uses `math::floor` and `%`. Do not reach for
+`&`.
+
 ## Conventions
 
 - Async throughout. The library never owns a connection — the caller passes a
@@ -224,6 +312,10 @@ succession races it. `_query` retries anything the store marks retryable.
   has no caller to pass it one: Hermes hands a plugin sync handlers and no
   lifecycle hooks, so it connects per tool call from the `SURREALDB_*` env vars.
 - No working directory. Every path is absolute; `cd`/`pwd` do not exist.
+- Permissions are unix ones, enforced in `SurrealFs` and nowhere else. `user` is
+  a required constructor argument; `ROOT` bypasses every check. Record auth is
+  opt-in and adds a database-level backstop. Read `docs/permissions.md` before
+  touching `owner`, `mode`, `gate` or any `fn::sfs_*`.
 - The core returns dataclasses; only `tools/handlers.py` formats strings for a
   model.
 - Adding a tool means one entry in `surrealfs/tools/__init__.py`, an args model,

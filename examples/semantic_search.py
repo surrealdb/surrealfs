@@ -28,7 +28,7 @@ async def main() -> None:
     await db.signin({"username": "root", "password": "root"})
     await db.use("surrealfs", "demo")
     await apply_schema(db)
-    fs = SurrealFs(db)
+    fs = SurrealFs(db, user="demo")
 
     await fs.write_text("/notes/invoicing.md", "How to send an invoice and get paid.")
     await fs.write_text("/notes/lunch.md", "Good sandwich places near the office.")

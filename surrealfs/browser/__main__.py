@@ -48,6 +48,9 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ("--namespace", "SURREALDB_NAMESPACE", "surrealfs"),
         ("--database", "SURREALDB_DATABASE", "demo"),
         ("--auth-level", "SURREALDB_AUTH_LEVEL", "root"),
+        # Which SurrealFS user the browser acts as. Root by default: this is an
+        # admin view, and it is meant to show every home.
+        ("--user", "SURREALFS_USER", "root"),
     ):
         parser.add_argument(flag, help=f"(env: {env}, default: {default})")
     return parser.parse_args(argv)
@@ -61,6 +64,7 @@ def _apply_to_environment(args: argparse.Namespace) -> None:
         ("namespace", "SURREALDB_NAMESPACE"),
         ("database", "SURREALDB_DATABASE"),
         ("auth_level", "SURREALDB_AUTH_LEVEL"),
+        ("user", "SURREALFS_USER"),
     ):
         if (value := getattr(args, name)) is not None:
             os.environ[env] = value

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "CatArgs",
+    "ChmodArgs",
     "CpArgs",
     "EditArgs",
     "GlobArgs",
@@ -34,6 +35,7 @@ class _Args(BaseModel):
 class LsArgs(_Args):
     path: str = Field("/", description="Folder to list. Absolute, defaults to /")
     recursive: bool = Field(False, description="Descend into subfolders")
+    long: bool = Field(False, description="Also show mode and owner, like `ls -l`")
 
 
 class GlobArgs(_Args):
@@ -103,6 +105,22 @@ class MvArgs(_Args):
 class RmArgs(_Args):
     path: str = Field(..., description="Path to delete", min_length=1)
     recursive: bool = Field(False, description="Delete a folder and its contents")
+
+
+class ChmodArgs(_Args):
+    path: str = Field(..., description="Path to change", min_length=1)
+    mode: str = Field(
+        ...,
+        description=(
+            "Three octal digits, as in `chmod`: owner, group, other. "
+            "700 = private to you, 777 = shared with everyone, "
+            "744 = everyone can read, only you can write"
+        ),
+        pattern=r"^[0-7]{3}$",
+    )
+    recursive: bool = Field(
+        False, description="Apply to a folder and everything inside it"
+    )
 
 
 class SearchArgs(_Args):

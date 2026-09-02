@@ -13,6 +13,11 @@ from surrealfs import (
     NotATextFile,
     NotFound,
 )
+from surrealfs.paths import HOME_ROOT as HOME
+
+# `/home` is seeded root-owned by the schema (see `schema/file.surql`), so it is
+# in every root listing -- the assertions below spell it out rather than filter
+# it, since a test that hid it would also hide it going missing.
 
 
 async def test_write_and_read_text(fs):
@@ -29,6 +34,7 @@ async def test_write_creates_missing_parents(fs):
         "/a/b",
         "/a/b/c",
         "/a/b/c/d.md",
+        HOME,
     ]
 
 
@@ -36,7 +42,7 @@ async def test_write_replaces_existing(fs):
     await fs.write_text("/a.md", "first")
     await fs.write_text("/a.md", "second")
     assert await fs.read_text("/a.md") == "second"
-    assert len(await fs.ls("/")) == 1
+    assert [e.path for e in await fs.ls("/")] == ["/a.md", HOME]
 
 
 async def test_bytes_roundtrip(fs):
@@ -74,6 +80,15 @@ async def test_mkdir_requires_parents_flag(fs):
     assert (await fs.stat("/a/b/c")).is_folder
 
 
+async def test_mkdir_mode_applies_to_the_named_folder_only(fs):
+    """Like `mkdir -m`: ancestors made on the way there keep the default."""
+    await fs.mkdir("/a/b", parents=True, mode=0o700)
+    assert (await fs.stat("/a")).mode == 0o777
+    assert (await fs.stat("/a/b")).mode == 0o700
+    with pytest.raises(ValueError):
+        await fs.mkdir("/c", mode=0o1000)
+
+
 async def test_mkdir_rejects_existing(fs):
     await fs.mkdir("/a")
     with pytest.raises(AlreadyExists):
@@ -83,7 +98,7 @@ async def test_mkdir_rejects_existing(fs):
 async def test_ls_root_and_folders(fs):
     await fs.write_text("/notes/a.md", "a")
     await fs.write_text("/b.md", "b")
-    assert [e.path for e in await fs.ls("/")] == ["/b.md", "/notes"]
+    assert [e.path for e in await fs.ls("/")] == ["/b.md", HOME, "/notes"]
     assert [e.path for e in await fs.ls("/notes")] == ["/notes/a.md"]
 
 
@@ -92,7 +107,7 @@ async def test_ls_reports_sizes(fs):
     await fs.write_bytes("/b.bin", b"\x00\x01\x02")
     await fs.mkdir("/d")
     sizes = {e.path: e.size for e in await fs.ls("/")}
-    assert sizes == {"/a.md": 5, "/b.bin": 3, "/d": 0}
+    assert sizes == {"/a.md": 5, "/b.bin": 3, "/d": 0, HOME: 0}
 
 
 async def test_ls_on_a_file_is_an_error(fs):
@@ -158,6 +173,7 @@ async def test_mv_renames_and_cascades_to_descendants(fs):
         "/archive",
         "/archive/deep",
         "/archive/deep/a.md",
+        HOME,
     ]
     assert await fs.read_text("/archive/deep/a.md") == "a"
 
@@ -232,7 +248,7 @@ async def test_rm_recursive_removes_only_the_subtree(fs):
     await fs.write_text("/keep.md", "keep")
     await fs.write_text("/gone/deep/a.md", "a")
     assert await fs.rm("/gone", recursive=True) == 3
-    assert [e.path for e in await fs.ls("/", recursive=True)] == ["/keep.md"]
+    assert [e.path for e in await fs.ls("/", recursive=True)] == [HOME, "/keep.md"]
 
 
 async def test_rm_frees_the_name_for_reuse(fs):
@@ -284,7 +300,7 @@ async def test_duplicate_names_are_rejected_at_the_root(fs):
             "CREATE file CONTENT "
             "{filename: 'a.md', content_type: 'text/markdown', content: 'dup'}"
         )
-    assert len(await fs.ls("/")) == 1
+    assert [e.path for e in await fs.ls("/")] == ["/a.md", HOME]
 
 
 async def test_duplicate_names_are_rejected_in_a_folder(fs):

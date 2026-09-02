@@ -34,7 +34,7 @@ async def run(prompt: str) -> str:
     await db.use("surrealfs", "demo")
     await apply_schema(db)
 
-    ctx = ToolContext(fs=SurrealFs(db))
+    ctx = ToolContext(fs=SurrealFs(db, user="demo"))
     client = AsyncAnthropic()
     tools = tool_definitions(flavor="anthropic")
     messages: list[dict] = [{"role": "user", "content": prompt}]

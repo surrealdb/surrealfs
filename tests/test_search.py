@@ -6,17 +6,37 @@ import math
 
 import pytest
 
-from surrealfs.fs import _rrf
+
+async def _fill(fs, count: int = 8) -> None:
+    """Files sharing no term with the query under test.
+
+    SurrealDB scores with the unsmoothed BM25 IDF, `ln((N - df + 0.5) /
+    (df + 0.5))`, clamped at zero -- so a term held by more than about half the
+    corpus is worth nothing to anybody and every hit ties on 0.0. A two- or
+    three-file corpus therefore cannot exercise ranking at all. These give the
+    terms under test somewhere to be rare, which is also the only condition
+    under which ranking matters in a real filesystem.
+    """
+    for i in range(count):
+        await fs.write_text(f"/filler/f{i}.md", f"unrelated prose number {i}")
 
 
 async def test_search_text_finds_and_ranks(fs):
-    await fs.write_text("/a.md", "the lazy dog sleeps")
+    """More mentions ranks higher, with document length held constant.
+
+    Both files analyse to the same number of tokens on purpose. Length
+    normalisation and term frequency pull in opposite directions, and at
+    different lengths these two score within 1% of each other -- an ordering
+    neither BM25 implementation should be pinned to. Equal lengths isolate the
+    property this test is named for.
+    """
+    await _fill(fs)
+    await fs.write_text("/a.md", "the lazy dog sleeps soundly all day")
     await fs.write_text("/b.md", "a dog, another dog, and a third dog")
     await fs.write_text("/c.md", "completely unrelated text about cats")
 
     hits = await fs.search_text("dog")
     assert [h.path for h in hits] == ["/b.md", "/a.md"]
-    # Ranked in Python: server-side search::score returns 0.0 on SurrealDB 3.2.
     assert hits[0].score > hits[1].score
 
 
@@ -64,6 +84,7 @@ async def test_a_focused_file_beats_one_that_merely_mentions_the_term(fs):
 
 async def test_repetition_saturates(fs):
     """Saying a word twenty times does not make a file twenty times better."""
+    await _fill(fs)
     await fs.write_text("/once.md", "kubernetes ingress notes")
     await fs.write_text("/chanted.md", "kubernetes " * 20)
 
@@ -253,9 +274,15 @@ async def test_search_semantic_rejects_bad_k(fs):
 
 
 async def test_search_semantic_actually_uses_the_hnsw_index(fs):
-    """`<|k,COSINE|>`, or binding k/ef, silently degrades to a table scan."""
+    """`<|k,COSINE|>`, or binding k/ef, silently degrades to a table scan.
+
+    The literal here must stay in step with the one in `fn::sfs_search_semantic`
+    -- that is the pool the shipped query actually asks for, and this is the
+    failure mode that looks exactly like success: binding k/ef parses and
+    returns the right rows off a brute-force scan.
+    """
     plan = await fs._query(
-        f"SELECT id FROM {fs.table} WHERE embedding <|5,40|> $vector EXPLAIN",
+        f"SELECT id FROM {fs.table} WHERE embedding <|80,160|> $vector EXPLAIN",
         {"vector": _unit_vector(0)},
     )
     assert "KnnScan" in str(plan), f"KNN query is not index-backed: {plan}"
@@ -270,15 +297,42 @@ async def test_search_semantic_carries_a_snippet(fs, db):
     assert "invoicing" in (await fs.search_semantic(_unit_vector(0), k=1))[0].snippet
 
 
-def test_rrf_lets_agreement_beat_a_single_top_hit():
-    fused = _rrf(["text-only", "both", "x"], ["vector-only", "both", "y"])
-    assert next(iter(fused)) == "both"
-    assert set(fused) == {"text-only", "vector-only", "both", "x", "y"}
+async def test_fusion_lets_agreement_beat_a_single_top_hit(fs, db):
+    """A file both arms found outranks one only a single arm did.
+
+    This was a unit test of `_rrf` until the fusion moved into
+    `fn::sfs_hybrid_search`. The property is the same one; it is now asserted
+    through the database that computes it. Only rows with an embedding are in
+    the HNSW index, which is what keeps each arm's membership controlled here.
+    """
+    await _fill(fs)
+    both = await fs.write_text("/both.md", "keyword " + "padding " * 20)
+    await fs.write_text("/text-only.md", "keyword")
+    vector_only = await fs.write_text("/vector-only.md", "utterly different prose")
+    for entry, index in ((both, 0), (vector_only, 1)):
+        await db.query(
+            "UPDATE $id SET embedding = $v", {"id": entry.id, "v": _unit_vector(index)}
+        )
+
+    # The text arm alone prefers the short exact match, by length normalisation.
+    assert [h.path for h in await fs.search_text("keyword")] == [
+        "/text-only.md",
+        "/both.md",
+    ]
+
+    fused = [h.path for h in await fs.search("keyword", vector=_unit_vector(0))]
+    assert fused[0] == "/both.md", fused
+    assert set(fused) == {"/both.md", "/text-only.md", "/vector-only.md"}
 
 
-def test_rrf_degrades_to_the_single_arm():
-    assert list(_rrf(["a", "b"], [])) == ["a", "b"]
-    assert _rrf() == {}
+async def test_fusion_degrades_to_the_single_arm(fs):
+    """Without a vector, `search` is the text arm -- still ranked and scored."""
+    await fs.write_text("/a.md", "keyword")
+    await fs.write_text("/b.md", "nothing relevant")
+    hits = await fs.search("keyword")
+    assert [h.path for h in hits] == ["/a.md"]
+    assert hits[0].score > 0
+    assert await fs.search("nonexistentwordxyz") == []
 
 
 async def test_search_fuses_both_arms(fs, db):
@@ -297,6 +351,27 @@ async def test_search_fuses_both_arms(fs, db):
     # Fused scores, not arm scores: comparable, and every hit describes itself.
     assert all(hit.score > 0 for hit in fused)
     assert all(hit.snippet for hit in fused)
+
+
+async def test_a_query_with_nothing_to_match_still_searches_by_vector(fs, db):
+    """`search` guarded on an empty query before the fusion moved server-side.
+
+    Nothing to match is not nothing to search: the caller handed over an
+    embedding of something. `hermes_memory._recall` trims its query to content
+    words (`_recall_query`) while building the vector from the whole prompt, so
+    a turn with no word characters in it arrives here exactly like this -- and
+    lost its recall entirely.
+    """
+    entry = await fs.write_text("/vector.md", "utterly different prose")
+    await db.query(
+        "UPDATE $id SET embedding = $v", {"id": entry.id, "v": _unit_vector(0)}
+    )
+
+    hits = await fs.search("", vector=_unit_vector(0))
+    assert [h.path for h in hits] == ["/vector.md"]
+    assert hits[0].score > 0  # the fused column, not the arm's own distance
+    # Neither an arm to run nor a vector to run it with is still nothing.
+    assert await fs.search("   ") == []
 
 
 async def test_search_respects_limit_across_both_arms(fs, db):

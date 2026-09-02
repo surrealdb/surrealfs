@@ -21,6 +21,7 @@ __all__ = [
     "NotADirectory",
     "NotATextFile",
     "NotFound",
+    "PermissionDenied",
     "QueryError",
     "SurrealFsError",
 ]
@@ -48,6 +49,15 @@ class NotADirectory(SurrealFsError, NotADirectoryError):
 
 class DirectoryNotEmpty(SurrealFsError, OSError):
     """Refusing to remove a non-empty folder without ``recursive=True``."""
+
+
+class PermissionDenied(SurrealFsError, PermissionError):
+    """The current user lacks the mode bits this operation needs.
+
+    Raised both for the target's own bits and for a directory in its ancestry
+    that is not world-traversable -- see the ``gate`` field in
+    ``schema/file.surql``.
+    """
 
 
 class NotATextFile(SurrealFsError, ValueError):

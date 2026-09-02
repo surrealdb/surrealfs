@@ -42,7 +42,6 @@ configuring each one. See :func:`_agent_user` for who owns a home and
 from __future__ import annotations
 
 import asyncio
-import getpass
 import importlib.util
 import os
 import re
@@ -113,34 +112,22 @@ LEGACY_MEMORY_DIR = "/memory"
 
 
 def _machine_user() -> str:
-    """The unix account this process runs as, or ``unknown``.
+    """The unix account this process runs as -- the fallback `_agent_user` uses."""
+    from .._connect import _machine_user as resolve
 
-    `getpass.getuser` walks LOGNAME/USER/LNAME/USERNAME and then the password
-    database, and raises only when every one of them fails — a container with no
-    passwd entry, some cron environments.
-    """
-    try:
-        return _slug(getpass.getuser())
-    except Exception:
-        return "unknown"
+    return resolve()
 
 
 def _agent_user() -> str:
-    """The agent whose home this provider files under.
+    """The agent whose home this provider files under, and acts as.
 
-    The agent, not the human: the notes skill already hands the agent a home at
-    ``/home/<name>/``, so two Hermes instances owned by two different people
-    collide there unless the name distinguishes them.
-
-    Defaults to the machine username, because on a VM or sandbox the agent has an
-    account of its own and the SurrealFS path should match it. Where it does not —
-    an agent sharing a laptop account with its human, or two agents under one
-    account — ``SURREALFS_AGENT_USER`` names it (``hermes-martin``), and
-    ``hermes memory setup`` writes that into the profile's own ``.env``.
+    Lifted into `integrations._connect` so the tool plugin, the CLI and this
+    provider cannot disagree about who they are -- the answer is now an access
+    boundary, not just a path convention.
     """
-    # Tested before slugging: `_slug("")` is `"session"`, not empty.
-    name = os.environ.get("SURREALFS_AGENT_USER", "").strip()
-    return _slug(name) if name else _machine_user()
+    from .._connect import agent_user
+
+    return agent_user()
 
 
 def _home() -> str:
@@ -580,7 +567,8 @@ class SurrealFsMemory(_Base):
         if tools:
             body += f"\n## Tools\n\n{tools}\n"
         async with connected() as db:
-            await SurrealFs(db).write_text(self.path_for(session, when), body)
+            fs = SurrealFs(db, user=_agent_user())
+            await fs.write_text(self.path_for(session, when), body)
 
     async def _mirror(
         self, target: str, action: str, content: str, old_text: str
@@ -593,7 +581,7 @@ class SurrealFsMemory(_Base):
         path = f"{self.root()}/builtin/{_slug(target)}.md"
         entry = content.strip()
         async with connected() as db:
-            fs = SurrealFs(db)
+            fs = SurrealFs(db, user=_agent_user())
             if action == "add":
                 current = await fs.read_text(path) if await fs.exists(path) else ""
                 await fs.write_text(path, f"{current}{entry}\n")
@@ -624,21 +612,21 @@ class SurrealFsMemory(_Base):
             role = str(message.get("role") or "unknown")
             parts.append(f"## {role}\n\n{_render(message)}\n")
         async with connected() as db:
-            await SurrealFs(db).write_text(path, "\n".join(parts))
+            await SurrealFs(db, user=_agent_user()).write_text(path, "\n".join(parts))
 
     async def _recall(self, query: str) -> str:
         from surrealfs import SurrealFs  # deferred — see `_write`
         from surrealfs.embed import make_embedder
         from surrealfs.integrations._connect import connected
 
-        # The same call the `surrealfs_search` tool makes, deliberately: recall
-        # used to run its own fan-out, one search per keyword rarest-first, which
-        # measured marginally better (MRR 0.854 against 0.833 over eight queries)
-        # only because `search` ranked badly. Now that ranking is BM25, the
-        # difference is inside the noise of an eight-query sample, and one shared
-        # retrieval path that both surfaces improve together beats two.
+        # The same call the `surrealfs_search` tool makes, deliberately. A
+        # fan-out of its own -- one search per keyword, rarest first -- measured
+        # marginally better (MRR 0.854 against 0.833 over eight queries) back
+        # when `search` ranked badly; against BM25 ranking the difference is
+        # inside the noise of an eight-query sample, and one shared retrieval
+        # path that both surfaces improve together beats two.
         async with connected() as db:
-            fs = SurrealFs(db)
+            fs = SurrealFs(db, user=_agent_user())
             # Whole filesystem, not just the memory folder: the notes the agent
             # wrote itself under /preferences/ and /projects/ are the strongest
             # signal in here. The vector is built from the whole sentence, since
@@ -684,29 +672,27 @@ class SurrealFsMemory(_Base):
     def _is_mine(self, path: str) -> bool:
         """Whether `path` is this agent's to recall.
 
-        Two things it drops. Another profile's filed turns, as before — raw
-        transcripts are what must not cross over. And every other home: on a
-        shared database `/home/` holds one directory per agent, plus the humans'
-        own, and none of them are this agent's to read.
+        Two things it drops. Another *profile's* filed turns — raw transcripts
+        are what must not cross over, and sibling profiles live inside this
+        agent's own home, under the same owner, so no file permission can tell
+        them apart. And anything under another agent's home: `/home/<user>` is
+        created 0700, so `search` should not return one at all, but a mode is a
+        thing somebody can chmod and `cp -r` can inherit, and a transcript leak
+        is not worth resting on one bit that a two-line check covers.
 
         Outside `/home/` nothing is dropped. `/preferences/` and `/projects/` are
         the shared root the notes skill points at, and they are the handover point
         between an agent and everyone else — the highest-signal memories in the
         tree, and hiding them would defeat the point of recalling them.
-
-        The `_memory_dir()` test has to come before the `_home()` one: a sibling
-        profile's turns live inside this home too, and would otherwise read as
-        ordinary files in it.
         """
         if path.startswith(f"{self.root()}/"):
             return True
-        if path.startswith(f"{_memory_dir()}/") or path.startswith(
-            f"{LEGACY_MEMORY_DIR}/"
-        ):
+        if path.startswith(f"{HOME_ROOT}/") and not path.startswith(f"{_home()}/"):
             return False
-        if path.startswith(f"{_home()}/"):
-            return True
-        return not path.startswith(f"{HOME_ROOT}/")
+        return not (
+            path.startswith(f"{_memory_dir()}/")
+            or path.startswith(f"{LEGACY_MEMORY_DIR}/")
+        )
 
     def _is_this_session(self, path: str) -> bool:
         """Whether `path` is a turn this very conversation filed.

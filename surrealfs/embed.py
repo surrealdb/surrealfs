@@ -18,7 +18,7 @@ import os
 import sys
 from collections.abc import Awaitable, Callable
 
-from .fs import SurrealFs
+from .fs import ROOT, SurrealFs
 
 EMBED_MODEL = "text-embedding-3-small"  # 1536 dimensions, matching the HNSW index
 INDEXER_VERSION = f"openai:{EMBED_MODEL}"
@@ -108,7 +108,9 @@ async def _run(args: argparse.Namespace) -> None:
             os.environ.get("SURREALDB_DATABASE", "demo"),
         )
         await index_forever(
-            SurrealFs(db),
+            # Root: the indexer has to read every file in order to embed it,
+            # including the ones inside private homes.
+            SurrealFs(db, user=ROOT),
             embed,
             interval=args.interval,
             batch=args.batch,

@@ -4,8 +4,8 @@
     <img width=120 src="https://raw.githubusercontent.com/surrealdb/icons/main/surreal.svg" />
 </p>
 
-<h1 align="center">SurrealFS</h1><br/>
-<p align="center">A filesystem for agents, backed by SurrealDB.</p>
+<h1 align="center">SurrealDB file system</h1><br/>
+<p align="center">A filesystem-based memory layer for agents, with hybrid search, backed by SurrealDB.</p>
 
 <br>
 
@@ -36,7 +36,7 @@
 </p>
 
 Give an agent somewhere durable to keep its work. SurrealFS is a `file` table
-plus the tools to hand it to a model — files and folders, full-text and semantic
+plus the tools to hand it to a model: files and folders, full-text and semantic
 search, all queryable with SurrealQL because it is just a table.
 
 ![The file browser](assets/surrealfs-browser.png)
@@ -69,7 +69,7 @@ await db.signin({"username": "root", "password": "root"})
 await db.use("surrealfs", "demo")
 await apply_schema(db)  # defines the `file` table; safe to re-run
 
-fs = SurrealFs(db)
+fs = SurrealFs(db, user="alice")  # who you are; ROOT bypasses permissions
 await fs.write_text("/notes/today.md", "# Today\n- ship the refactor")
 await fs.edit("/notes/today.md", "ship", "shipped")
 await fs.ls("/notes")
@@ -77,8 +77,11 @@ await fs.search_text("refactor")
 ```
 
 You create and own the connection. SurrealFS never connects, signs in, or
-selects a namespace — so the `file` table's `owner = $auth.id` permissions key
-off _your_ auth context.
+selects a namespace.
+
+`user` is required and has no default. Files carry a unix owner and mode, and
+the database cannot tell SurrealFS who is asking (every credential is a system
+credential), so the identity comes from you. See [Permissions](#permissions).
 
 ## The plain async API
 
@@ -89,7 +92,7 @@ pre-formatted strings. Build whatever integration you like on top.
 | -------- | ------------------------------------------------------------- |
 | Read     | `read_text` `read_bytes` `tail` `ls` `glob` `stat` `exists`   |
 | Write    | `write_text` `write_bytes` `edit` `touch` `mkdir`             |
-| Organise | `mv` `cp` `rm`                                                |
+| Organise | `mv` `cp` `rm` `chmod`                                        |
 | Search   | `search` `search_text` `search_semantic` `reindex_embeddings` |
 
 ## Integrations
@@ -105,14 +108,14 @@ Four ways to hand it to an agent, each with its own README:
 
 The first three tool surfaces are generated from one registry in
 `surrealfs/tools/`, so they cannot drift apart. Tool descriptions are markdown in
-`surrealfs/tools/docs/` — edit them as prose; they are prompt text. The memory
+`surrealfs/tools/docs/`. Edit them as prose; they are prompt text. The memory
 provider is the odd one out: it exposes no tools of its own, because the Hermes
 plugin's already cover explicit reads and writes.
 
 ## The file browser
 
-Point the agents at a shared SurrealDB —
-a Cloud instance, say — and every person on the team can run the browser on their
+Point the agents at a shared SurrealDB (a Cloud instance, say)
+and every person on the team can run the browser on their
 own machine to see and edit the same filesystem the agents are writing to:
 
 ```bash
@@ -124,7 +127,7 @@ Tree on the left, file on the right, chat with the note-taking agent on the far
 right. Text is editable and saves back to the table, markdown renders with a
 source toggle, agent-authored HTML renders in a sandboxed iframe, images display,
 and the search box is the same hybrid `fs.search` the agent's own tool calls.
-Conversations are files too, under `/_sessions/` — open one from the tree and it
+Conversations are files too, under `/_sessions/`: open one from the tree and it
 replays.
 
 Credentials come from a `.env` in the working directory, or the environment
@@ -142,70 +145,68 @@ ANTHROPIC_API_KEY=…              # optional: enables the chat panel
 ```
 
 `SURREALDB_AUTH_LEVEL` picks which kind of user the credentials are, since the
-server infers that from the signin payload — a database-scoped Cloud credential
-needs `database`. All three are system users, so they bypass the `file` table's
-`owner = $auth.id` permissions and everyone sharing the database sees the one
-shared tree, which is the point. Every variable has a command-line form too
+server infers that from the signin payload: a database-scoped Cloud credential
+needs `database`. All three are system users, which is why SurrealFS enforces
+permissions itself rather than leaning on the database; `SURREALFS_USER` (or
+`--user`) picks who the browser acts as, defaulting to root, which sees every
+private home. Every variable has a command-line form too
 (`surrealfs-browser --help`).
 
 The server binds loopback. `--host 0.0.0.0` exposes it, and then anyone who can
-reach the port has whatever access those credentials do — the page has no login
+reach the port has whatever access those credentials do. The page has no login
 of its own.
 
 ## Semantic search
 
-SurrealFS never calls an embedding model. You provide the function, so you pick
-the provider:
-
-```python
-count = await fs.reindex_embeddings(embed, version="openai:text-embedding-3-small")
-hits = await fs.search("how do I get paid", vector=await embed("how do I get paid"))
-```
-
-`fs.search` runs both arms and fuses them by rank — full-text scores are BM25 and
-vector scores are distances, so there is nothing sane to normalise. Without a
-`vector` it is full-text only. `search_text` and `search_semantic` remain
-available if you want one arm on its own.
-
-The full-text arm matches a file that shares **any** term with the query, so
-`"how do I get paid"` returns candidates even without embeddings — the vector arm is
-what makes it rank the invoicing note by _meaning_ rather than by shared words. That
-default favours recall because the caller sees a ranked list of snippets and can
-dismiss a weak hit at a glance, but cannot dismiss one it never saw.
-
-Ranking is Okapi BM25, computed in Python over the tokens SurrealDB's own analyzer
-produces for the query and each matching file — the same stemming the index matched
-with, so a file saying "Prefers" scores for a query of "prefer" instead of scoring
-zero. Rare words count for more than common ones, repetition saturates, and long
-files are not rewarded for sprawl. Stopwords still match; they just get no vote.
-
-What it cannot do is read intent: a query word that is beside the point still pulls
-in files dense with it. That is the vector arm's job.
-
-Pass `match="all"` when you want a precise filter and an empty result is a real
-answer:
-
-```python
-hits = await fs.search("invoice 2026", match="all")   # both terms must appear
-```
-
-Re-running the indexer is cheap: it skips files whose content has not changed
-since they were embedded. Agents get one `search` tool either way; pass the
-embedder in the context and opt in to make it hybrid —
-`build_fs_toolset(semantic=True)` with `ToolContext(fs=fs, embed=embed)`. See
-`examples/semantic_search.py`.
-
-An OpenAI embedder ships in `surrealfs.embed` (`make_embedder`,
-`text-embedding-3-small`, the 1536 dimensions the HNSW index expects), along with
-a daemon that keeps every vector current no matter what wrote the row:
+`fs.search` runs a full-text arm and a vector arm and fuses them by rank.
+SurrealFS never calls an embedding model: you pass the embedder, so you pick
+the provider, and without one search stays full-text only. An OpenAI embedder
+and a daemon that keeps the vectors current ship in `surrealfs.embed`:
 
 ```bash
 just embed              # poll every 5s; --once for a single pass
 ```
 
-It needs `OPENAI_API_KEY` and an already-applied schema (`just schema`). Under
-Hermes there is no daemon to leave running — see [Keeping the vectors current
-under Hermes](docs/hermes-indexer.md).
+The queries are custom SurrealQL functions in the schema, not Python, so any
+client gets the same ranked, permission-filtered retrieval:
+
+```surql
+SELECT path, rrf_score FROM fn::sfs_hybrid_search("how do I get paid", $qvec, 5, NONE, 'alice');
+```
+
+`fn::sfs_search_text` and `fn::sfs_search_semantic` are the single arms. The last
+argument is who is asking: a system credential passes it, a record credential
+overrides it. `SurrealFs` calls these too, so there is only one definition.
+
+See [Semantic search](docs/semantic-search.md) for the ranking, `match="all"`,
+the SurrealQL surface, and wiring it into the agent toolset.
+
+## Permissions
+
+Files carry a unix `owner` and `mode`, `/home/<user>` is private, everything
+else is shared, and `chmod` moves things between the two. `SurrealFs` enforces
+it. See [Permissions](docs/permissions.md) for the rules and the reasoning.
+
+### Letting the database enforce it too (optional)
+
+The above is a real boundary for an agent, since no tool exposes raw SurrealQL,
+but not one against anyone holding the database credential. If several agents share
+a database, opt in:
+
+```bash
+python -m surrealfs.schema --record-auth   # adds the `user` table + record access
+python -m surrealfs.users add alice        # creates alice and /home/alice (0700)
+```
+
+```bash
+SURREALDB_AUTH_LEVEL=record SURREALDB_USER=alice SURREALDB_PASS=…
+```
+
+Now SurrealDB itself refuses to return or modify anything in another user's
+home, whatever query it is asked. Nothing else changes: the tools, the modes
+and `chmod` behave the same, and `SurrealFs` picks its identity up from the
+credential instead of the environment. Deployments that do not opt in are
+unaffected: the permissions clause is inert for system credentials.
 
 ## The schema
 
@@ -221,18 +222,17 @@ DEFINE FIELD path ON file COMPUTED (
 ) TYPE string;
 ```
 
-A folder is just a row with no `content`, no `file` bytes, and no `symlink` —
+A folder is just a row with no `content`, no `file` bytes, and no `symlink`,
 also computed, as `is_folder`. `hash` is maintained by an event, and there are
 HNSW and BM25 indexes for the two search modes.
 
-`apply_schema(db, include_user=True)` also defines the optional `user` table and
-record access that the `owner` permissions need for real multi-tenancy.
+`owner`, `mode` and the computed `gate` are the permission model. See
+[Permissions](#permissions) below and `docs/permissions.md`.
 
 You can apply it without writing any code:
 
 ```bash
 python -m surrealfs.schema                     # uses SURREALDB_* env vars
-python -m surrealfs.schema --include-user
 python -m surrealfs.schema --print             # dump the DDL, connect to nothing
 ```
 

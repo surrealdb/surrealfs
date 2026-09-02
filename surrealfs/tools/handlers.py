@@ -17,6 +17,7 @@ from ..fs import SurrealFs
 from ..models import FileEntry
 from .args import (
     CatArgs,
+    ChmodArgs,
     CpArgs,
     EditArgs,
     GlobArgs,
@@ -52,20 +53,35 @@ class ToolContext:
     embed: Embedder | None = None
 
 
-def _format_entry(entry: FileEntry) -> str:
-    if entry.is_folder:
-        return f"{'-':>8}  {entry.path}/"
-    return f"{entry.size:>8}  {entry.path}"
+def _format_entry(
+    entry: FileEntry, owner_width: int = 10, *, long: bool = False
+) -> str:
+    """One listing line: size and path, plus mode and owner when `long`.
+
+    Size stays in the short form because `cat` returns a whole file with no
+    truncation, so it is the only warning a model gets before reading a
+    multi-megabyte one.
+    """
+    size = "-" if entry.is_folder else str(entry.size)
+    slash = "/" if entry.is_folder else ""
+    if not long:
+        return f"{size:>8}  {entry.path}{slash}"
+    owner = entry.owner.ljust(owner_width)
+    return f"{entry.permissions}  {owner}  {size:>8}  {entry.path}{slash}"
 
 
-def _format_listing(entries: Sequence[FileEntry]) -> str:
+def _format_listing(entries: Sequence[FileEntry], *, long: bool = False) -> str:
     if not entries:
         return "(empty)"
-    return "\n".join(_format_entry(e) for e in entries)
+    # Sized to the listing: agent usernames run long (`hermes-martin`), and a
+    # fixed column would push the size out of line for exactly those.
+    width = max(len(e.owner) for e in entries) if long else 0
+    return "\n".join(_format_entry(e, width, long=long) for e in entries)
 
 
 async def ls(ctx: ToolContext, args: LsArgs) -> str:
-    return _format_listing(await ctx.fs.ls(args.path, recursive=args.recursive))
+    entries = await ctx.fs.ls(args.path, recursive=args.recursive)
+    return _format_listing(entries, long=args.long)
 
 
 async def glob(ctx: ToolContext, args: GlobArgs) -> str:
@@ -136,6 +152,12 @@ async def rm(ctx: ToolContext, args: RmArgs) -> str:
     count = await ctx.fs.rm(args.path, recursive=args.recursive)
     noun = "item" if count == 1 else "items"
     return f"Deleted {count} {noun} at {args.path}"
+
+
+async def chmod(ctx: ToolContext, args: ChmodArgs) -> str:
+    count = await ctx.fs.chmod(args.path, int(args.mode, 8), recursive=args.recursive)
+    noun = "item" if count == 1 else "items"
+    return f"Mode {args.mode} on {count} {noun} at {args.path}"
 
 
 async def search(ctx: ToolContext, args: SearchArgs, *, semantic: bool = False) -> str:

@@ -24,6 +24,7 @@ test:
 
 lint:
     uv run ruff check .
+    surreal validate surrealfs/schema/*.surql
 
 fmt:
     uv run ruff format .

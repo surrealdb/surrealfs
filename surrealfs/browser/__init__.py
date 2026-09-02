@@ -56,9 +56,10 @@ from ..errors import (
     DirectoryNotEmpty,
     InvalidPath,
     NotFound,
+    PermissionDenied,
     SurrealFsError,
 )
-from ..fs import SurrealFs
+from ..fs import ROOT, SurrealFs
 from ..integrations._connect import connect
 from ..schema import apply_schema
 from ..tools import ToolContext
@@ -75,6 +76,10 @@ MD = MarkdownIt("commonmark", {"html": False}).enable("table")
 
 STATUS = {
     NotFound: 404,
+    # `PermissionDenied` is an `OSError`, not a `ValueError`, so without this
+    # `on_error`'s fallback made every denial a 500 -- reachable from the UI
+    # since `--user` let the browser run as somebody other than root.
+    PermissionDenied: 403,
     AlreadyExists: 409,
     DirectoryNotEmpty: 409,
 }
@@ -350,8 +355,13 @@ class Browser:
             return None
 
     async def _reindex(self) -> None:
-        """Re-embed what just changed. Incremental: unchanged rows are skipped."""
-        if self.embed is None:
+        """Re-embed what just changed. Incremental: unchanged rows are skipped.
+
+        Skipped entirely unless this browser is root: `reindex_embeddings` reads
+        every text file to embed it, which is not a thing `--user alice` may do.
+        Semantic *search* still works for them against what root has indexed.
+        """
+        if self.embed is None or not self.fs.is_root:
             return
         try:
             await self.fs.reindex_embeddings(self.embed, version=INDEXER_VERSION)
@@ -412,7 +422,7 @@ async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
         await apply_schema(db)
     except Exception as exc:  # noqa: BLE001 -- any DDL failure, same answer
         print(f"could not apply the schema (continuing): {exc}")
-    fs = SurrealFs(db)
+    fs = SurrealFs(db, user=os.environ.get("SURREALFS_USER") or ROOT)
 
     embed = make_embedder() if os.environ.get("OPENAI_API_KEY") else None
     if embed is None:

@@ -6,7 +6,7 @@ tool-calling loop against any provider:
     from surrealfs.integrations.json_tools import call_tool, tool_definitions
     from surrealfs.tools import ToolContext
 
-    ctx = ToolContext(fs=SurrealFs(db))
+    ctx = ToolContext(fs=SurrealFs(db, user="alice"))
     tools = tool_definitions()                      # -> Anthropic `tools=[...]`
     result = await call_tool(ctx, "ls", {"path": "/notes"})
 

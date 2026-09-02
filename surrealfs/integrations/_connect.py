@@ -6,11 +6,11 @@ plugin and memory provider, which Hermes gives a sync callback and no lifecycle
 hook, and the file browser, which is a program rather than a library.
 
     async with connected() as db:        # short-lived, one call
-        await SurrealFs(db).ls("/")
+        await SurrealFs(db, user=agent_user()).ls("/")
 
     db = await connect()                 # long-lived, survives an idle socket
     try:
-        await SurrealFs(db).ls("/")
+        await SurrealFs(db, user=agent_user()).ls("/")
     finally:
         await db.close()
 
@@ -21,7 +21,9 @@ project uses, defaulting to a local server.
 from __future__ import annotations
 
 import asyncio
+import getpass
 import os
+import re
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any
@@ -32,17 +34,106 @@ from websockets.exceptions import ConnectionClosed
 
 from ..schema import apply_schema
 
-__all__ = ["connect", "connected"]
+__all__ = ["agent_user", "connect", "connected"]
 
-# Which kind of user the credentials belong to. All three are *system* users, so
-# they bypass the `file` table's `owner = $auth.id` permissions and see the whole
-# tree -- which is the point when several agents and people share one database.
-# Record access (the optional `account` in schema/user.surql) is deliberately not
-# offered here: a person signed in as a `user` record would see only files that
-# record owns, and everything the agents wrote would be invisible.
-AUTH_LEVELS = ("root", "namespace", "database")
+# Which kind of user the credentials belong to. The first three are *system*
+# users: they bypass table permissions entirely, so the identity a `SurrealFs`
+# acts as comes from `agent_user()` below rather than from the database.
+#
+# `record` is the opt-in fourth. It signs in as a `user` record, which makes the
+# `file` table's PERMISSIONS clause live, and then the identity comes from the
+# credential itself -- see `agent_user()`. Needs `apply_schema(record_auth=True)`
+# and a provisioned user. See `docs/permissions.md`.
+RECORD_LEVEL = "record"
+AUTH_LEVELS = ("root", "namespace", "database", RECORD_LEVEL)
+
+# The `DEFINE ACCESS` in schema/record_auth.surql.
+RECORD_ACCESS = "account"
 
 _schema_applied = False
+
+# No dot: a name is a single path segment, and `hermes/../martin` must not
+# slug into anything containing `..`.
+_UNSAFE_IN_NAME = re.compile(r"[^A-Za-z0-9_-]+")
+
+
+def _machine_user() -> str:
+    """The unix account this process runs as, or ``unknown``.
+
+    `getpass.getuser` walks LOGNAME/USER/LNAME/USERNAME and then the password
+    database, and raises only when every one of them fails -- a container with no
+    passwd entry, some cron environments.
+    """
+    try:
+        return _slug(getpass.getuser())
+    except Exception:
+        return "unknown"
+
+
+def _slug(name: str) -> str:
+    return _UNSAFE_IN_NAME.sub("-", name).strip("-") or "unknown"
+
+
+def agent_user() -> str:
+    """The user an agent surface acts as, and whose home it owns.
+
+    The agent, not the human: the notes skill hands the agent a home at
+    ``/home/<name>/``, so two agents owned by two different people collide there
+    unless the name distinguishes them.
+
+    Defaults to the machine username, because on a VM or sandbox the agent has an
+    account of its own and the SurrealFS path should match it. Where it does not --
+    an agent sharing a laptop account with its human, or two agents under one
+    account -- ``SURREALFS_AGENT_USER`` names it (``hermes-martin``), and
+    ``hermes memory setup`` writes that into the profile's own ``.env``.
+
+    This is now an access-control boundary, not just a path convention: whatever
+    it returns is the only home this process can read or write.
+
+    Under record auth the credential *is* the identity -- the database enforces
+    the user it was issued for -- so the name comes from ``SURREALDB_USER`` and
+    nothing else. Deriving it from the machine account there would have
+    `SurrealFs` apply one user's permissions to another user's rows and file an
+    agent's memory in a home it cannot write. Verbatim, not slugged: the record
+    id is the name as provisioned, and `SurrealFs.__init__` rejects one that is
+    not a clean path segment rather than quietly rewriting it into somebody
+    else's.
+
+    Never ``root``: that is `SurrealFs`'s permission bypass, and root is the
+    *default* account in a container, so inheriting it from the unix user would
+    hand every agent in a Docker image the whole tree with nothing said. Refuses
+    rather than picking another name, because silently acting as somebody else
+    files an agent's memory in the wrong home.
+    """
+    from ..fs import ROOT
+
+    if _auth_level() == RECORD_LEVEL:
+        user = _credential_user()
+    else:
+        name = os.environ.get("SURREALFS_AGENT_USER", "").strip()
+        user = _slug(name) if name else _machine_user()
+    if user == ROOT:
+        raise RuntimeError(
+            f"no agent may act as {ROOT!r}: it bypasses every SurrealFS "
+            "permission check. Name a real user in SURREALFS_AGENT_USER, or in "
+            "SURREALDB_USER under record auth. The default unix account in a "
+            "container is root, which is not a deliberate grant."
+        )
+    return user
+
+
+def _auth_level() -> str:
+    """Which kind of credential this process signs in with."""
+    level = os.environ.get("SURREALDB_AUTH_LEVEL", "root").strip().lower()
+    if level not in AUTH_LEVELS:
+        raise ValueError(
+            f"SURREALDB_AUTH_LEVEL must be one of {', '.join(AUTH_LEVELS)}: {level!r}"
+        )
+    return level
+
+
+def _credential_user() -> str:
+    return os.environ.get("SURREALDB_USER", "root")
 
 
 def _namespace() -> str:
@@ -53,22 +144,27 @@ def _database() -> str:
     return os.environ.get("SURREALDB_DATABASE", "demo")
 
 
-def _credentials() -> dict[str, str]:
+def _credentials() -> dict[str, Any]:
     """The signin payload for the configured auth level.
 
     The server infers the level from which keys are present -- the SDK forwards
     this dict to the signin RPC untouched -- so a root credential must *not*
-    carry a namespace, and a database user must carry both.
+    carry a namespace, and a database user must carry both. A record signin is
+    a different shape again: it names an access method, and the username and
+    password travel as `variables`, matching the SIGNIN clause's `$user` and
+    `$pass`.
     """
-    level = os.environ.get("SURREALDB_AUTH_LEVEL", "root").strip().lower()
-    if level not in AUTH_LEVELS:
-        raise ValueError(
-            f"SURREALDB_AUTH_LEVEL must be one of {', '.join(AUTH_LEVELS)}: {level!r}"
-        )
-    creds = {
-        "username": os.environ.get("SURREALDB_USER", "root"),
-        "password": os.environ.get("SURREALDB_PASS", "root"),
-    }
+    level = _auth_level()
+    username = _credential_user()
+    password = os.environ.get("SURREALDB_PASS", "root")
+    if level == RECORD_LEVEL:
+        return {
+            "namespace": _namespace(),
+            "database": _database(),
+            "access": RECORD_ACCESS,
+            "variables": {"user": username, "pass": password},
+        }
+    creds: dict[str, Any] = {"username": username, "password": password}
     if level in ("namespace", "database"):
         creds["namespace"] = _namespace()
     if level == "database":
@@ -148,9 +244,15 @@ async def connected() -> AsyncIterator[AsyncSurreal]:
     db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
     try:
         await _authenticate(db)
-        if not _schema_applied:
+        if not _schema_applied and _auth_level() != RECORD_LEVEL:
             # Once per process, so a first call works against a bare database
             # without the user running `python -m surrealfs.schema` first.
+            #
+            # Not under record auth: a record user has no DDL rights, so this
+            # raises "Not enough permissions" on *every* call -- the flag is
+            # only set on success -- and takes the whole surface down. Defining
+            # the schema there is an admin's job, once:
+            # `python -m surrealfs.schema --record-auth`.
             await apply_schema(db)
             _schema_applied = True
         yield db

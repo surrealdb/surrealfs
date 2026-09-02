@@ -42,7 +42,7 @@ def _status() -> int:
     try:
         from surrealfs import SurrealFs
         from surrealfs.integrations._connect import connected
-        from surrealfs.integrations.hermes_memory import SurrealFsMemory
+        from surrealfs.integrations.hermes_memory import SurrealFsMemory, _agent_user
     except ImportError as exc:
         # `pip_dependencies` exists to prevent this state and cannot, while the
         # package is unpublished: Hermes refuses to install a spec carrying a URL,
@@ -69,7 +69,8 @@ def _status() -> int:
 
     async def count() -> int:
         async with connected() as db:
-            return len(await SurrealFs(db).glob(f"{root}/**/*.md"))
+            fs = SurrealFs(db, user=_agent_user())
+            return len(await fs.glob(f"{root}/**/*.md"))
 
     try:
         filed = asyncio.run(count())

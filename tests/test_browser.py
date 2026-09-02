@@ -39,6 +39,17 @@ def test_the_markdown_renderer_still_escapes_raw_html():
     )
 
 
+def test_a_denial_is_a_403_not_a_server_error():
+    """`PermissionDenied` is an `OSError`, not a `ValueError`, so `on_error`'s
+    fallback turned every denial into a 500. Newly reachable: `--user` lets the
+    browser run as somebody other than root, and then any click into another
+    user's home takes this path."""
+    from surrealfs import NotFound, PermissionDenied
+
+    assert browser.on_error(None, PermissionDenied("nope")).status_code == 403
+    assert browser.on_error(None, NotFound("gone")).status_code == 404
+
+
 def test_stream_events_become_what_the_page_renders():
     delta = PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi"))
     assert browser._stream_event(delta) == {"delta": "hi"}
@@ -93,6 +104,9 @@ def test_session_paths_are_slugged_and_dated():
         ("namespace", {"username", "password", "namespace"}),
         ("database", {"username", "password", "namespace", "database"}),
         ("DATABASE", {"username", "password", "namespace", "database"}),
+        # Record signin is a different shape: an access method, and the
+        # credentials as `variables` matching the SIGNIN clause's $user/$pass.
+        ("record", {"namespace", "database", "access", "variables"}),
     ],
 )
 def test_the_signin_payload_matches_the_auth_level(monkeypatch, level, expected):
@@ -103,9 +117,18 @@ def test_the_signin_payload_matches_the_auth_level(monkeypatch, level, expected)
 
 
 def test_an_unknown_auth_level_is_rejected_by_name(monkeypatch):
-    monkeypatch.setenv("SURREALDB_AUTH_LEVEL", "record")
-    with pytest.raises(ValueError, match="root, namespace, database"):
+    monkeypatch.setenv("SURREALDB_AUTH_LEVEL", "wizard")
+    with pytest.raises(ValueError, match="root, namespace, database, record"):
         _connect._credentials()
+
+
+def test_the_record_payload_carries_the_access_method(monkeypatch):
+    monkeypatch.setenv("SURREALDB_AUTH_LEVEL", "record")
+    monkeypatch.setenv("SURREALDB_USER", "alice")
+    monkeypatch.setenv("SURREALDB_PASS", "hunter2")
+    creds = _connect._credentials()
+    assert creds["access"] == _connect.RECORD_ACCESS
+    assert creds["variables"] == {"user": "alice", "pass": "hunter2"}
 
 
 @pytest.mark.asyncio

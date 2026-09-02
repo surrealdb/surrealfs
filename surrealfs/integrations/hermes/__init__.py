@@ -48,7 +48,7 @@ from typing import Any
 
 from surrealfs import SurrealFs
 from surrealfs.embed import make_embedder
-from surrealfs.integrations._connect import connected
+from surrealfs.integrations._connect import agent_user, connected
 from surrealfs.integrations.json_tools import call_tool
 from surrealfs.tools import TOOLS, ToolContext, select_tools
 
@@ -169,5 +169,5 @@ async def _dispatch(name: str, args: dict[str, Any], *, semantic: bool) -> str:
         # The embedder is built per call, not cached: the OpenAI client binds its
         # connection pool to the running loop, and this one closes with the call.
         embed = make_embedder() if semantic else None
-        ctx = ToolContext(fs=SurrealFs(db), embed=embed)
+        ctx = ToolContext(fs=SurrealFs(db, user=agent_user()), embed=embed)
         return await call_tool(ctx, name, args, semantic=semantic)

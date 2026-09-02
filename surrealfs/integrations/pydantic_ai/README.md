@@ -18,7 +18,7 @@ agent = Agent(
     toolsets=[build_fs_toolset()],
 )
 
-await agent.run("Tidy up my notes", deps=ToolContext(fs=SurrealFs(db)))
+await agent.run("Tidy up my notes", deps=ToolContext(fs=SurrealFs(db, user="alice")))
 ```
 
 The agent's deps carry the filesystem. The default `get_context` accepts a
@@ -36,9 +36,9 @@ only burn a turn.
 embedder that only you can supply:
 
 ```python
-toolsets=[build_fs_toolset(semantic=True)]
+toolsets = [build_fs_toolset(semantic=True)]
 ...
-deps=ToolContext(fs=SurrealFs(db), embed=embed)
+deps = ToolContext(fs=SurrealFs(db, user="alice"), embed=embed)
 ```
 
 Both halves are required — `semantic=True` without an `embed` in the context is
