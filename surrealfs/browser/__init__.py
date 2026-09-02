@@ -56,6 +56,7 @@ from ..errors import (
     DirectoryNotEmpty,
     InvalidPath,
     NotFound,
+    PermissionDenied,
     SurrealFsError,
 )
 from ..fs import ROOT, SurrealFs
@@ -75,6 +76,10 @@ MD = MarkdownIt("commonmark", {"html": False}).enable("table")
 
 STATUS = {
     NotFound: 404,
+    # `PermissionDenied` is an `OSError`, not a `ValueError`, so without this
+    # `on_error`'s fallback made every denial a 500 -- reachable from the UI
+    # since `--user` let the browser run as somebody other than root.
+    PermissionDenied: 403,
     AlreadyExists: 409,
     DirectoryNotEmpty: 409,
 }

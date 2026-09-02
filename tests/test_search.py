@@ -353,6 +353,27 @@ async def test_search_fuses_both_arms(fs, db):
     assert all(hit.snippet for hit in fused)
 
 
+async def test_a_query_with_nothing_to_match_still_searches_by_vector(fs, db):
+    """`search` guarded on an empty query before the fusion moved server-side.
+
+    Nothing to match is not nothing to search: the caller handed over an
+    embedding of something. `hermes_memory._recall` trims its query to content
+    words (`_recall_query`) while building the vector from the whole prompt, so
+    a turn with no word characters in it arrives here exactly like this -- and
+    lost its recall entirely.
+    """
+    entry = await fs.write_text("/vector.md", "utterly different prose")
+    await db.query(
+        "UPDATE $id SET embedding = $v", {"id": entry.id, "v": _unit_vector(0)}
+    )
+
+    hits = await fs.search("", vector=_unit_vector(0))
+    assert [h.path for h in hits] == ["/vector.md"]
+    assert hits[0].score > 0  # the fused column, not the arm's own distance
+    # Neither an arm to run nor a vector to run it with is still nothing.
+    assert await fs.search("   ") == []
+
+
 async def test_search_respects_limit_across_both_arms(fs, db):
     for i in range(4):
         entry = await fs.write_text(f"/f{i}.md", "shared keyword")

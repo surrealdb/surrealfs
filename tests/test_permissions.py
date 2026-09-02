@@ -545,6 +545,62 @@ async def test_chmod_rejects_out_of_range(tree):
         await alice.chmod("/projects/public.md", 0o1777)
 
 
+async def test_stat_does_not_hand_out_the_hash_of_an_unreadable_file(tree):
+    """`hash` is the md5 of the content, and `_require` checks only ancestry.
+
+    For anything short or low-entropy -- a yes/no answer, a token, a name --
+    the digest *is* the content: bob guesses offline and compares. Real `stat`
+    exposes a size, never a checksum. Size stays; the digest does not.
+    """
+    alice, bob = tree
+    await alice.write_text("/projects/answer.md", "yes")
+    await alice.chmod("/projects/answer.md", 0o600)
+
+    assert (await alice.stat("/projects/answer.md")).hash
+    denied = await bob.stat("/projects/answer.md")
+    assert (denied.hash, denied.size) == ("", 3)
+    listed = {e.filename: e for e in await bob.ls("/projects")}
+    assert listed["answer.md"].hash == ""
+    assert listed["public.md"].hash  # readable, so the digest is his anyway
+
+
+# --------------------------------------------------------- homes stay private
+
+
+async def test_cp_cannot_create_a_home_it_leaves_open(as_user):
+    """`cp` hands the source folder's mode to `mkdir`, and `mv` carries it.
+
+    `default_mode` only applied when no mode was passed at all, so copying
+    anything onto an unclaimed `/home/dave` landed the home at 0777 -- bob
+    could then read and write inside it, which is the whole thing `/home` and
+    `default_owner` exist to stop.
+    """
+    dave, bob = as_user("dave"), as_user("bob")
+    await dave.mkdir("/pub")
+    await dave.write_text("/pub/note.md", "hi")
+
+    await dave.cp("/pub", "/home/dave", recursive=True)
+    home = await dave.stat("/home/dave")
+    assert (home.owner, home.mode) == ("dave", 0o700)
+    with pytest.raises(PermissionDenied):
+        await bob.write_text("/home/dave/injected.md", "x")
+    with pytest.raises(PermissionDenied):
+        await bob.read_text("/home/dave/note.md")
+
+
+async def test_a_home_cannot_be_moved_into_place(as_user):
+    """`mv` is a rename: the row keeps the owner and mode it already had, and
+    neither can be corrected afterwards -- there is no chown, and `mode` is the
+    owner's alone. So a home is created, never moved into place."""
+    carol = as_user("carol")
+    await carol.mkdir("/pub")
+    with pytest.raises(PermissionDenied):
+        await carol.mv("/pub", "/home/carol")
+    # A file of that name is not a home, and a folder deeper in one is fine.
+    await carol.mkdir("/home/carol")
+    await carol.mv("/pub", "/home/carol/pub")
+
+
 # ------------------------------------------------------------ move, and root
 
 

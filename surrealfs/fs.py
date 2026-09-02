@@ -20,6 +20,7 @@ import asyncio
 import difflib
 import re
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from typing import Any, Literal
 
 from surrealdb import RecordID
@@ -241,6 +242,20 @@ class SurrealFs:
         if not self._allowed(entry, need):
             raise PermissionDenied(f"Permission denied: cannot {verb} {entry.path}")
 
+    def _shown(self, entry: FileEntry) -> FileEntry:
+        """The row as this user may see it: no content hash without the read bit.
+
+        `stat` and `ls` name a file whatever its own bits say, which is what
+        unix does -- but `hash` is the md5 of the content, and for anything
+        short or low-entropy (a yes/no answer, a token, a name) the digest *is*
+        the content, checkable offline against a guess. It is the one field in
+        `_FIELDS` that is not metadata. Real `stat` exposes a size, never a
+        digest.
+        """
+        if entry.hash and not self._allowed(entry, READ):
+            return replace(entry, hash="")
+        return entry
+
     def _readable(self, where: str) -> tuple[str, dict[str, Any]]:
         """Add the read predicate to a bulk query's WHERE clause.
 
@@ -312,7 +327,7 @@ class SurrealFs:
             f"WHERE parent_key = $k{last} AND filename = $s{last} LIMIT 1);"
         )
         row = await self._query("\n".join(lines), variables)
-        return FileEntry.from_row(row) if row else None
+        return self._shown(FileEntry.from_row(row)) if row else None
 
     async def _resolve_reachable(self, path: str) -> FileEntry | None:
         """Resolve a path, or None -- refusing a row behind a closed ancestor.
@@ -475,7 +490,7 @@ class SurrealFs:
                 "WHERE parent_key IN $keys ORDER BY filename",
                 {"keys": frontier},
             )
-            entries = [FileEntry.from_row(row) for row in (rows or [])]
+            entries = [self._shown(FileEntry.from_row(row)) for row in (rows or [])]
             # Unfiltered on purpose: unix needs `r` on the *folder* to list it,
             # and then names every child whatever its own bits say -- `ls /home`
             # shows every user's home. Only the descent is filtered, so a
@@ -577,12 +592,20 @@ class SurrealFs:
         has to know whether this is a home directory before then.
         """
         is_folder = content is None and data is None
+        if mode is None or home_owner(path, is_folder=is_folder) is not None:
+            # A home's mode is the path's to decide, never the caller's. `cp`
+            # passes the source folder's mode straight through (`mkdir(dst,
+            # mode=entry.mode | 0o700)`), so copying anything onto an
+            # unclaimed `/home/dave` would land the home at 0777 -- readable
+            # and writable by everyone, the one thing the `/home` seed and
+            # `default_owner` exist to prevent.
+            mode = default_mode(path, is_folder=is_folder)
         payload: dict[str, Any] = {
             "filename": filename,
             "parent": parent_id,
             "content_type": content_type,
             "owner": default_owner(path, is_folder=is_folder, creator=self.user),
-            "mode": default_mode(path, is_folder=is_folder) if mode is None else mode,
+            "mode": mode,
         }
         if content is not None:
             payload["content"] = content
@@ -738,6 +761,16 @@ class SurrealFs:
             raise InvalidPath(
                 f"cannot move {entry.path} into its own subtree ({dst_normalized})"
             )
+        if home_owner(dst_normalized, is_folder=entry.is_folder) is not None:
+            # A home is created, never moved into place. `mv` is a rename: the
+            # row keeps the owner and mode it had wherever it came from, and
+            # neither can be put right afterwards -- there is no chown, and
+            # `mode` is the owner's alone -- so this is the one way to land a
+            # `/home/<user>` owned by somebody else, or open to everyone.
+            raise PermissionDenied(
+                f"Permission denied: {dst_normalized} is a home directory. "
+                "Create it with mkdir and move its contents instead."
+            )
         # Removing the entry from its old folder is a write to that folder --
         # unix keys rename on the two directories, not on the file. Both checks
         # run before the existence probe below, so a destination this user
@@ -864,7 +897,14 @@ class SurrealFs:
         # read-only file in a folder you can write is yours to remove.
         await self._require_writable_dir(paths.parent_of(entry.path), entry.path)
         if not entry.is_folder:
-            await self._query("DELETE $id", {"id": entry.id})
+            # RETURN BEFORE for the same reason `edit` and `chmod` read back:
+            # a delete the table's PERMISSIONS clause rejects is not an error,
+            # it is an empty result, and reporting it as a removal is worse
+            # than failing.
+            _written(
+                await self._query("DELETE $id RETURN BEFORE", {"id": entry.id}),
+                entry.path,
+            )
             return 1
 
         children = await self.ls(entry.path, recursive=True)
@@ -882,7 +922,17 @@ class SurrealFs:
         # Deepest first, so no row is ever orphaned mid-delete.
         ids = [c.id for c in sorted(children, key=lambda c: c.path, reverse=True)]
         ids.append(entry.id)
-        await self._query("DELETE $ids", {"ids": ids})
+        removed = await self._query("DELETE $ids RETURN BEFORE", {"ids": ids})
+        # The subtree was vetted above, so a short count means the schema
+        # refused a row this layer allowed -- in practice `!fn::sfs_has_children`
+        # catching a child created under a folder after `ls` read it. The leaves
+        # are gone either way; what must not happen is reporting the whole tree
+        # removed when part of it is still there.
+        if len(removed or []) != len(ids):
+            raise PermissionDenied(
+                f"Permission denied: removed {len(removed or [])} of {len(ids)} "
+                f"entries under {entry.path}"
+            )
         return len(ids)
 
     async def chmod(self, path: str, mode: int, *, recursive: bool = False) -> int:
@@ -1035,8 +1085,14 @@ class SurrealFs:
         ``score`` is the fused rank score (``rrf_score``), not either arm's own,
         so it is comparable across the whole result set. The fusion is
         ``fn::sfs_hybrid_search`` in ``schema/file.surql``.
+
+        A query with nothing to match in it is not necessarily an empty search:
+        with a vector it is the vector arm alone, fused like any other result,
+        so `score` is still `rrf_score`. Only with neither is there nothing to
+        run -- and that is the only case this returns early for, since the text
+        arm already answers a term-less query with no rows of its own.
         """
-        if not query.strip():
+        if not query.strip() and vector is None:
             return []
         rows = await self._query(
             "RETURN fn::sfs_hybrid_search($q, $qvec, $k, $match, $me)",

@@ -106,6 +106,15 @@ path rather than of timing removes the whole class of problem, and it is what
 `_guard_home` still refuses to let bob create `/home/alice`, so the mistake
 fails loudly rather than silently doing something harmless.
 
+Both rules are properties of the *path*, so the mode has to be one too:
+`_create` re-applies `default_mode` to a home whatever mode the caller passed,
+because `cp` passes the source folder's and would otherwise land `/home/dave`
+at 0777. `mv` cannot be fixed the same way — a rename carries the row's owner
+and mode across, and neither can be corrected afterwards, since there is no
+`chown` and only the owner may `chmod` — so moving something onto a
+`/home/<user>` path is refused outright. A home is created, not moved into
+place.
+
 ## Deletion is keyed on the parent folder, and never orphans
 
 `rm` checks write and execute on the *containing folder*, not on the file. This

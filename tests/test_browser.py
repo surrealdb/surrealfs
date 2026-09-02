@@ -39,6 +39,17 @@ def test_the_markdown_renderer_still_escapes_raw_html():
     )
 
 
+def test_a_denial_is_a_403_not_a_server_error():
+    """`PermissionDenied` is an `OSError`, not a `ValueError`, so `on_error`'s
+    fallback turned every denial into a 500. Newly reachable: `--user` lets the
+    browser run as somebody other than root, and then any click into another
+    user's home takes this path."""
+    from surrealfs import NotFound, PermissionDenied
+
+    assert browser.on_error(None, PermissionDenied("nope")).status_code == 403
+    assert browser.on_error(None, NotFound("gone")).status_code == 404
+
+
 def test_stream_events_become_what_the_page_renders():
     delta = PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi"))
     assert browser._stream_event(delta) == {"delta": "hi"}

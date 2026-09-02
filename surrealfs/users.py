@@ -22,6 +22,7 @@ import os
 import secrets
 import sys
 
+from .errors import AlreadyExists, PermissionDenied
 from .fs import ROOT, SurrealFs, raise_for_status
 from .integrations._connect import _slug, connect
 from .paths import home_of
@@ -32,7 +33,12 @@ async def add(db, name: str, password: str) -> str:
 
     The home is made by the ordinary `mkdir`, as root, because `default_owner`
     already hands a `/home/<name>` folder to the name it carries -- there is no
-    separate ownership rule to keep in step here.
+    separate ownership rule to keep in step here. It is made *before* the user
+    row and tolerates one that is already there: an agent run as this name
+    against system auth creates its own home long before anyone provisions a
+    record credential for it, and that home is already theirs. Failing then
+    left a working account behind an error message saying it had not been
+    created, with the password never printed.
 
     :data:`~surrealfs.fs.ROOT` is refused. It is the bypass identity, not a
     name: `owner` DEFAULTs to it and `/home` is seeded to it, so a record user
@@ -44,6 +50,19 @@ async def add(db, name: str, password: str) -> str:
     """
     if name == ROOT:
         raise ValueError(f"{ROOT!r} is the bypass identity, not a record user")
+    home = home_of(name)
+    fs = SurrealFs(db, user=ROOT)
+    try:
+        await fs.mkdir(home, parents=True)
+    except AlreadyExists:
+        existing = await fs.stat(home)
+        # A squat is the one case that is not recoverable here: there is no
+        # chown, so the name cannot be given the home it is owed.
+        if not existing.is_folder or existing.owner != name:
+            raise PermissionDenied(
+                f"{home} already exists and is not {name}'s home directory "
+                f"(owner: {existing.owner})"
+            ) from None
     raise_for_status(
         await db.query_raw(
             "CREATE type::record('user', $name) "
@@ -51,8 +70,6 @@ async def add(db, name: str, password: str) -> str:
             {"name": name, "password": password},
         )
     )
-    home = home_of(name)
-    await SurrealFs(db, user=ROOT).mkdir(home, parents=True)
     return home
 
 

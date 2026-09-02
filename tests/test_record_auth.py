@@ -523,3 +523,46 @@ async def test_children_the_deleter_cannot_see_still_block_the_delete(tenants, d
     assert await paths(bob, "WHERE filename = 'private.md'") == []
     await rows(bob, "DELETE file WHERE filename = 'shared'")
     assert "/shared" in await paths(db)
+
+
+async def test_add_user_accepts_a_home_that_is_already_there(db, signed_in):
+    """Provisioning must not fail on a home the name already owns.
+
+    An agent run as `carol` under a system credential creates `/home/carol`
+    itself, long before anyone provisions a record password for her --
+    `default_owner` hands it to the name it carries either way. `add` created
+    the user row first and then died on `mkdir`, so the operator saw a failure
+    and no password while the account was already there and usable.
+    """
+    await apply_schema(db, record_auth=True)
+    await SurrealFs(db, user="carol").mkdir("/home/carol", parents=True)
+
+    assert await add_user(db, "carol", "pw-carol") == "/home/carol"
+    carol = await signed_in("carol", "pw-carol")
+    assert "/home/carol" in await paths(carol)
+
+
+async def test_rm_reports_only_what_the_database_actually_deleted(tenants, db):
+    """A refused DELETE is an empty result, not an error.
+
+    `rm` was the last write path still returning its count unconditionally, so
+    a delete the schema rejected was reported as a removal that never happened.
+    Reaching that needs the two layers to disagree about a row -- the same
+    setup `_written` exists for -- so this drives a `SurrealFs` that believes
+    it is bob over alice's record connection: bob owns the folder and may
+    unlink in it, alice only has r-x there.
+    """
+    alice_conn, _ = tenants
+    bob = SurrealFs(db, user="bob")
+    await bob.mkdir("/projects/ro", parents=True)
+    await bob.write_text("/projects/ro/bob.md", PUBLIC)
+    await bob.chmod("/projects/ro", 0o755)
+
+    from surrealfs import PermissionDenied
+
+    lying = SurrealFs(alice_conn, user="bob")
+    with pytest.raises(PermissionDenied):
+        await lying.rm("/projects/ro/bob.md")
+    assert await paths(db, "WHERE path = '/projects/ro/bob.md'") == [
+        "/projects/ro/bob.md"
+    ]
