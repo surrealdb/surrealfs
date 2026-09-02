@@ -332,10 +332,18 @@ DEFINE INDEX IF NOT EXISTS idx_hnsw_file_embedding ON file
     EFC 150 M 12 M0 24;
 
 -- Full-text search.
--- NOTE: on SurrealDB 3.2.x the `@@` match operator is index-backed and correct,
--- but search::score/highlight/offsets return 0.0/passthrough/null. SurrealFs
--- therefore ranks and snippets in Python. BM25 params are kept for when the
--- server-side scoring lands.
+--
+-- `search::score` works, and `fn::sfs_search_text` below ranks on it -- verified
+-- on 3.2.4+20260803.93ab219. It was recorded here as broken upstream for a long
+-- time because it reads 0.0 far more readily than a bug would: SurrealDB scores
+-- with the unsmoothed BM25 IDF, `ln((N - df + 0.5) / (df + 0.5))`, clamped at
+-- zero -- so every score collapses to 0.0 for a term held by more than about
+-- half the corpus. On a three-file test corpus that is *every* term. Python's
+-- `_bm25` uses the smoothed `ln(1 + ...)` variant, which is always positive, so
+-- the two rank the same corpus differently at the low end.
+--
+-- `search::highlight` (returns the content unchanged) and `search::offsets`
+-- (returns NONE) really are broken on this build, so snippets stay in Python.
 DEFINE ANALYZER IF NOT EXISTS fts_simple
   TOKENIZERS blank,class,camel,punct
   FILTERS snowball(english);
@@ -344,6 +352,186 @@ DEFINE INDEX IF NOT EXISTS idx_file_content ON file
     FIELDS content
     FULLTEXT ANALYZER fts_simple
     BM25(1.2,0.75);
+
+-- Search API
+--
+-- The same retrieval `SurrealFs.search_text`, `search_semantic` and `search`
+-- give Python, exposed to anyone holding a connection: a TS client, a raw
+-- `surreal sql` session, a live query. The rule lives here once, the way the
+-- permission predicates above do -- `fs.py` is not the ceiling on who gets
+-- ranked, filtered retrieval, and `fs.py` itself calls these rather than
+-- restating them.
+--
+-- Every one of them is permission-filtered. `search` returns file *content*, so
+-- a missed filter here is a disclosure rather than a cosmetic bug -- the same
+-- reason `SurrealFs._readable` exists. See `docs/permissions.md`.
+
+-- Who the search runs as.
+--
+-- `$auth` wins whenever there is one: under record auth the credential *is* the
+-- identity, so `$me` is ignored and cannot be used to search as somebody else.
+-- `$me` is honoured only under a system credential, where `fn::sfs_me()` is
+-- NONE and the caller already holds the database password -- there is nothing to
+-- escalate to. That is what `SurrealFs` passes today.
+--
+-- Written in this order deliberately, and it must never be flipped to
+-- `$me ?? fn::sfs_me()`: that lets a record user pass `$me = 'root'`, hit the
+-- root short-circuit in the predicates below, and lean on the table's own
+-- PERMISSIONS clause to save them. It does save them -- a SELECT in a plain
+-- function body *is* filtered, verified on 3.2.4 and asserted in
+-- `tests/test_record_auth.py` -- but this order does not need that to be true.
+--
+-- NONE throws rather than returning nothing. A system-credential caller who
+-- forgets `$me` would otherwise get zero rows out of `fn::sfs_can_read`, and a
+-- false empty is the expensive failure here: an agent told to search before it
+-- writes reads it as "not there" and writes a duplicate. `SurrealFs(db,
+-- user=...)` has no default for the same reason.
+DEFINE FUNCTION OVERWRITE fn::sfs_searcher($me: option<string>) {
+    LET $who = fn::sfs_me() ?? $me;
+    IF $who IS NONE {
+        THROW 'search needs an identity: pass $me, or connect as a record user'
+    };
+    RETURN $who;
+};
+
+-- Full-text search over file contents, best first.
+--
+-- `$match` defaults to 'any' (`@1,OR@`), the same deliberate default as
+-- `SurrealFs.search_text`: one shared term is enough. This surface returns a
+-- ranked list, so a weak hit is cheap to dismiss and an unseen one is not. Pass
+-- 'all' for a precise filter that reads an empty result as a real answer.
+--
+-- 'all' is an `array::intersect` over analyzed tokens rather than the `@1@`
+-- operator, because the operator is syntax and cannot come from `$match`. The
+-- obvious alternative -- a second match reference, `content @1,OR@ $q AND
+-- content @2@ $q` -- parses, plans, and is *silently wrong*: reference 2 is
+-- ignored whenever reference 1 is present on the same field, so 'all' returned
+-- exactly the 'any' rows (verified on 3.2.4). Comparing analyzed token sets is
+-- the same question `@1@` answers, and it runs on the candidates reference 1
+-- already produced.
+-- ponytail: for 'all' only, that analyzes every candidate's content. Cheap
+-- beside the row fetch, and 'all' is the rare mode; if it ever dominates, gate
+-- the arm behind a separate function that can use `@1@` as its sole operator.
+--
+-- `content` is returned whole and the caller cuts its own snippet.
+-- `search::highlight` returns the content unchanged, `search::offsets` returns
+-- NONE, and there is no `string::index_of` or `string::find` on this build --
+-- so a server-side snippet could only ever be "the first 160 characters", which
+-- is worse than what a caller holding the content already does (`_snippet` in
+-- `fs.py` centres on the first *unstemmed* match).
+-- ponytail: a hit therefore costs its whole file on the wire. Cap it with
+-- `string::slice(content, 0, 400)` if a corpus ever holds files big enough to
+-- notice.
+--
+-- Root short-circuits the read predicate, keeping its plan free of the per-row
+-- `gate` ancestry walk -- what `_readable` does by omitting the clause. Under
+-- record auth nobody can *be* root: `record_auth.surql` refuses the name at
+-- SIGNIN, and `fn::sfs_searcher` above ignores `$me` for a record user anyway.
+--
+-- `file` (the raw bytes) is deliberately not projected, unlike Python's
+-- `_FIELDS_WITH_CONTENT`: `size` still reads it without shipping it. A full-text
+-- hit is a text file by construction, and a remote client does not want a
+-- megabyte of bytes per hit the way an in-process caller does not care.
+DEFINE FUNCTION OVERWRITE fn::sfs_search_text(
+    $q: string, $k: option<int>, $match: option<string>, $me: option<string>
+) {
+    LET $who = fn::sfs_searcher($me);
+    LET $terms = array::distinct(search::analyze('fts_simple', $q));
+    RETURN SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+            hash, created_at, updated_at, content,
+            IF content IS NOT NONE THEN string::len(content)
+            ELSE IF file IS NOT NONE THEN bytes::len(file)
+            ELSE 0 END AS size,
+            search::score(1) AS score
+        FROM file
+        WHERE content @1,OR@ $q
+          AND ($match != 'all' OR array::len(array::intersect(
+                  $terms, search::analyze('fts_simple', content))) = array::len($terms))
+          AND ($who = 'root' OR fn::sfs_can_read(gate, owner, mode, $who))
+        -- `path` breaks ties, matching `hits.sort(key=(-score, path))` in
+        -- `fs.py`. Ties are common, not exotic: see the BM25 note above -- every
+        -- score is 0.0 for a term held by more than about half the corpus, and
+        -- then this is the whole ordering.
+        ORDER BY score DESC, path ASC
+        LIMIT $k ?? 20;
+};
+
+-- Vector similarity search over the HNSW index, nearest first. Takes a
+-- pre-computed embedding: SurrealFS never calls an embedding model and neither
+-- does this. `SurrealFs.reindex_embeddings` or `just embed` fills the vectors.
+--
+-- `<|80,160|>` is a literal, and has to be. Binding k/ef as parameters parses
+-- and returns the right rows but silently drops the index for a brute-force scan
+-- (see AGENTS.md) -- and a function argument *is* a parameter, so `$k` cannot
+-- appear here at all. SurrealQL has no dynamic execution to build it per call
+-- with either. `EXPLAIN` must say `KnnScan`; `tests/test_search.py` asserts it,
+-- because this is the failure mode that looks exactly like success.
+--
+-- 80 is the candidate pool, not the answer: HNSW applies its k cut *before* the
+-- read predicate filters, so asking for k neighbours returns fewer than k
+-- readable ones. 80 is the 20-hit default with a 4x over-fetch on top, which is
+-- what `SurrealFs.search_semantic` used to widen `k` by in Python for exactly
+-- this reason.
+-- ponytail: the pool is fixed, so a `$k` above 20 is capped by whatever survives
+-- the filter out of 80 rows, and root pays for an over-fetch it does not need
+-- (Python narrows the literal per call, which a function body cannot). Raise the
+-- literal if anyone wants deeper results.
+DEFINE FUNCTION OVERWRITE fn::sfs_search_semantic(
+    $qvec: array<float>, $k: option<int>, $me: option<string>
+) {
+    LET $who = fn::sfs_searcher($me);
+    RETURN SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+            hash, created_at, updated_at, content,
+            IF content IS NOT NONE THEN string::len(content)
+            ELSE IF file IS NOT NONE THEN bytes::len(file)
+            ELSE 0 END AS size,
+            vector::distance::knn() AS distance
+        FROM file
+        WHERE embedding <|80,160|> $qvec
+          AND ($who = 'root' OR fn::sfs_can_read(gate, owner, mode, $who))
+        ORDER BY distance ASC
+        LIMIT $k ?? 20;
+};
+
+-- Both arms, fused by rank. `SurrealFs.search`, for the database.
+--
+-- Calls the two functions above rather than restating their queries: they
+-- already return full rows carrying `id`, pre-sorted best first, which is all
+-- `search::rrf` needs -- so the projection, the read predicate and the KNN
+-- literal each exist exactly once. Without `$qvec` it is the text arm alone,
+-- same as the Python -- but still routed through `search::rrf`, so `rrf_score`
+-- is present either way. That keeps one promise for callers: the ranking column
+-- is always `rrf_score`, and it is always comparable across the whole result
+-- set, which a raw BM25 score in the one-arm case would not be.
+--
+-- `search::rrf` rather than the `array::find_index` summation it replaces: the
+-- hand-rolled form collapses each arm to `.id`, fuses, then needs a second
+-- `SELECT ... FROM <id array>` to get rows back -- which re-walks every `path`
+-- and `gate` and needs the read predicate applied a second time. One more place
+-- to forget the filter, in the function that returns file content.
+--
+-- It dedups on `id` where `_rrf` in `fs.py` fuses on `path`. Same grouping: a
+-- path identifies exactly one row, because `child_unique` on
+-- (parent_key, filename) makes a name unique at every level. It also ranks from
+-- 1 where `_rrf` ranks from 0, so the fused numbers differ by a constant from
+-- Python's for the same input -- the *order* is identical, which is all RRF
+-- claims.
+--
+-- A fused row carries `rrf_score` and keeps its own arm's `score` (BM25) or
+-- `distance` (cosine). Those two are not comparable with each other, which is
+-- the whole reason for fusing on rank; they are left distinct rather than
+-- overwritten so a caller sorting on the wrong one notices.
+DEFINE FUNCTION OVERWRITE fn::sfs_hybrid_search(
+    $q: string, $qvec: option<array<float>>, $k: option<int>,
+    $match: option<string>, $me: option<string>
+) {
+    LET $lim = $k ?? 20;
+    LET $text = fn::sfs_search_text($q, $lim, $match, $me);
+    RETURN IF $qvec IS NONE
+        THEN search::rrf([$text], $lim, 60)
+        ELSE search::rrf([$text, fn::sfs_search_semantic($qvec, $lim, $me)], $lim, 60)
+    END;
+};
 
 -- Seed: /home
 --

@@ -96,6 +96,60 @@ async def test_vector_search_is_filtered_by_the_database(tenants, db):
     assert len(await paths(alice, knn.replace("$q", str(vector(1.0))))) == 2
 
 
+async def test_a_record_user_cannot_search_as_somebody_else(tenants):
+    """`$auth` beats `$me`, so the identity argument is not a way in.
+
+    The search functions take `$me` because a *system* credential has no
+    `$auth` for `fn::sfs_me()` to read, and every SurrealFS surface signs in
+    with one. `fn::sfs_searcher` resolves `fn::sfs_me() ?? $me` in that order
+    precisely so the argument is unreachable whenever a record credential is
+    present. Flipped to `$me ?? fn::sfs_me()`, `$me = 'root'` reaches the root
+    short-circuit in every predicate below it and this is a one-argument tenant
+    bypass -- so this test is what stands between the design and that mistake.
+    """
+    _, bob = tenants
+    for spoofed in ("root", "alice"):
+        for call in (
+            "SELECT VALUE path FROM fn::sfs_search_text('launch', 20, NONE, $me)",
+            "SELECT VALUE path FROM"
+            " fn::sfs_hybrid_search('launch', NONE, 20, NONE, $me)",
+        ):
+            found = await rows(bob, call, {"me": spoofed})
+            assert found == ["/projects/public.md"], (spoofed, call, found)
+
+
+async def test_a_record_user_searching_needs_no_identity_argument(tenants):
+    """With `$auth` present, `$me` is redundant -- the credential is the answer."""
+    alice, bob = tenants
+    call = "SELECT VALUE path FROM fn::sfs_search_text('launch', 20, NONE, NONE)"
+    assert await rows(bob, call) == ["/projects/public.md"]
+    assert len(await rows(alice, call)) == 2
+
+
+async def test_a_select_in_a_function_body_is_permission_filtered(tenants, db):
+    """Belt and braces under record auth -- and worth pinning down.
+
+    Not the same question as `fn::sfs_has_children`: a statement inside a
+    *permission clause* runs unrestricted, which is documented and asserted
+    elsewhere in this file. A plain function body is a different case, and the
+    search functions would be relying on their own WHERE clause alone if it ran
+    unrestricted too. It does not: verified on 3.2.4.
+    """
+    _, bob = tenants
+    await db.query_raw(
+        "DEFINE FUNCTION OVERWRITE fn::probe() { RETURN SELECT VALUE path FROM file }"
+    )
+    seen = await rows(bob, "RETURN fn::probe()")
+    assert sorted(seen) == await paths(bob), seen
+    assert not any(path.startswith("/home/alice") for path in seen), seen
+
+
+async def test_the_search_functions_are_callable_by_a_record_user(tenants):
+    """No `PERMISSIONS` clause needed on them -- but if that ever changes, here."""
+    _, bob = tenants
+    assert await rows(bob, "RETURN fn::sfs_searcher(NONE)") == "bob"
+
+
 async def test_the_gate_recursion_holds_several_levels_deep(tenants, db):
     """The case that fails open if the clause is ever 'tidied' to use `gate`."""
     root = SurrealFs(db, user=ROOT)

@@ -11,6 +11,8 @@ from __future__ import annotations
 import pytest
 
 from surrealfs import FileEntry, PermissionDenied, format_mode
+from surrealfs.errors import QueryError
+from surrealfs.fs import raise_for_status
 
 SECRET = "the launch codes are hunter2"
 PUBLIC = "the launch is on friday"
@@ -148,6 +150,74 @@ async def test_semantic_search_does_not_leak_another_home(tree, db):
         "/projects/public.md"
     ]
     assert len(await alice.search_semantic(query, k=5)) == 2
+
+
+async def test_the_search_functions_filter_for_a_system_credential(tree, db):
+    """The surface a TS client gets: raw SurrealQL, `$me`, no `SurrealFs`.
+
+    A system credential bypasses the table's PERMISSIONS clause entirely, so
+    `fn::sfs_can_read` inside the function is the *only* filter here. That makes
+    this the same assertion as the four bulk reads above, for the path that has
+    nothing else behind it.
+    """
+    for call in (
+        "SELECT VALUE path FROM fn::sfs_search_text('launch', 20, NONE, 'bob')",
+        "SELECT VALUE path FROM fn::sfs_hybrid_search('launch', NONE, 20, NONE, 'bob')",
+    ):
+        found = await db.query(call)
+        assert found[0] == ["/projects/public.md"], (call, found)
+
+    leaked = await db.query(
+        "SELECT VALUE content FROM fn::sfs_search_text('launch', 20, NONE, 'bob')"
+    )
+    assert all(SECRET not in (content or "") for content in leaked[0]), leaked
+
+    as_alice = await db.query(
+        "SELECT VALUE path FROM fn::sfs_search_text('launch', 20, NONE, 'alice')"
+    )
+    assert len(as_alice[0]) == 2, as_alice
+
+
+async def test_a_search_function_without_an_identity_refuses(tree, db):
+    """A forgotten `$me` must not read as "nobody, so nothing".
+
+    `fn::sfs_can_read` denies an unauthenticated caller everything, so the
+    silent version of this returns zero rows -- and an agent told to search
+    before it writes reads a false empty as "not there" and writes a duplicate.
+    """
+    with pytest.raises(QueryError, match="identity"):
+        await raise_for_status(
+            await db.query_raw("RETURN fn::sfs_search_text('launch', 20, NONE, NONE)")
+        )
+
+
+async def test_the_knn_overfetch_survives_the_permission_filter(tree, db):
+    """HNSW cuts to its literal k *before* the filter runs.
+
+    The pool in `fn::sfs_search_semantic` is 80 for this reason. Alice's secret
+    is given the closest vector of all, so it occupies the top of the pool and
+    is then filtered away -- and bob must still come back with a full k of
+    readable rows rather than k minus the ones he could not see.
+    """
+    _, bob = tree
+
+    def vector(first: float) -> list[float]:
+        return [first] + [0.01] * 1535
+
+    await db.query_raw(
+        "UPDATE file SET embedding = $v WHERE filename = 'secret.md'",
+        {"v": vector(1.0)},
+    )
+    for i in range(30):
+        entry = await bob.write_text(f"/shared/v{i}.md", f"document {i}")
+        await db.query_raw(
+            "UPDATE $id SET embedding = $v",
+            {"id": entry.id, "v": vector(0.5 + i / 100)},
+        )
+
+    hits = await bob.search_semantic(vector(1.0), k=10)
+    assert len(hits) == 10, [h.path for h in hits]
+    assert not any(h.path.startswith("/home/alice") for h in hits)
 
 
 async def test_glob_and_recursive_ls_do_not_leak(tree):

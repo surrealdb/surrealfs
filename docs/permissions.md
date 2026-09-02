@@ -263,11 +263,22 @@ an object, so dereferencing a field on it outside a permission clause would
 re-enter the `user` table's permissions — and it means a username cannot drift
 from the home it names.
 
-### One thing we get for free
+### One thing we gave up
 
-Our BM25 runs in Python over rows the database has already returned, so unlike
-`search::score` it cannot leak corpus statistics about documents the caller
-cannot see.
+BM25 used to run in Python over rows the database had already returned, so it
+could not leak corpus statistics about documents the caller cannot see. Ranking
+now runs in the database (`fn::sfs_search_text`), and `search::score`'s IDF is
+computed over the whole index — every document, readable or not. A caller can
+therefore learn something about how *common* a term is corpus-wide from the
+scores it gets back.
+
+That is a score-channel inference, not a content leak: no row, path, filename or
+byte of another user's file crosses the boundary, and the rows returned are still
+filtered by `fn::sfs_can_read`. The trade is deliberate — one definition of
+retrieval, available to every client rather than only to Python — and it is the
+kind of leak a shared-index search engine has by construction. If a deployment
+ever needs corpus statistics to be per-tenant too, the answer is a table per
+tenant, not a scorer in the client.
 
 ## Known ceilings
 

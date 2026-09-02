@@ -124,18 +124,24 @@ duplicate note. Since this surface returns a ranked list of snippets, a weak hit
 cheap to dismiss and an unseen one is not. `match="all"` is there for callers that
 want a precise filter and read empty as a real answer.
 
-**Scoring must run on `search::analyze` output, or stemmed matches score zero.**
-This was the real defect behind a long detour. The index analyzes with
-`snowball(english)`, so a query for `prefer` matches a file saying "Prefers" — but the
-Python scorer counted *raw words*, found no literal "prefer", scored the file `0.000`,
-and sorted it below files that did not answer the question. Hence
-`search::analyze($analyzer, content) AS tokens` in the query, `$terms` for the
-analyzed query, and `ANALYZER` in `fs.py` kept in step with `schema/file.surql`.
-Ranking is Okapi BM25 (`_bm25`) over those tokens: `df` from the matched rows only,
-stopwords dropped from scoring but never from matching (`_scoring_terms`).
+**Retrieval lives in `schema/file.surql`, not in `fs.py`.** `fn::sfs_search_text`,
+`fn::sfs_search_semantic` and `fn::sfs_hybrid_search` are the queries; `SurrealFs`
+calls them and turns rows into `SearchHit`s. That is what gives a TS client or a raw
+`surreal sql` session the same ranked, permission-filtered retrieval Python gets,
+and it is why there is no second copy of BM25 or RRF to keep in step. The one part
+still done in Python is the snippet, because `search::highlight` and
+`search::offsets` are genuinely broken (below).
 
 Measured on `test_ranking_quality_over_a_realistic_corpus`, which exists to keep this
-honest: raw term counts scored **MRR 0.591**, BM25 on analyzer tokens **0.823**.
+honest: raw term counts scored **MRR 0.591**, Python BM25 over analyzer tokens
+**0.823**, and server-side `search::score` **0.833**.
+
+The Python scorer this replaced had one instructive defect worth not repeating: it
+counted *raw words*. The index analyzes with `snowball(english)`, so a query for
+`prefer` matches a file saying "Prefers" — but a raw-word scorer finds no literal
+"prefer", scores the file `0.000` and sorts it below files that do not answer the
+question at all. Anything that scores full-text results has to score whatever the
+analyzer produced, which server-side BM25 does by construction.
 
 Three things that look like fixes and measurably were not:
 
@@ -153,10 +159,9 @@ the question still pulls in files dense with it — "what does the user prefer" 
 term. That is what the vector arm is for. Do not tune BM25 to paper over it; a test
 asserting the opposite was deleted rather than have the scorer chase it.
 
-Related ceiling: `limit` is applied after Python ranking, so `search_text` fetches
-the content of every matching row and now asks the server to tokenise each one.
-Fine for notes; a corpus where one common term matches thousands of files needs
-server-side scoring before a SQL `LIMIT` can be trusted not to wreck the order.
+That ceiling used to be worse: `limit` was applied *after* Python ranking, so
+`search_text` fetched and tokenised every matching row. Ranking in the database
+fixed it — the `LIMIT` is now applied after `ORDER BY score`, inside the query.
 
 **`SurrealFs._query` goes through `query_raw()`, not `query()`.** The envelope is
 what carries each statement's error *kind*, which is how we tell a retryable
@@ -190,17 +195,45 @@ chains `LET $k = <string>$p`, and `<string>NONE` is the literal `"NONE"`, which
 matches no row. Substituting `'root'` as a fallback would make `/ghost/a.md`
 resolve to `/a.md`.
 
-**FTS scoring is broken upstream.** On 3.2.x `search::score` returns `0.0`,
-`search::highlight` returns the content unchanged, and `search::offsets` returns
-`null`. The match operator itself works and is index-backed, so `search_text`
-matches in SurrealQL and then ranks and snippets in Python. Revisit if a later
-release fixes the functions.
+**`search::score` is not broken — it clamps.** This was recorded here for a long
+time as broken upstream, on the evidence that it returned `0.0`. It does, constantly,
+and correctly: SurrealDB scores with the unsmoothed BM25 IDF, `ln((N - df + 0.5) /
+(df + 0.5))`, clamped at zero, so a term held by more than about half the corpus is
+worth nothing to any document. Every test corpus here was three files, where that is
+*every* term. On ten documents with the term in two, it scores fine (verified on
+3.2.4+20260803.93ab219, and `tests/test_search.py::_fill` exists to keep test corpora
+above that threshold).
+
+Two consequences. A `score` of `0.0` is normal, not a failure, and `path` is the
+documented tie-break when it happens. And Python's old `_bm25` used the *smoothed*
+`ln(1 + ...)` variant, which is always positive — so the two disagreed at the low end,
+which is why a couple of two-file ranking tests had to grow a corpus when ranking
+moved into the database.
+
+`search::highlight` (returns the content unchanged) and `search::offsets` (returns
+NONE) really are broken on 3.2.x, and there is no `string::index_of` or `string::find`
+to work around them with. Snippets therefore stay in Python (`_snippet`), which can
+centre the window on the first *unstemmed* match — better than anything the server
+could currently return.
 
 **HNSW needs `<|k,ef|>` with literal integers.** `<|k,COSINE|>` compiles to a
 brute-force `KnnTopK` over a table scan and ignores the index. And `k`/`ef` must
 be *literals*: binding them as parameters looks fine — it parses and returns the
 right rows — but the planner silently drops to a brute-force scan. Confirmed with
-`EXPLAIN` on both engines. They are interpolated after an `int()` cast.
+`EXPLAIN` on both engines.
+
+A **function argument is a parameter**, so `$k` cannot reach the operator from
+inside `DEFINE FUNCTION` either, and SurrealQL has no dynamic execution to build
+the literal per call. That is why `fn::sfs_search_semantic` hard-codes
+`<|80,160|>` and takes `$k` only as a `LIMIT`.
+
+**A second match reference on the same field is silently ignored.**
+`content @1,OR@ $q AND content @2@ $q` parses, plans, and returns exactly the
+reference-1 rows — reference 2 contributes nothing, so an "all terms" mode built
+that way is wrong while looking right. `@2@` *alone* filters correctly; it is only
+the combination that fails. `fn::sfs_search_text` therefore implements
+`match="all"` by comparing analyzed token sets with `array::intersect`. Verified on
+3.2.4.
 
 **`touch` must write `content = ""`, not NONE.** `is_folder` is computed as "no
 content, no bytes, no symlink", so a NONE-content row comes back as a directory.
@@ -251,10 +284,14 @@ and why `EXPLAIN` was checked (`idx_file_content` still drives a `FullTextScan`,
 with the predicate applied above it). Verified on 3.2.4; re-check it on a server
 upgrade.
 
-**HNSW applies its `k` cut before the permission filter.** `search_semantic`
-therefore over-fetches by `_KNN_OVERFETCH` for a non-root user and trims in
-Python, or a filtered vector search would quietly return fewer hits than asked
-for. Root skips the predicate entirely and keeps the original plan.
+**HNSW applies its `k` cut before the permission filter.**
+`fn::sfs_search_semantic` therefore searches a pool of 80 and `LIMIT`s to `$k`
+after the predicate, or a filtered vector search would quietly return fewer hits
+than asked for. Root short-circuits the predicate but still pays for the pool: the
+`<|80,160|>` operands must be *literals* (below), so a function body cannot narrow
+them per call the way the old Python interpolation did. That is the price of having
+one definition, and `tests/test_permissions.py` asserts a full `k` of readable rows
+still comes back when the nearest vector of all is one the caller cannot read.
 
 **A home directory is owned by the user it is named after, not by whoever
 created it** (`default_owner`). Root seeds `/home/<x>` often — the indexer, the

@@ -167,8 +167,19 @@ and a daemon that keeps the vectors current ship in `surrealfs.embed`:
 just embed              # poll every 5s; --once for a single pass
 ```
 
+The queries are custom SurrealQL functions in the schema, not Python, so any
+client gets the same ranked, permission-filtered retrieval:
+
+```surql
+SELECT path, rrf_score FROM fn::sfs_hybrid_search("how do I get paid", $qvec, 5, NONE, 'alice');
+```
+
+`fn::sfs_search_text` and `fn::sfs_search_semantic` are the single arms. The last
+argument is who is asking: a system credential passes it, a record credential
+overrides it. `SurrealFs` calls these too, so there is only one definition.
+
 See [Semantic search](docs/semantic-search.md) for the ranking, `match="all"`,
-and wiring it into the agent toolset.
+the SurrealQL surface, and wiring it into the agent toolset.
 
 ## Permissions
 

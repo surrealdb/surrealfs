@@ -18,10 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import difflib
-import math
 import re
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import replace
 from typing import Any, Literal
 
 from surrealdb import RecordID
@@ -62,11 +60,6 @@ _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # Matches `_slug` in `integrations/_connect.py`.
 _USERNAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
-# How much wider than `k` a non-root vector search casts, so that the
-# permission filter -- which HNSW applies only after its own cut -- still has k
-# readable rows left to return.
-_KNN_OVERFETCH = 4
-
 _MAX_RETRIES = 5
 _RETRY_BACKOFF = 0.02  # seconds; doubles per attempt
 
@@ -75,16 +68,6 @@ ROOT_KEY = "root"
 
 # Whether a multi-word full-text query needs just one term or every term.
 MatchMode = Literal["any", "all"]
-
-# BM25 knobs, matching `BM25(1.2,0.75)` on the index in schema/file.surql: ranking
-# happens in Python for now, and the two should not disagree about the parameters.
-_BM25_K1 = 1.2  # how fast term frequency saturates
-_BM25_B = 0.75  # how hard long documents are penalised
-
-# The analyzer the FULLTEXT index is built with. Must match schema/file.surql: it
-# is asked to tokenise queries and content for scoring, and scoring on anything
-# else would disagree with what the index matched.
-ANALYZER = "fts_simple"
 
 # Dropped when scoring a query, never when matching it. Not linguistics -- just the
 # words common enough that counting them buries the term that carries the question.
@@ -960,11 +943,12 @@ class SurrealFs:
     ) -> list[SearchHit]:
         """Full-text search over file contents.
 
-        Matching uses the full-text index; ranking is Okapi BM25 computed in
-        Python over the matched rows, because on SurrealDB 3.2.x
-        ``search::score`` returns 0.0 and ``search::highlight`` returns the
-        content unchanged. Stopwords match but do not score -- see
-        :func:`_scoring_terms`.
+        Matching and BM25 ranking both happen in the database, in
+        ``fn::sfs_search_text`` -- see ``schema/file.surql``. This method exists
+        to turn its rows into :class:`SearchHit` objects and to cut the snippet,
+        which is the one part the server cannot do (``search::highlight``
+        returns the content unchanged and ``search::offsets`` returns NONE on
+        3.2.x).
 
         ``match`` picks how a multi-word query is treated:
 
@@ -979,103 +963,57 @@ class SurrealFs:
             Every term must appear -- ``"what tone does the user prefer"`` finds
             nothing while ``"prefer"`` finds the note. For callers that want a
             precise filter and read an empty result as a real answer.
+
+        A ``score`` of 0.0 is normal rather than a failure: SurrealDB uses the
+        unsmoothed BM25 IDF, clamped at zero, so a term held by more than about
+        half the corpus scores nothing for anyone and ``path`` decides the
+        order. See the full-text note in ``schema/file.surql``.
         """
         if not query.strip():
             return []
-        # ponytail: `limit` is applied after Python ranking, so this fetches the
-        # content of every matching row. Fine for a filesystem of notes; if one
-        # grows to where a common term matches thousands, ranking has to move
-        # into the query (server-side BM25) before a SQL LIMIT can be trusted.
-        operator = "@1,OR@" if match == "any" else "@1@"
-        words = _scoring_terms(query)
-        # Score on the analyzer's own tokens, on both sides. Counting raw words
-        # instead silently scored zero for every file that matched only through
-        # stemming -- the index turns "Prefers" into "prefer", so a query for
-        # "prefer" matched the file and then ranked it below files that did not
-        # answer the question at all. `LET` plus a `$terms` column keeps this to
-        # one round trip, since `_query` hands back the last statement.
-        where, extra = self._readable(f"content {operator} $query")
         rows = await self._query(
-            "LET $terms = search::analyze($analyzer, $text);\n"
-            f"SELECT {_FIELDS_WITH_CONTENT}, "
-            "search::analyze($analyzer, content) AS tokens, $terms AS terms "
-            f"FROM {self.table} WHERE {where}",
-            {
-                "query": query,
-                "text": " ".join(words),
-                "analyzer": ANALYZER,
-                **extra,
-            },
+            "RETURN fn::sfs_search_text($q, $k, $match, $me)",
+            {"q": query, "k": int(limit), "match": match, "me": self.user},
         )
-        rows = rows or []
-        if not rows:
-            return []
-        tokens = {
-            row.get("path", ""): [
-                token
-                for token in row.get("tokens") or []
-                if any(char.isalnum() for char in token)
-            ]
-            for row in rows
-        }
-        scores = _bm25(tokens, rows[0].get("terms") or [])
-        hits = [
+        # The unstemmed words, so the snippet window lands on the match in the
+        # original text rather than on a stem that may not appear in it.
+        words = _scoring_terms(query)
+        return [
             SearchHit(
                 entry=(entry := FileEntry.from_row(row)),
-                score=scores.get(entry.path, 0.0),
-                # The unstemmed words, so the window lands on the match in the
-                # original text rather than on a stem that may not appear in it.
+                score=float(row.get("score") or 0.0),
                 snippet=_snippet(entry.content or "", words),
             )
-            for row in rows
+            for row in rows or []
         ]
-        hits.sort(key=lambda h: (-h.score, h.entry.path))
-        return hits[:limit]
 
     async def search_semantic(
-        self, vector: Sequence[float], *, k: int = 10, ef: int = 40
+        self, vector: Sequence[float], *, k: int = 10
     ) -> list[SearchHit]:
         """Vector similarity search over the HNSW index.
 
         Takes a pre-computed embedding -- the library does not call an embedding
-        model. Use :meth:`reindex_embeddings` to populate the vectors.
+        model. Use :meth:`reindex_embeddings` to populate the vectors. The query
+        itself is ``fn::sfs_search_semantic`` in ``schema/file.surql``, which
+        holds the ``<|80,160|>`` candidate pool the HNSW index needs as a
+        literal.
         """
-        # k and ef must be *literals* in the query text. Binding them as
-        # parameters looks like it works -- it parses and returns correct rows --
-        # but the planner silently drops to a brute-force scan instead of the
-        # HNSW index (verified with EXPLAIN). The int() cast makes interpolation
-        # injection-proof.
-        k_literal, ef_literal = int(k), int(ef)
-        if k_literal <= 0 or ef_literal <= 0:
-            raise ValueError("k and ef must be positive")
-        # HNSW cuts to k *before* the permission predicate filters, so asking for
-        # k neighbours would return fewer than k readable ones. Over-fetch, then
-        # trim back in Python.
-        wanted = k_literal
-        if not self.is_root:
-            k_literal *= _KNN_OVERFETCH
-            ef_literal = max(ef_literal, k_literal)
-        where, extra = self._readable(f"embedding <|{k_literal},{ef_literal}|> $vector")
+        if int(k) <= 0:
+            raise ValueError("k must be positive")
         rows = await self._query(
-            f"SELECT {_FIELDS_WITH_CONTENT}, vector::distance::knn() AS distance "
-            f"FROM {self.table} "
-            f"WHERE {where} "
-            "ORDER BY distance ASC",
-            {"vector": list(vector), **extra},
+            "RETURN fn::sfs_search_semantic($qvec, $k, $me)",
+            {"qvec": list(vector), "k": int(k), "me": self.user},
         )
-        hits: list[SearchHit] = []
-        for row in (rows or [])[:wanted]:
-            entry = FileEntry.from_row(row)
-            hits.append(
-                SearchHit(
-                    entry=entry,
-                    score=float(row["distance"]),
-                    # A match by meaning shares no terms with the query, so
-                    # there is nothing to centre a snippet on: show the opening.
-                    snippet=_snippet(entry.content or "", ()),
-                )
+        return [
+            SearchHit(
+                entry=(entry := FileEntry.from_row(row)),
+                score=float(row["distance"]),
+                # A match by meaning shares no terms with the query, so there is
+                # nothing to centre a snippet on: show the opening.
+                snippet=_snippet(entry.content or "", ()),
             )
-        return hits
+            for row in rows or []
+        ]
 
     async def search(
         self,
@@ -1087,30 +1025,47 @@ class SurrealFs:
     ) -> list[SearchHit]:
         """Full-text search, with vector results fused in when given a vector.
 
-        Takes a pre-computed embedding for the same reason :meth:`search_semantic`
-        does -- the library never calls an embedding model. Without one this is
-        :meth:`search_text` under another name.
+        Takes a pre-computed embedding for the same reason
+        :meth:`search_semantic` does -- the library never calls an embedding
+        model. Without one this is the full-text arm alone.
 
-        ``match`` is passed to :meth:`search_text` and governs the full-text arm
-        only; the vector arm reads the whole query either way.
+        ``match`` is passed to the full-text arm only; the vector arm reads the
+        whole query either way.
 
-        ``score`` on the returned hits is the fused rank score, not either arm's
-        own score, so it is comparable across the whole result set.
+        ``score`` is the fused rank score (``rrf_score``), not either arm's own,
+        so it is comparable across the whole result set. The fusion is
+        ``fn::sfs_hybrid_search`` in ``schema/file.surql``.
         """
-        text_hits = await self.search_text(query, limit=limit, match=match)
-        by_path = {hit.path: hit for hit in text_hits}
-        ranked = [[hit.path for hit in text_hits]]
-
-        if vector is not None:
-            vector_hits = await self.search_semantic(vector, k=limit)
-            ranked.append([hit.path for hit in vector_hits])
-            for hit in vector_hits:
-                # A path both arms found keeps the text hit: its snippet is
-                # centred on the query terms, which the vector arm cannot do.
-                by_path.setdefault(hit.path, hit)
-
-        fused = list(_rrf(*ranked).items())[:limit]
-        return [replace(by_path[path], score=score) for path, score in fused]
+        if not query.strip():
+            return []
+        rows = await self._query(
+            "RETURN fn::sfs_hybrid_search($q, $qvec, $k, $match, $me)",
+            {
+                "q": query,
+                "qvec": list(vector) if vector is not None else None,
+                "k": int(limit),
+                "match": match,
+                "me": self.user,
+            },
+        )
+        words = _scoring_terms(query)
+        hits: list[SearchHit] = []
+        for row in rows or []:
+            entry = FileEntry.from_row(row)
+            # A row the text arm found carries `score`, and its snippet can be
+            # centred on the query terms. One only the vector arm found cannot
+            # be -- it shares no words with the query -- so it shows its opening.
+            found_by_text = row.get("score") is not None
+            hits.append(
+                SearchHit(
+                    entry=entry,
+                    score=float(row.get("rrf_score") or 0.0),
+                    snippet=_snippet(
+                        entry.content or "", words if found_by_text else ()
+                    ),
+                )
+            )
+        return hits
 
     async def reindex_embeddings(
         self,
@@ -1212,69 +1167,24 @@ def _unified_diff(before: str, after: str, path: str) -> str:
     return "\n".join(diff) or f"(no textual change in {path})"
 
 
-def _rrf(*ranked: Sequence[str], k: int = 60) -> dict[str, float]:
-    """Reciprocal rank fusion: merge ranked path lists into one ranking.
-
-    The two search arms produce incomparable numbers -- full-text scores are term
-    counts (higher is better), semantic scores are cosine distances (lower is
-    better). Fusing on rank instead of score sidesteps normalising them.
-    """
-    scores: dict[str, float] = {}
-    for arm in ranked:
-        for rank, path in enumerate(arm):
-            scores[path] = scores.get(path, 0.0) + 1 / (k + rank)
-    return dict(sorted(scores.items(), key=lambda kv: -kv[1]))
-
-
 def _scoring_terms(query: str) -> list[str]:
     """The query's content-bearing words, in the order written.
 
-    Stopwords are dropped for *scoring* only -- they still match, they just do
-    not get a say in the ranking or in where the snippet is centred. Leaving them
-    in was measured to be the difference between BM25 helping and BM25 ranking
-    exactly as badly as raw term counts: with "the" scored, a long file repeating
-    it beats a short exact match. A query made only of stopwords keeps them all,
-    so ``"the who"`` still ranks something.
+    Stopwords are dropped -- they still *match*, they just do not get a say in
+    where the snippet window is centred, which is what this feeds now that
+    ranking happens in the database. Centring on "the" anchors the window at
+    character zero and shows the caller nothing.
+
+    The name is historical: this used to pick the terms Python's BM25 scored,
+    where leaving stopwords in was measured to be the difference between BM25
+    helping and ranking exactly as badly as raw term counts. It is also what
+    `integrations/hermes_memory` trims a recall query down to.
+
+    A query made only of stopwords keeps them all, so ``"the who"`` still has
+    something to centre on.
     """
     terms = [t for t in re.findall(r"\w+", query.lower()) if t]
     return [t for t in terms if t not in _STOPWORDS] or terms
-
-
-def _bm25(bodies: dict[str, Sequence[str]], terms: Sequence[str]) -> dict[str, float]:
-    """Score analyzed documents against analyzed query terms. Paths to scores.
-
-    Okapi BM25: term frequency saturates (so repetition stops paying), long
-    documents are penalised, and a term is worth more the fewer documents hold
-    it. `df` is counted over the matched rows rather than the whole table --
-    measured no worse than a corpus-wide count, and it costs no extra queries.
-
-    Both arguments must be analyzer output, or a document that matched only by
-    stem scores zero.
-    """
-    if not bodies or not terms:
-        return {}
-    lengths = {path: len(words) or 1 for path, words in bodies.items()}
-    average = sum(lengths.values()) / len(lengths)
-    total = len(bodies)
-
-    inverse: dict[str, float] = {}
-    for term in set(terms):
-        documents = sum(1 for body in bodies.values() if term in body)
-        inverse[term] = math.log(1 + (total - documents + 0.5) / (documents + 0.5))
-
-    scores: dict[str, float] = {}
-    for path, body in bodies.items():
-        score = 0.0
-        for term in inverse:
-            frequency = body.count(term)
-            if not frequency:
-                continue
-            saturation = frequency + _BM25_K1 * (
-                1 - _BM25_B + _BM25_B * lengths[path] / average
-            )
-            score += inverse[term] * frequency * (_BM25_K1 + 1) / saturation
-        scores[path] = score
-    return scores
 
 
 def _snippet(content: str, terms: Sequence[str], *, width: int = 160) -> str:
