@@ -33,8 +33,16 @@ fmt:
 agent:
     uv run --extra demo python examples/chat_agent.py
 
+# Build the browser's React UI into surrealfs/browser/static. Needs bun.
+ui:
+    cd surrealfs/browser/ui && bun install && bun run build
+
+# The vite dev server, proxying /api and /raw to `just browser` on :7933.
+ui-dev:
+    cd surrealfs/browser/ui && bun install && bun run dev
+
 # Browse the filesystem in a web UI on http://127.0.0.1:7933
-browser *ARGS:
+browser *ARGS: ui
     uv run --extra browser python -m surrealfs.browser {{ARGS}}
 
 # Run the framework-free Anthropic tool-use loop.

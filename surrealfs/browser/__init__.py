@@ -8,8 +8,11 @@ Run it locally against whatever database the agents are writing to -- the
 `surrealfs/browser/__main__.py` for the command line.
 
 Tree on the left, file on the right, chat with the note-taking agent on the far
-right: text is editable, markdown renders as HTML with a source toggle, HTML
-renders in a sandboxed iframe, images display.
+right: text is editable, markdown renders with a source toggle, HTML renders in
+a sandboxed iframe, images display.
+
+This module is the JSON API and nothing else. The page is a React SPA built from
+`surrealfs/browser/ui/` into `surrealfs/browser/static/` -- run `just ui`.
 
 Search is hybrid -- full-text and vector results fused by rank. The vector arm
 needs OPENAI_API_KEY; without it search quietly falls back to full-text only.
@@ -28,7 +31,6 @@ from pathlib import Path
 from typing import Any
 
 import uvicorn
-from markdown_it import MarkdownIt
 from pydantic_ai import AgentRunResultEvent
 from pydantic_ai.messages import (
     FunctionToolCallEvent,
@@ -48,7 +50,8 @@ from starlette.responses import (
     Response,
     StreamingResponse,
 )
-from starlette.routing import Route
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from ..embed import INDEXER_VERSION, make_embedder
 from ..errors import (
@@ -65,14 +68,9 @@ from ..schema import apply_schema
 from ..tools import ToolContext
 from .agent import build_chat_agent
 
-PAGE = Path(__file__).with_name("page.html")
-
-# html=False is NOT the default -- the commonmark preset sets html=True, because
-# the CommonMark spec allows raw HTML. The rendered fragment is injected into the
-# page with innerHTML, so leaving it on is stored XSS: `<script>` would not fire
-# from innerHTML but `<img onerror=…>` very much would. Off means raw HTML in a
-# markdown file is escaped and shown as text. Do not turn it back on.
-MD = MarkdownIt("commonmark", {"html": False}).enable("table")
+# The vite build output. Gitignored: `just ui` (or `just browser`) fills it.
+STATIC = Path(__file__).with_name("static")
+INDEX = STATIC / "index.html"
 
 STATUS = {
     NotFound: 404,
@@ -125,13 +123,9 @@ def _transcript(messages: list[Any]) -> list[dict[str, Any]]:
                 out[-1]["text"] = f"{out[-1]['text']}\n\n{part.content}".strip()
             elif isinstance(part, ToolCallPart):
                 out[-1]["tools"].append(part.tool_name)
-    # The reply is rendered markdown, same as at the end of a live turn; the
-    # user's own text is not markdown and reaches the page as textContent.
-    return [
-        {**b, "html": MD.render(b["text"]) if b["who"] == "agent" else ""}
-        for b in out
-        if b["text"] or b.get("tools")
-    ]
+    # Text, not HTML: the page renders the agent's markdown itself, so there is
+    # one markdown implementation and no server HTML to sanitise on the way in.
+    return [b for b in out if b["text"] or b.get("tools")]
 
 
 def _line(payload: dict[str, Any]) -> bytes:
@@ -180,7 +174,7 @@ class Browser:
         self.agent = agent
 
     async def page(self, request: Request) -> Response:
-        return FileResponse(PAGE)
+        return FileResponse(INDEX)
 
     async def tree(self, request: Request) -> Response:
         # ponytail: whole tree in one request; paginate if a DB ever holds
@@ -204,10 +198,6 @@ class Browser:
                 "Content-Security-Policy": "sandbox",
             },
         )
-
-    async def markdown(self, request: Request) -> Response:
-        html = MD.render(await self.fs.read_text(_param(request, "path")))
-        return Response(html, media_type="text/html; charset=utf-8")
 
     async def save(self, request: Request) -> Response:
         body = await request.json()
@@ -288,7 +278,6 @@ class Browser:
         )
 
         async def stream() -> AsyncIterator[bytes]:
-            reply = ""
             messages: list[Any] = []
             try:
                 async with self.agent.run_stream_events(
@@ -302,11 +291,6 @@ class Browser:
                         if isinstance(event, AgentRunResultEvent):
                             messages = event.result.all_messages()
                         elif (payload := _stream_event(event)) is not None:
-                            # Accumulate what was streamed rather than taking
-                            # `result.output`: that holds only the final text
-                            # part, so anything said before a tool call would
-                            # vanish when the rendered reply replaced it.
-                            reply = (reply + payload.get("delta", "")).lstrip()
                             yield _line(payload)
                 # write_bytes, not write_text: `search_text` and
                 # `reindex_embeddings` both filter on the row's `content`, which
@@ -325,12 +309,10 @@ class Browser:
                 await self._reindex()
                 yield _line(
                     # Nothing stored means nothing to adopt: leave the page on
-                    # the session it already had.
-                    {
-                        "done": True,
-                        "html": MD.render(reply),
-                        "session": stored_at if messages else session,
-                    }
+                    # the session it already had. The page re-renders what it
+                    # accumulated from the deltas as markdown; the reply does not
+                    # come back a second time.
+                    {"done": True, "session": stored_at if messages else session}
                 )
             except Exception as exc:  # noqa: BLE001 -- any failure, same answer
                 # The 200 is already on the wire, so failures have to ride the
@@ -391,7 +373,6 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
             Route("/", b.page),
             Route("/raw", b.raw),
             Route("/api/tree", b.tree),
-            Route("/api/markdown", b.markdown),
             Route("/api/search", b.search),
             Route("/api/session", b.session),
             Route("/api/chat", b.chat, methods=["POST"]),
@@ -399,6 +380,13 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
             Route("/api/file", b.save, methods=["PUT"]),
             Route("/api/file", b.create, methods=["POST"]),
             Route("/api/file", b.delete, methods=["DELETE"]),
+            # Everything vite emits alongside index.html: hashed js, css, fonts.
+            # check_dir=False: `build_app` must work with no build output,
+            # for tests and for the "run `just ui`" message in `serve`.
+            Mount(
+                "/assets",
+                StaticFiles(directory=STATIC / "assets", check_dir=False),
+            ),
         ],
         exception_handlers={SurrealFsError: on_error, KeyError: on_error},
     )
@@ -414,6 +402,13 @@ async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:
     its own loop; drive `uvicorn.Server` ourselves instead and everything stays
     on one.
     """
+    # Gitignored build output, so "I just cloned this" is the common case. A
+    # 404 on every asset is a bad way to learn that; say it once, up front.
+    if not INDEX.exists():
+        raise SystemExit(
+            f"the browser UI is not built ({INDEX} is missing) -- run `just ui`"
+        )
+
     db = await connect()
     try:
         # Usually a no-op: on a shared database the table is already defined, and

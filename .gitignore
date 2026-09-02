@@ -19,6 +19,10 @@ wheels/
 /demo-db
 /hermes-demo-db
 
+# The browser's React UI: build output and deps
+/surrealfs/browser/static
+node_modules/
+
 # Test caches
 .pytest_cache/
 .ruff_cache/

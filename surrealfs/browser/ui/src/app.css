@@ -1,0 +1,84 @@
+/* The shell. Everything inside a pane is Mantine; this is just the three tracks
+   and the print rules, which have no component to hang off. */
+
+html,
+body,
+#root {
+    height: 100%;
+    margin: 0;
+}
+
+.shell {
+    height: 100%;
+    display: grid;
+    grid-template-columns: 320px 1fr var(--chat-w, 380px);
+    min-height: 0;
+}
+
+.pane {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    min-width: 0;
+}
+
+/* The drag strip for the chat panel. Sits in the chat pane's own flow so it
+   cannot be covered by the sandboxed iframe next to it. */
+.drag {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 5px;
+    cursor: col-resize;
+    z-index: 2;
+}
+
+.brand-mark {
+    font-family: var(--mantine-font-family-monospace);
+    color: var(--surreal-passion);
+    font-weight: 600;
+    /* 5% of the font size; CSS letter-spacing takes no percentage. */
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+/* The frame gets an opaque origin (no allow-same-origin) and /raw sends
+   `Content-Security-Policy: sandbox` besides. */
+.html-preview {
+    flex: 1;
+    width: 100%;
+    border: 0;
+    background: #fff;
+}
+
+/* Print is the PDF export: the dialog offers "Save as PDF" in every browser, so
+   this strips the page down to the rendered document. */
+@media print {
+    .shell {
+        display: block;
+        height: auto;
+    }
+
+    .no-print {
+        display: none !important;
+    }
+
+    /* The viewer scrolls on screen, and an overflow container prints only its
+       visible box -- which would cut a long note off at one page. */
+    .print-body {
+        display: block;
+        overflow: visible !important;
+        height: auto !important;
+        max-width: none;
+        padding: 0;
+        background: #fff;
+        color: #000;
+    }
+
+    .print-body :is(pre, blockquote, table, img, figure) {
+        break-inside: avoid;
+    }
+
+    .print-body :is(h1, h2, h3) {
+        break-after: avoid;
+    }
+}
