@@ -114,21 +114,29 @@ Two constraints the recipe exists to satisfy: the script must resolve inside
 provider-credential blocklist that `OPENAI_API_KEY` is on — so the key comes from a
 sourced file, never from the gateway's environment.
 
-**Stdout is the MCP transport — nothing in `integrations/claude/` may
+**Stdout is the MCP transport — nothing in `integrations/mcp/` may
 print to it.** One stray `print` and every subsequent JSON-RPC frame is unparseable,
 which surfaces to the user as Claude Desktop simply not listing the server. All
 diagnostics go to stderr, which Desktop files under `~/Library/Logs/Claude/`. This
 is why the schema-apply fallback there writes to stderr where the browser's writes
 to stdout.
 
-**The `claude` integration directory is also a Claude plugin, and that is why
-nothing in it may move.** `.claude-plugin/plugin.json` and `.mcp.json` sit at its
-root and `skills/brain/SKILL.md` is where a plugin expects its skill, so the repo
-root's `.claude-plugin/marketplace.json` can point `source` straight at it with no
-duplicated files. Anything else — `commands/`, `agents/`, `hooks/` — would have to
-go at that same root, never inside `.claude-plugin/`. `tests/test_claude.py`
-guards the three JSON files against drifting apart, and `claude plugin validate
+**The server is `integrations/mcp/`; `integrations/claude/` is only the plugin
+around it, and nothing in that directory may move.** The server is client-agnostic
+— Cursor, Zed and Codex run the same `surrealfs-mcp` — so it does not live under a
+vendor's name. What stays in `claude/` is `.claude-plugin/plugin.json`, the
+`.mcp.json` that launches the server, and `skills/brain/SKILL.md`: the repo root's
+`.claude-plugin/marketplace.json` points `source` straight at that directory, so
+those must sit at *its* root with no duplicated files, as would `commands/`,
+`agents/` or `hooks/`. Never inside `.claude-plugin/`. `tests/test_claude.py` is
+now just that drift guard, and `claude plugin validate
 ./surrealfs/integrations/claude` checks the manifest.
+
+**The `mcp` extra is what to install; `claude` is an alias for it.** A plugin
+copies `.mcp.json` in at install time, so every already-installed plugin keeps
+asking `uvx` for `surrealfs[claude] @ git+…`. Dropping the extra would break them
+all at their next launch, with nothing in any log but a build failure — hence
+`claude = ["surrealfs[mcp]"]` in `pyproject.toml`. It has no expiry.
 
 **Never turn a `RecordID` into a string with `str()`.** `parent_key` is a stored
 string the schema fills with a server-side `<string>$this.parent`, which never
@@ -139,7 +147,7 @@ so `file:3213bq…` became `file:⟨3213bq…⟩` and matched nothing. `ls` then
 depending on whether the id generator happened to start that id with a digit,
 which is why the suite never caught it and only a fresh (unlocked) install hit it.
 `_parent_key` builds the key from `.table_name` and `.id` for this reason;
-`tests/test_claude.py` pins it.
+`tests/test_fs.py` pins it.
 
 **`surrealdb` is pinned exactly (`==3.0.0b8`), and that is deliberate.** The 3.x
 betas break each other in ways that read as wrong answers rather than errors — the
@@ -162,7 +170,7 @@ and keeps serving it; `uv cache clean <pkg>`, `--refresh` and `--reinstall` all
 leave it in place, and only `--no-cache` rebuilds. This produced three separate
 false conclusions while debugging the `ls` regression — the fix was live and the
 old behaviour persisted, silently. Develop against `./.venv/bin/surrealfs-mcp`
-from an editable `uv sync --extra claude`, never through `uvx --from <directory>`.
+from an editable `uv sync --extra mcp`, never through `uvx --from <directory>`.
 
 **`surrealfs-mcp --selftest` is the first thing to run** when a client shows no
 tools. It reports config path, server, database, identity, tool count, `ls /` and
@@ -183,9 +191,9 @@ worse than a crash: it connects *successfully* to an empty filesystem, so an age
 finds an empty brain and reports a clean risk board for a company it never
 reached. `just mcp` still works because the Justfile dotenv-loads the repo `.env`.
 
-**`mcp` is in the `dev` dependency group as well as the `claude` extra**, for the
-same reason `pydantic-ai` is: otherwise `just test` imports nothing and
-`tests/test_claude.py` silently does not run.
+**The `mcp` SDK is in the `dev` dependency group as well as the `mcp` extra**, for
+the same reason `pydantic-ai` is: otherwise `just test` imports nothing and
+`tests/test_mcp.py` silently does not run.
 
 **The browser page is a build artefact, and it is gitignored.** `surrealfs/browser/ui/`
 is a vite + React app on `@surrealdb/ui`; `surrealfs/browser/static/` is what it emits

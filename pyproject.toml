@@ -30,10 +30,14 @@ dependencies = [
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
 # What `surrealfs.embed` needs, without the rest of the demo stack.
 embed = ["openai>=2.0"]
-# The Claude Desktop MCP server (`surrealfs-mcp`). httpx is listed explicitly
-# because `spectron.py` imports it directly; it reaches the tree today only as
-# a transitive of `mcp`.
-claude = ["mcp>=1.2", "httpx>=0.27", "python-dotenv>=1"]
+# The MCP server (`surrealfs-mcp`), for any client that speaks MCP. httpx is
+# listed explicitly because `spectron.py` imports it directly; it reaches the
+# tree today only as a transitive of `mcp`.
+mcp = ["mcp>=1.2", "httpx>=0.27", "python-dotenv>=1"]
+# An alias, and not politeness: a Claude plugin copies `.mcp.json` in at install
+# time, so every already-installed plugin keeps asking for
+# `surrealfs[claude] @ git+...` and would fail to build if this went away.
+claude = ["surrealfs[mcp]"]
 # The file browser (`surrealfs-browser`). starlette is listed explicitly because
 # it reaches the tree today only as a transitive of pydantic-ai's `web` extra,
 # and it is imported directly here. The page itself is a React SPA -- see
@@ -55,9 +59,9 @@ demo = [
 
 [project.scripts]
 surrealfs-browser = "surrealfs.browser.__main__:main"
-# What Claude Desktop launches over stdio. See
-# `surrealfs/integrations/claude/README.md`.
-surrealfs-mcp = "surrealfs.integrations.claude:main"
+# What an MCP client launches over stdio. See
+# `surrealfs/integrations/mcp/README.md`.
+surrealfs-mcp = "surrealfs.integrations.mcp:main"
 
 # Lets Hermes discover the plugin in `surrealfs/integrations/hermes/` as soon as
 # the package is installed. Nothing imports Hermes, so there is no extra to add.

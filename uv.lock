@@ -1813,6 +1813,11 @@ demo = [
 embed = [
     { name = "openai" },
 ]
+mcp = [
+    { name = "httpx" },
+    { name = "mcp" },
+    { name = "python-dotenv" },
+]
 pydantic-ai = [
     { name = "pydantic-ai-slim" },
 ]
@@ -1830,9 +1835,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "anthropic", marker = "extra == 'demo'", specifier = ">=0.40" },
-    { name = "httpx", marker = "extra == 'claude'", specifier = ">=0.27" },
+    { name = "httpx", marker = "extra == 'mcp'", specifier = ">=0.27" },
     { name = "logfire", marker = "extra == 'demo'", specifier = ">=4.20" },
-    { name = "mcp", marker = "extra == 'claude'", specifier = ">=1.2" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2" },
     { name = "openai", marker = "extra == 'browser'", specifier = ">=2.0" },
     { name = "openai", marker = "extra == 'demo'", specifier = ">=2.0" },
     { name = "openai", marker = "extra == 'embed'", specifier = ">=2.0" },
@@ -1841,13 +1846,14 @@ requires-dist = [
     { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'browser'", specifier = ">=2.0" },
     { name = "pydantic-ai-slim", extras = ["web", "anthropic"], marker = "extra == 'demo'", specifier = ">=2.0" },
     { name = "python-dotenv", marker = "extra == 'browser'", specifier = ">=1" },
-    { name = "python-dotenv", marker = "extra == 'claude'", specifier = ">=1" },
+    { name = "python-dotenv", marker = "extra == 'mcp'", specifier = ">=1" },
     { name = "starlette", marker = "extra == 'browser'", specifier = ">=0.37" },
     { name = "surrealdb", specifier = "==3.0.0b8" },
+    { name = "surrealfs", extras = ["mcp"], marker = "extra == 'claude'" },
     { name = "uvicorn", marker = "extra == 'browser'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'demo'", specifier = ">=0.30" },
 ]
-provides-extras = ["pydantic-ai", "embed", "claude", "browser", "demo"]
+provides-extras = ["pydantic-ai", "embed", "mcp", "claude", "browser", "demo"]
 
 [package.metadata.requires-dev]
 dev = [

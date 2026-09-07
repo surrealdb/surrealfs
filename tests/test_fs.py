@@ -352,3 +352,23 @@ async def test_query_errors_are_not_swallowed(fs):
 
     with pytest.raises(QueryError):
         await fs._query("LET $x = 1; THROW 'boom';")
+
+
+def test_parent_key_never_escapes_a_numeric_looking_id():
+    """The index key is built by hand because `str(RecordID)` disagrees with it.
+
+    surrealdb-py 3.0.0b8 escapes an id that would otherwise parse as something
+    else, while the schema's server-side `<string>` cast never does. An id
+    beginning with a digit is the case that diverges, and when it did, `ls`
+    silently listed nothing for that one folder.
+    """
+    from surrealdb import RecordID
+
+    from surrealfs.fs import _parent_key
+
+    numeric = RecordID("file", "3213bqpjgjifypwk6y23")
+    assert _parent_key(numeric) == "file:3213bqpjgjifypwk6y23"
+    assert _parent_key(RecordID("file", "o39nm9qrdqzss2i7b348")) == (
+        "file:o39nm9qrdqzss2i7b348"
+    )
+    assert _parent_key(None) == "root"

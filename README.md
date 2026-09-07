@@ -55,7 +55,7 @@ search, all queryable with SurrealQL because it is just a table.
 ```bash
 pip install surrealfs                    # core, and the Hermes plugin
 pip install "surrealfs[pydantic-ai]"     # + the pydantic-ai toolset
-pip install "surrealfs[claude]"          # + the MCP server for Claude
+pip install "surrealfs[mcp]"             # + the MCP server
 pip install "surrealfs[browser]"         # + the file browser
 ```
 
@@ -100,7 +100,7 @@ pre-formatted strings. Build whatever integration you like on top.
 
 ## Integrations
 
-Five ways to hand it to an agent, each with its own README:
+Six ways to hand it to an agent, each with its own README:
 
 |                                                                          |                                                                       |                          |
 | ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------ |
@@ -108,7 +108,8 @@ Five ways to hand it to an agent, each with its own README:
 | **[Raw JSON tool schemas](surrealfs/integrations/json_tools/README.md)** | plain dicts in Anthropic or OpenAI shape, no framework                | core                     |
 | **[Hermes](surrealfs/integrations/hermes/README.md)**                    | the 14 `surrealfs_*` tools plus a bundled notes skill                 | core                     |
 | **[Hermes memory](surrealfs/integrations/hermes_memory/README.md)**      | files every completed turn, and recalls context before each one       | core                     |
-| **[Claude](surrealfs/integrations/claude/README.md)**                    | a plugin, or a bare MCP server: tools + the `/brain` skill             | `surrealfs[claude]`      |
+| **[MCP](surrealfs/integrations/mcp/README.md)**                          | the 16 tools over stdio, for Claude, Cursor, Zed, Codex or your own    | `surrealfs[mcp]`         |
+| **[Claude](surrealfs/integrations/claude/README.md)**                    | that server as a plugin, bundled with the `/brain` skill              | `surrealfs[mcp]`         |
 
 The four tool surfaces are generated from one registry in
 `surrealfs/tools/`, so they cannot drift apart. Tool descriptions are markdown in
