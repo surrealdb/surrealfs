@@ -45,6 +45,10 @@ ui-dev:
 browser *ARGS: ui
     uv run --extra browser python -m surrealfs.browser {{ARGS}}
 
+# Run the MCP server over stdio, as Claude Desktop launches it.
+mcp:
+    uv run --extra claude surrealfs-mcp
+
 # Run the framework-free Anthropic tool-use loop.
 loop *ARGS:
     uv run --extra demo python examples/anthropic_loop.py {{ARGS}}

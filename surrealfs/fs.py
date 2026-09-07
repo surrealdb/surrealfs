@@ -85,8 +85,19 @@ _STOPWORDS = frozenset(
 
 
 def _parent_key(parent_id: RecordID | None) -> str:
-    """The indexed key for a parent record id, matching the schema's VALUE clause."""
-    return ROOT_KEY if parent_id is None else str(parent_id)
+    """The indexed key for a parent record id, matching the schema's VALUE clause.
+
+    Built by hand rather than with ``str(parent_id)``, because the two do not
+    agree. The schema stores ``<string>$this.parent`` server-side, which never
+    escapes; surrealdb-py 3.0.0b8 changed ``RecordID.__str__`` to escape an id
+    that would otherwise parse as something else, so an id beginning with a
+    digit came back as ``file:\u27e83213bq...\u27e9`` and matched no stored key.
+    `ls` then listed nothing for that one folder and stayed correct for its
+    siblings -- silent, and depending on how the id generator happened to roll.
+    """
+    if parent_id is None:
+        return ROOT_KEY
+    return f"{parent_id.table_name}:{parent_id.id}"
 
 
 def home_owner(path: str, *, is_folder: bool) -> str | None:

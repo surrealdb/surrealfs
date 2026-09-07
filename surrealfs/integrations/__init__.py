@@ -7,15 +7,20 @@
   pydantic-ai. Requires the ``pydantic-ai`` extra.
 * :mod:`surrealfs.integrations.hermes` — a Hermes plugin, discovered through an
   entry point as soon as this package is installed. Depends on nothing.
+* :mod:`surrealfs.integrations.claude` — an MCP server (`surrealfs-mcp`) for
+  Claude Code and Claude Desktop, which also mirrors every write into Spectron.
+  This directory is itself a Claude plugin: ``.claude-plugin/plugin.json`` and
+  ``.mcp.json`` sit beside the code, and ``skills/brain/`` is the skill it ships.
+  Requires the ``claude`` extra.
 
-All three are generated from the registry in :mod:`surrealfs.tools`.
+All four are generated from the registry in :mod:`surrealfs.tools`.
 
 :mod:`surrealfs.integrations.hermes_memory` is the odd one out: a Hermes *memory
 provider* rather than a set of tools, so it files turns and recalls them instead of
 exposing anything for a model to call. Hermes finds it by directory, so it installs
 separately from the plugin above.
 
-Each of the four has a ``README.md`` beside its code; nothing about them is
+Each of the five has a ``README.md`` beside its code; nothing about them is
 documented in the root README, which links out instead.
 """
 

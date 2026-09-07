@@ -15,7 +15,14 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "surrealdb>=3.0.0a4",
+    # Pinned exactly, not a floor. The 3.x betas are not compatible with each
+    # other in ways that surface as wrong answers rather than errors: 3.0.0b8
+    # changed `RecordID.__str__` to escape ids, which silently made `ls` return
+    # no children for any folder whose own record id starts with a digit (see
+    # `_parent_key` in fs.py). A `>=` floor also let `uv.lock` and
+    # `pip install surrealfs` resolve different SDKs, so the suite passed while
+    # every fresh install was broken. Loosen this when 3.0 goes final.
+    "surrealdb==3.0.0b8",
     "pydantic>=2.12",
 ]
 
@@ -23,6 +30,10 @@ dependencies = [
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
 # What `surrealfs.embed` needs, without the rest of the demo stack.
 embed = ["openai>=2.0"]
+# The Claude Desktop MCP server (`surrealfs-mcp`). httpx is listed explicitly
+# because `spectron.py` imports it directly; it reaches the tree today only as
+# a transitive of `mcp`.
+claude = ["mcp>=1.2", "httpx>=0.27", "python-dotenv>=1"]
 # The file browser (`surrealfs-browser`). starlette is listed explicitly because
 # it reaches the tree today only as a transitive of pydantic-ai's `web` extra,
 # and it is imported directly here. The page itself is a React SPA -- see
@@ -44,6 +55,9 @@ demo = [
 
 [project.scripts]
 surrealfs-browser = "surrealfs.browser.__main__:main"
+# What Claude Desktop launches over stdio. See
+# `surrealfs/integrations/claude/README.md`.
+surrealfs-mcp = "surrealfs.integrations.claude:main"
 
 # Lets Hermes discover the plugin in `surrealfs/integrations/hermes/` as soon as
 # the package is installed. Nothing imports Hermes, so there is no extra to add.
@@ -51,13 +65,15 @@ surrealfs-browser = "surrealfs.browser.__main__:main"
 surrealfs = "surrealfs.integrations.hermes"
 
 [dependency-groups]
-# pydantic-ai is here as well as in the extra so `just test` exercises that
-# integration instead of silently skipping its tests.
+# pydantic-ai and mcp are here as well as in their extras so `just test`
+# exercises those integrations instead of silently skipping their tests.
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
     "pydantic-ai-slim>=2.0",
+    "mcp>=1.2",
+    "httpx>=0.27",
 ]
 
 [build-system]
@@ -81,6 +97,11 @@ artifacts = [
     "surrealfs/integrations/hermes/plugin.yaml",
     "surrealfs/integrations/hermes/skills/**/SKILL.md",
     "surrealfs/integrations/hermes_memory/plugin.yaml",
+    "surrealfs/integrations/claude/skills/**/SKILL.md",
+    # The plugin manifest and its bundled MCP config, so `pip install` ships a
+    # directory that is still a valid Claude plugin.
+    "surrealfs/integrations/claude/.claude-plugin/plugin.json",
+    "surrealfs/integrations/claude/.mcp.json",
 ]
 
 [tool.pytest.ini_options]

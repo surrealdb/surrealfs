@@ -13,6 +13,7 @@ from surrealfs import (
     NotATextFile,
     NotFound,
 )
+from surrealfs.fs import _parent_key
 from surrealfs.paths import HOME_ROOT as HOME
 
 # `/home` is seeded root-owned by the schema (see `schema/file.surql`), so it is
@@ -333,7 +334,12 @@ async def test_parent_key_follows_a_move(fs, db):
     (rows,) = await db.query(
         "SELECT parent_key FROM file WHERE id = $id", {"id": moved.id}
     )
-    assert rows[0]["parent_key"] == str((await fs.stat("/d")).id)
+    # Against `_parent_key`, not `str(id)`: the two disagree on surrealdb-py
+    # 3.0.0b8, which escapes an id that would otherwise parse as something else.
+    # Asserting on `str()` here failed roughly one run in four -- whenever `/d`
+    # drew an id starting with a digit -- which is the same defect this field
+    # exists to avoid.
+    assert rows[0]["parent_key"] == _parent_key((await fs.stat("/d")).id)
     # And the name is free again at the root.
     await fs.write_text("/a.md", "y")
     assert await fs.read_text("/a.md") == "y"

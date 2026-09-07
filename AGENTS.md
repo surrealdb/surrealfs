@@ -4,8 +4,8 @@ Guidance for agents working on this repository.
 
 ## What this is
 
-`surrealfs` is a pure-Python library: a SurrealDB `file` table schema plus five
-ways to expose it to an AI agent — four tool surfaces and a Hermes memory provider.
+`surrealfs` is a pure-Python library: a SurrealDB `file` table schema plus six
+ways to expose it to an AI agent — five tool surfaces and a Hermes memory provider.
 
 ## Layout
 
@@ -25,8 +25,12 @@ surrealfs/
   integrations/     _connect.py (env connection, shared by the browser and the
                     Hermes surfaces), and one dir per integration, each with its
                     own README.md: pydantic_ai/, json_tools/, hermes/ (plugin +
-                    bundled skill), hermes_memory/ (memory provider)
-examples/           chat_agent.py, anthropic_loop.py, semantic_search.py
+                    bundled skill), hermes_memory/ (memory provider),
+                    claude/ (MCP server + Spectron mirror + brain skill; the
+                    directory doubles as a Claude plugin, listed by the
+                    .claude-plugin/marketplace.json at the repo root)
+examples/           chat_agent.py, anthropic_loop.py, semantic_search.py,
+                    company-brain/ (the Claude Desktop demo, markdown only)
 tests/
 ```
 
@@ -44,7 +48,7 @@ just check   # ruff + pytest
 
 **A SurrealDB 3.x server is required, and `mem://` will not do.** `COMPUTED`
 fields and `FULLTEXT` indexes do not exist in 2.x. The embedded engine in
-`surrealdb[embedded]` 3.0.0a4 does parse them, but its 3.0.0-alpha core returns
+`surrealdb[embedded]` does parse them, but its bundled alpha core returns
 `null` for computed fields on any **indexed** read — so `path` and `is_folder`
 come back empty from `ls`, path resolution, and full-text search, while a plain
 table scan is fine. Isolated to the engine: the same SDK against a 3.2.x server
@@ -109,6 +113,79 @@ Two constraints the recipe exists to satisfy: the script must resolve inside
 `$HERMES_HOME/scripts/`, and cron sanitizes the subprocess env against a
 provider-credential blocklist that `OPENAI_API_KEY` is on — so the key comes from a
 sourced file, never from the gateway's environment.
+
+**Stdout is the MCP transport — nothing in `integrations/claude/` may
+print to it.** One stray `print` and every subsequent JSON-RPC frame is unparseable,
+which surfaces to the user as Claude Desktop simply not listing the server. All
+diagnostics go to stderr, which Desktop files under `~/Library/Logs/Claude/`. This
+is why the schema-apply fallback there writes to stderr where the browser's writes
+to stdout.
+
+**The `claude` integration directory is also a Claude plugin, and that is why
+nothing in it may move.** `.claude-plugin/plugin.json` and `.mcp.json` sit at its
+root and `skills/brain/SKILL.md` is where a plugin expects its skill, so the repo
+root's `.claude-plugin/marketplace.json` can point `source` straight at it with no
+duplicated files. Anything else — `commands/`, `agents/`, `hooks/` — would have to
+go at that same root, never inside `.claude-plugin/`. `tests/test_claude.py`
+guards the three JSON files against drifting apart, and `claude plugin validate
+./surrealfs/integrations/claude` checks the manifest.
+
+**Never turn a `RecordID` into a string with `str()`.** `parent_key` is a stored
+string the schema fills with a server-side `<string>$this.parent`, which never
+escapes, and `ls` matches against it. surrealdb-py 3.0.0b8 changed
+`RecordID.__str__` to escape an id that would otherwise parse as something else,
+so `file:3213bq…` became `file:⟨3213bq…⟩` and matched nothing. `ls` then returned
+*no children* for that one folder while its siblings stayed correct — silent, and
+depending on whether the id generator happened to start that id with a digit,
+which is why the suite never caught it and only a fresh (unlocked) install hit it.
+`_parent_key` builds the key from `.table_name` and `.id` for this reason;
+`tests/test_claude.py` pins it.
+
+**`surrealdb` is pinned exactly (`==3.0.0b8`), and that is deliberate.** The 3.x
+betas break each other in ways that read as wrong answers rather than errors — the
+`RecordID` change above being the case that cost real debugging. A `>=` floor also
+let `uv.lock` resolve one SDK and `pip install surrealfs` another, so the suite
+passed green while every fresh install had a broken `ls`. Bumping the pin is a
+deliberate change: run the suite, and reproduce install-only behaviour in a clean
+venv rather than through `uv run`, whose build cache can serve stale source.
+
+**A plugin's bundled `.mcp.json` is a Claude Code feature; Claude Desktop
+ignores it.** Desktop loads the plugin's *skill* (markdown, resolved server-side)
+and nothing else, so `/brain` appears while every `surrealfs` tool is missing —
+which the model reports as "that connector isn't available", pointing at nothing.
+In Desktop the server goes in `claude_desktop_config.json`, whose `mcpServers` is
+also launched with a minimal `PATH` that excludes `~/.local/bin`: `"command":
+"uvx"` fails there with nothing written to any log. Use an absolute path.
+
+**`uvx` will not pick up edits to a path dependency.** It caches the built wheel
+and keeps serving it; `uv cache clean <pkg>`, `--refresh` and `--reinstall` all
+leave it in place, and only `--no-cache` rebuilds. This produced three separate
+false conclusions while debugging the `ls` regression — the fix was live and the
+old behaviour persisted, silently. Develop against `./.venv/bin/surrealfs-mcp`
+from an editable `uv sync --extra claude`, never through `uvx --from <directory>`.
+
+**`surrealfs-mcp --selftest` is the first thing to run** when a client shows no
+tools. It reports config path, server, database, identity, tool count, `ls /` and
+Spectron in one pass, and treats an empty database as a failure — see
+`selftest()`.
+
+**The plugin's `.mcp.json` carries no `env` block, on purpose.** `surrealfs-mcp`
+reads `~/.config/surrealfs/env` itself (`config_path()`), with `override=False` so
+an exported variable or a Desktop `env` block still wins. The reason is not
+convenience: `SURREALDB_URL` and friends are the names every SurrealDB tool on the
+machine reads, so exporting them to configure this one server repoints the others
+too. `SURREALFS_SOURCE` is the exception that must stay an env var — it decides
+what `uvx` builds, before the server exists to read a file.
+
+And `main()` refuses to start with no `SURREALDB_URL` from any source, rather than
+falling back to `ws://localhost:8000` and the `demo` database. A default there is
+worse than a crash: it connects *successfully* to an empty filesystem, so an agent
+finds an empty brain and reports a clean risk board for a company it never
+reached. `just mcp` still works because the Justfile dotenv-loads the repo `.env`.
+
+**`mcp` is in the `dev` dependency group as well as the `claude` extra**, for the
+same reason `pydantic-ai` is: otherwise `just test` imports nothing and
+`tests/test_claude.py` silently does not run.
 
 **The browser page is a build artefact, and it is gitignored.** `surrealfs/browser/ui/`
 is a vite + React app on `@surrealdb/ui`; `surrealfs/browser/static/` is what it emits

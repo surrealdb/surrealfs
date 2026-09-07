@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "surrealfs": {
+      "command": "uvx",
+      "args": [
+        "--from",
+        "surrealfs[claude] @ ${SURREALFS_SOURCE:-git+https://github.com/surrealdb/surrealfs.git}",
+        "surrealfs-mcp"
+      ]
+    }
+  }
+}
