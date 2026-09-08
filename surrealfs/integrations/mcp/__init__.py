@@ -292,7 +292,11 @@ async def selftest() -> int:
         print("spectron  not configured (SPECTRON_CONTEXT_ID / SPECTRON_API_KEY)")
         print("\nOK        filesystem reachable; Spectron memory off")
         return 0
-    print(f"spectron  {os.environ.get('SPECTRON_URL')} scope={spectron.scope()}")
+    # The default, not `.get('SPECTRON_URL')`: printing `None` for the host the
+    # server is in fact about to talk to defeats the point of a selftest that
+    # exists to name the layer that failed.
+    url = os.environ.get("SPECTRON_URL") or spectron.DEFAULT_URL
+    print(f"spectron  {url} scope={spectron.scope()}")
     try:
         first = (await spectron.recall("status", 1)).splitlines()[0]
     except Exception as exc:  # noqa: BLE001 -- same
@@ -311,9 +315,10 @@ def main() -> int:
     stderr, which Desktop files under its MCP logs.
     """
     if "--selftest" in sys.argv[1:]:
-        _load_config()
+        loaded = _load_config()
         if not os.environ.get("SURREALDB_URL"):
-            print(f"config    {config_path()}  (absent, and SURREALDB_URL unset)")
+            found = "exists but sets no SURREALDB_URL" if loaded else "absent"
+            print(f"config    {config_path()}  ({found})")
             print("\nFAIL      nothing to connect to")
             return 1
         return asyncio.run(selftest())
@@ -337,11 +342,15 @@ def main() -> int:
         )
         return 2
     if unset := _unexpanded():
-        # The plugin's `.mcp.json` passes these with no `${VAR:-default}`
-        # fallback, so an unset one arrives as the literal text. Refuse rather
-        # than fall back to `ws://localhost:8000/rpc` and the `demo` database:
-        # that connects successfully to an empty filesystem, and an agent then
-        # reports a clean risk board for a company brain it never reached.
+        # For a hand-written client config -- the Desktop `env` block the README
+        # keeps as a fallback -- which is a plain JSON file with no expansion of
+        # any kind, so `"SURREALDB_PASS": "${SURREALDB_PASS}"` arrives as that
+        # literal text. Refuse rather than connect with it: a live connection to
+        # the wrong place is the worst failure this server has, and an agent that
+        # finds an empty brain reports a clean risk board for a company it never
+        # reached. (The plugin's own `.mcp.json` carries no `env` block at all --
+        # see `tests/test_claude.py` -- so this only ever fires on a hand-rolled
+        # one.)
         print(
             "surrealfs-mcp: not configured -- "
             + ", ".join(unset)
@@ -401,7 +410,10 @@ def _load_config() -> Path | None:
             file=sys.stderr,
         )
         return None
-    load_dotenv(path, override=False)
+    # `interpolate=False`: this file holds a database password and an API key,
+    # and dotenv otherwise rewrites `${...}` inside a value -- so a secret that
+    # happens to contain one comes out mangled, or empty if nothing resolves it.
+    load_dotenv(path, override=False, interpolate=False)
     return path
 
 

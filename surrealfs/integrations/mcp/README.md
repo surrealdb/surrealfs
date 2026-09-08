@@ -15,11 +15,14 @@ underneath: what it reads, what it offers, and how to check it works.
 ## Install
 
 ```bash
-pip install "surrealfs[mcp]"
+pip install "surrealfs[mcp] @ git+https://github.com/surrealdb/surrealfs.git"
 ```
 
 Or nothing at all — `uvx` fetches the package on launch, which is what the
 configs below do.
+
+Until the first release, the `git+…` source is load-bearing: `surrealfs` is not
+on PyPI, so a bare `surrealfs[mcp]` resolves to nothing. Drop it once it is.
 
 ## Wire it into a client
 
@@ -30,7 +33,11 @@ Every MCP client takes the same three fields. The shape:
   "mcpServers": {
     "surrealfs": {
       "command": "uvx",
-      "args": ["--from", "surrealfs[mcp]", "surrealfs-mcp"]
+      "args": [
+        "--from",
+        "surrealfs[mcp] @ git+https://github.com/surrealdb/surrealfs.git",
+        "surrealfs-mcp"
+      ]
     }
   }
 }
@@ -45,7 +52,7 @@ Where the file goes:
 | Client | File |
 |---|---|
 | Claude Code | `.mcp.json` in the project, or `claude mcp add` — but prefer [the plugin](../claude/README.md) |
-| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows) |
+| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` (`%APPDATA%\Claude\` on Windows) — but prefer [the plugin](../claude/README.md) |
 | Cursor | `~/.cursor/mcp.json`, or `.cursor/mcp.json` in the project |
 | Codex CLI | `~/.codex/config.toml`, as a `[mcp_servers.surrealfs]` table |
 | Zed | `context_servers` in `settings.json` |
@@ -182,6 +189,12 @@ If the selftest passes but a client still shows no tools, the client never
 launched the server — look for its log. Diagnostics go to stderr, never to stdout,
 which is the transport. See [the plugin README](../claude/README.md) for where
 Claude Code and Claude Desktop file theirs.
+
+The two launch failures that write nothing anywhere: a bare `"command": "uvx"`
+against a minimal `PATH`, and a `--from` spec the client did not expand (a
+plugin's `.mcp.json` supports `${VAR}` but **not** `${VAR:-default}`, so a
+default written there arrives verbatim and `uvx` exits with `Failed to parse`).
+Run the client's exact `command` and `args` in a terminal to see which.
 
 ## Example
 

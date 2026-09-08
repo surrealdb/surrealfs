@@ -15,7 +15,8 @@
   ``skills/brain/``. No Python at all, which is the point — the server above is
   client-agnostic.
 
-All five are generated from the registry in :mod:`surrealfs.tools`.
+The first four are generated from the registry in :mod:`surrealfs.tools`;
+``claude`` has no tools of its own, being packaging around ``mcp``.
 
 :mod:`surrealfs.integrations.hermes_memory` is the odd one out: a Hermes *memory
 provider* rather than a set of tools, so it files turns and recalls them instead of

@@ -87,11 +87,26 @@ async def test_the_mirror_root_confines_what_is_sent(ctx, monkeypatch):
     assert sent == ["/brain/in.md"]
 
 
-def test_recall_is_a_no_op_without_a_spectron(monkeypatch):
+async def test_spectron_is_a_no_op_when_unconfigured(monkeypatch):
+    """Without a key this stays a plain SurrealFS server, and says so.
+
+    `mirror` must not raise -- it runs inside every write -- and `recall` has to
+    return text a model can act on rather than an error, since "unconfigured" is
+    a legitimate state, not a failure.
+    """
     monkeypatch.delenv("SPECTRON_CONTEXT_ID", raising=False)
     monkeypatch.delenv("SPECTRON_API_KEY", raising=False)
     assert not mcp.spectron.configured()
 
+    # No network: a configured Spectron would post to it here.
+    assert await mcp.spectron.mirror("/brain/x.md", "text") is None
+    assert "not configured" in await mcp.spectron.recall("what is blocking us")
+
+
+def test_a_hit_with_a_null_score_still_renders():
+    """A `"score": null` has the key, so a `.get` default never applies."""
+    line = mcp.spectron._render({"source": "chunk", "score": None}, {})
+    assert line.startswith("chunk · ? · 0.00")
 
 
 def test_unexpanded_placeholders_are_refused(monkeypatch):
@@ -99,7 +114,6 @@ def test_unexpanded_placeholders_are_refused(monkeypatch):
     assert mcp._unexpanded() == ["SURREALDB_URL"]
     monkeypatch.setenv("SURREALDB_URL", "ws://localhost:8000/rpc")
     assert mcp._unexpanded() == []
-
 
 
 def test_config_path_prefers_the_explicit_override(tmp_path, monkeypatch):
@@ -121,7 +135,12 @@ def test_the_config_file_is_a_default_not_a_mandate(tmp_path, monkeypatch):
     configure this, and the bare-MCP install in the README relies on them.
     """
     config = tmp_path / "env"
-    config.write_text("SURREALDB_URL=ws://from-the-file/rpc\nSPECTRON_SCOPE=filed\n")
+    config.write_text(
+        "SURREALDB_URL=ws://from-the-file/rpc\n"
+        "SPECTRON_SCOPE=filed\n"
+        # A secret is copied through verbatim: dotenv interpolation would eat it.
+        "SPECTRON_API_KEY=sk-a${b}c\n"
+    )
     monkeypatch.setenv("SURREALFS_ENV_FILE", str(config))
     monkeypatch.setenv("SURREALDB_URL", "ws://from-the-environment/rpc")
     monkeypatch.delenv("SPECTRON_SCOPE", raising=False)
@@ -131,6 +150,7 @@ def test_the_config_file_is_a_default_not_a_mandate(tmp_path, monkeypatch):
 
     assert os.environ["SURREALDB_URL"] == "ws://from-the-environment/rpc"
     assert os.environ["SPECTRON_SCOPE"] == "filed"
+    assert os.environ["SPECTRON_API_KEY"] == "sk-a${b}c"
 
 
 def test_a_missing_config_file_is_not_an_error(tmp_path, monkeypatch):

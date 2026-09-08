@@ -125,7 +125,9 @@ to stdout.
 around it, and nothing in that directory may move.** The server is client-agnostic
 — Cursor, Zed and Codex run the same `surrealfs-mcp` — so it does not live under a
 vendor's name. What stays in `claude/` is `.claude-plugin/plugin.json`, the
-`.mcp.json` that launches the server, and `skills/brain/SKILL.md`: the repo root's
+`.mcp.json` that launches the server, `scripts/surrealfs-mcp` (which it names via
+`${CLAUDE_PLUGIN_ROOT}`, and which must stay executable), and
+`skills/brain/SKILL.md`: the repo root's
 `.claude-plugin/marketplace.json` points `source` straight at that directory, so
 those must sit at *its* root with no duplicated files, as would `commands/`,
 `agents/` or `hooks/`. Never inside `.claude-plugin/`. `tests/test_claude.py` is
@@ -157,13 +159,24 @@ passed green while every fresh install had a broken `ls`. Bumping the pin is a
 deliberate change: run the suite, and reproduce install-only behaviour in a clean
 venv rather than through `uv run`, whose build cache can serve stale source.
 
-**A plugin's bundled `.mcp.json` is a Claude Code feature; Claude Desktop
-ignores it.** Desktop loads the plugin's *skill* (markdown, resolved server-side)
-and nothing else, so `/brain` appears while every `surrealfs` tool is missing —
-which the model reports as "that connector isn't available", pointing at nothing.
-In Desktop the server goes in `claude_desktop_config.json`, whose `mcpServers` is
-also launched with a minimal `PATH` that excludes `~/.local/bin`: `"command":
-"uvx"` fails there with nothing written to any log. Use an absolute path.
+**A plugin's `.mcp.json` expands plain `${VAR}` and *not* `${VAR:-default}`.**
+An unsupported default is not an error: the whole `${…}` reaches the launched
+process as literal text, `uvx` exits 2 with `Failed to parse`, and the client
+reports nothing but a closed connection — indistinguishable from a plugin that
+never installed. This is why the source default lives in
+`claude/scripts/surrealfs-mcp`, a shell script `.mcp.json` names via
+`${CLAUDE_PLUGIN_ROOT}`, rather than in `.mcp.json` itself. The same script
+resolves `uvx` by absolute path, because Claude Desktop launches servers with a
+bare environment and a minimal `PATH` that excludes `~/.local/bin`, where a
+`command not found` is written to no log at all.
+
+**Plugins carry their local MCP server in Claude Desktop too**, so the plugin —
+not a hand-edited `claude_desktop_config.json` — is the Desktop route as well:
+Customize → Plugins → Add from a repository. Only hooks and sub-agents are
+Cowork-only. If Desktop shows `/brain` but no `surrealfs` tools, the server
+failed to launch (above); it is not Desktop declining to read the config. Local
+*directory* marketplaces are Claude Code only — Desktop takes a git URL — so
+`SURREALFS_SOURCE` is a Claude Code affair.
 
 **`uvx` will not pick up edits to a path dependency.** It caches the built wheel
 and keeps serving it; `uv cache clean <pkg>`, `--refresh` and `--reinstall` all
@@ -183,7 +196,12 @@ an exported variable or a Desktop `env` block still wins. The reason is not
 convenience: `SURREALDB_URL` and friends are the names every SurrealDB tool on the
 machine reads, so exporting them to configure this one server repoints the others
 too. `SURREALFS_SOURCE` is the exception that must stay an env var — it decides
-what `uvx` builds, before the server exists to read a file.
+what `uvx` builds, before the server exists to read a file. `_unexpanded()`
+therefore only ever fires on a hand-written client `env` block, which is plain
+JSON with no expansion of any kind: `"${SURREALDB_PASS}"` there stays literal.
+
+`_load_config` also passes `interpolate=False`: the file holds a password and an
+API key, and dotenv otherwise rewrites `${…}` inside a *value*.
 
 And `main()` refuses to start with no `SURREALDB_URL` from any source, rather than
 falling back to `ws://localhost:8000` and the `demo` database. A default there is
@@ -191,9 +209,21 @@ worse than a crash: it connects *successfully* to an empty filesystem, so an age
 finds an empty brain and reports a clean risk board for a company it never
 reached. `just mcp` still works because the Justfile dotenv-loads the repo `.env`.
 
-**The `mcp` SDK is in the `dev` dependency group as well as the `mcp` extra**, for
-the same reason `pydantic-ai` is: otherwise `just test` imports nothing and
-`tests/test_mcp.py` silently does not run.
+**All three of the `mcp` extra's packages are in the `dev` dependency group as
+well**, for the same reason `pydantic-ai` is: otherwise `just test` imports
+nothing and `tests/test_mcp.py` does not exercise the integration. `python-dotenv`
+is the easy one to forget and the one that does not merely skip — nothing else in
+the dev set pulls it in (mcp 2.x wants it only under its `cli` extra), so without
+it `_load_config` takes its ImportError branch and
+`test_the_config_file_is_a_default_not_a_mandate` *fails*. Check with
+`uv export --only-group dev`, not by looking at a `.venv` that an
+`--extra mcp` sync has already populated.
+
+**`mcp` is floored at `>=2.1`, not `>=1.2`.** `serve()` builds the lowlevel
+`Server` with `on_list_tools=`/`on_call_tool=` handler kwargs, which do not exist
+in 1.x — there they are decorators — so a resolver that picked a 1.x would
+`TypeError` on launch, and a client reports that as "no such tools". Same trap as
+the `surrealdb` floor below.
 
 **The browser page is a build artefact, and it is gitignored.** `surrealfs/browser/ui/`
 is a vite + React app on `@surrealdb/ui`; `surrealfs/browser/static/` is what it emits

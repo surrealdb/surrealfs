@@ -1,0 +1,33 @@
+#!/bin/sh
+# Launches the SurrealFS MCP server for the plugin. See ../README.md.
+#
+# This exists because a plugin's `.mcp.json` expands only plain `${VAR}` --
+# `${VAR:-default}` is *not* supported, so a default written there arrives at
+# `uvx` as literal text and `uvx` exits 2 with "Failed to parse", which the
+# client reports as nothing more than a closed connection. A shell does support
+# the default, so the choice of package source is made here instead.
+#
+# It also finds `uvx` by absolute path: Claude Desktop launches servers with a
+# minimal PATH that excludes every usual uv install directory, and a
+# "command not found" there is written to no log at all.
+#
+# ponytail: POSIX sh, so Windows needs a .cmd sibling if anyone asks for it.
+
+# Point this at a working tree to run from a local clone instead of git.
+: "${SURREALFS_SOURCE:=git+https://github.com/surrealdb/surrealfs.git}"
+
+for candidate in \
+    "${UVX:-}" \
+    "$(command -v uvx 2>/dev/null || true)" \
+    "$HOME/.local/bin/uvx" \
+    /opt/homebrew/bin/uvx \
+    /usr/local/bin/uvx
+do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+        exec "$candidate" --from "surrealfs[mcp] @ $SURREALFS_SOURCE" surrealfs-mcp "$@"
+    fi
+done
+
+echo "surrealfs-mcp: no uvx found (PATH=$PATH). Install uv --" \
+     "https://docs.astral.sh/uv/ -- or set UVX to its absolute path." >&2
+exit 127

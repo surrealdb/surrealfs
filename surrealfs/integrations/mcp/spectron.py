@@ -35,7 +35,7 @@ if TYPE_CHECKING:  # `httpx` is imported inside the functions that use it, so
     # otherwise a missing extra is a module-level traceback that an MCP client
     # renders as a bare CONNECTION_CLOSED, with nothing to point at the cause.
 
-__all__ = ["configured", "mirror", "recall", "scope"]
+__all__ = ["DEFAULT_URL", "configured", "mirror", "recall", "scope"]
 
 TIMEOUT = 30.0
 RECALL_K = 8
@@ -165,9 +165,11 @@ def _render(hit: dict[str, Any], titles: dict[str, str]) -> str:
         document_id = str(resource.get("documentId", "?"))
         where = titles.get(document_id, document_id)
     text = " ".join((hit.get("text") or "").split())[:SNIPPET_CHARS]
-    return (
-        f"{hit.get('source', 'hit')} · {where} · {hit.get('score', 0):.2f}\n    {text}"
-    )
+    # `or 0` and not a `.get` default: a hit that carries `"score": null` has the
+    # key, so the default never applies and `:.2f` raises -- which surfaces as
+    # "could not reach Spectron" for a recall that in fact came back fine.
+    score = float(hit.get("score") or 0)
+    return f"{hit.get('source', 'hit')} · {where} · {score:.2f}\n    {text}"
 
 
 def _base() -> str:

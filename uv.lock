@@ -1829,6 +1829,7 @@ dev = [
     { name = "pydantic-ai-slim" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-dotenv" },
     { name = "ruff" },
 ]
 
@@ -1837,7 +1838,7 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'demo'", specifier = ">=0.40" },
     { name = "httpx", marker = "extra == 'mcp'", specifier = ">=0.27" },
     { name = "logfire", marker = "extra == 'demo'", specifier = ">=4.20" },
-    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=1.2" },
+    { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.1" },
     { name = "openai", marker = "extra == 'browser'", specifier = ">=2.0" },
     { name = "openai", marker = "extra == 'demo'", specifier = ">=2.0" },
     { name = "openai", marker = "extra == 'embed'", specifier = ">=2.0" },
@@ -1858,10 +1859,11 @@ provides-extras = ["pydantic-ai", "embed", "mcp", "claude", "browser", "demo"]
 [package.metadata.requires-dev]
 dev = [
     { name = "httpx", specifier = ">=0.27" },
-    { name = "mcp", specifier = ">=1.2" },
+    { name = "mcp", specifier = ">=2.1" },
     { name = "pydantic-ai-slim", specifier = ">=2.0" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "python-dotenv", specifier = ">=1" },
     { name = "ruff", specifier = ">=0.8" },
 ]
 

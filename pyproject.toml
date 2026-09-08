@@ -30,10 +30,17 @@ dependencies = [
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
 # What `surrealfs.embed` needs, without the rest of the demo stack.
 embed = ["openai>=2.0"]
-# The MCP server (`surrealfs-mcp`), for any client that speaks MCP. httpx is
-# listed explicitly because `spectron.py` imports it directly; it reaches the
-# tree today only as a transitive of `mcp`.
-mcp = ["mcp>=1.2", "httpx>=0.27", "python-dotenv>=1"]
+# The MCP server (`surrealfs-mcp`), for any client that speaks MCP.
+#
+# `mcp>=2.1` is a real floor, not caution: `serve()` builds the lowlevel
+# `Server` with `on_list_tools=`/`on_call_tool=` handlers, which 1.x does not
+# have -- there they are decorators -- so a resolver that picked a 1.x would
+# raise `TypeError: unexpected keyword argument` on launch, which a client
+# reports as nothing but "no such tools".
+#
+# httpx is listed explicitly because `spectron.py` imports it directly. It is
+# *not* a transitive of `mcp` any more: mcp 2.x depends on `httpx2`.
+mcp = ["mcp>=2.1", "httpx>=0.27", "python-dotenv>=1"]
 # An alias, and not politeness: a Claude plugin copies `.mcp.json` in at install
 # time, so every already-installed plugin keeps asking for
 # `surrealfs[claude] @ git+...` and would fail to build if this went away.
@@ -69,15 +76,19 @@ surrealfs-mcp = "surrealfs.integrations.mcp:main"
 surrealfs = "surrealfs.integrations.hermes"
 
 [dependency-groups]
-# pydantic-ai and mcp are here as well as in their extras so `just test`
-# exercises those integrations instead of silently skipping their tests.
+# pydantic-ai and the `mcp` extra's three packages are here as well as in their
+# extras so `just test` exercises those integrations instead of silently
+# skipping their tests. python-dotenv is not optional among them: without it
+# `_load_config` takes its ImportError branch and returns None, and
+# `test_the_config_file_is_a_default_not_a_mandate` fails rather than skips.
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "ruff>=0.8",
     "pydantic-ai-slim>=2.0",
-    "mcp>=1.2",
+    "mcp>=2.1",
     "httpx>=0.27",
+    "python-dotenv>=1",
 ]
 
 [build-system]
@@ -102,10 +113,12 @@ artifacts = [
     "surrealfs/integrations/hermes/skills/**/SKILL.md",
     "surrealfs/integrations/hermes_memory/plugin.yaml",
     "surrealfs/integrations/claude/skills/**/SKILL.md",
-    # The plugin manifest and its bundled MCP config, so `pip install` ships a
-    # directory that is still a valid Claude plugin.
+    # The plugin manifest, its bundled MCP config, and the launcher that config
+    # names, so `pip install` ships a directory that is still a valid Claude
+    # plugin.
     "surrealfs/integrations/claude/.claude-plugin/plugin.json",
     "surrealfs/integrations/claude/.mcp.json",
+    "surrealfs/integrations/claude/scripts/surrealfs-mcp",
 ]
 
 [tool.pytest.ini_options]

@@ -35,6 +35,20 @@ def test_the_plugin_manifest_matches_the_marketplace_and_the_skill():
     # machine -- has to be exported for this one. A block that defaulted them
     # would be worse than none: it would connect to an empty filesystem.
     assert "env" not in servers["surrealfs"], "the config file supersedes this"
-    spec = servers["surrealfs"]["args"][1]
-    assert spec.startswith("surrealfs[mcp] @ ")
-    assert "${SURREALFS_SOURCE:-" in spec, "a local checkout must be redirectable"
+
+    # The launcher, and never `uvx` with the package spec inline. A plugin's
+    # `.mcp.json` expands `${VAR}` but *not* `${VAR:-default}`, so a default
+    # written here reaches `uvx` verbatim, `uvx` exits 2 on it, and the client
+    # says only that the connection closed.
+    command = servers["surrealfs"]["command"]
+    assert command == "${CLAUDE_PLUGIN_ROOT}/scripts/surrealfs-mcp"
+    assert ":-" not in json.dumps(servers), "`${VAR:-default}` is not expanded here"
+
+    launcher = root / "scripts" / "surrealfs-mcp"
+    assert launcher.is_file()
+    assert launcher.stat().st_mode & 0o111, "the client execs this directly"
+    script = launcher.read_text()
+    # The default source lives in the shell, which does support it, and a local
+    # clone must stay redirectable.
+    assert "SURREALFS_SOURCE:=git+https://github.com/surrealdb/surrealfs.git" in script
+    assert "surrealfs[mcp] @ $SURREALFS_SOURCE" in script

@@ -4,38 +4,46 @@ A plugin that bundles [the SurrealFS MCP server](../mcp/README.md) with the
 `/brain` skill: the fifteen filesystem tools, `brain_recall` for the Spectron
 memory behind them, and a skill that knows how to use both.
 
-This page is the Claude-specific half — installing, and the two places Desktop
-behaves differently. **What the server reads, what the tools are, and how to check
-it works all live in [the MCP README](../mcp/README.md)**, because none of it is
-specific to Claude.
+This page is the Claude-specific half — installing, and where Desktop differs.
+**What the server reads, what the tools are, and how to check it works all live
+in [the MCP README](../mcp/README.md)**, because none of it is specific to
+Claude.
 
 ## Install as a plugin
 
-This is the one to use, and the only one that works if you are on a Team or
-Enterprise plan without owner rights: plugin-provided MCP servers need no admin
-permission, where adding a connector does.
+This is the one to use, in Claude Desktop and in Claude Code alike. A plugin
+carries its own local MCP server, so it needs no admin permission where adding a
+connector does — the only route in on a Team or Enterprise plan without owner
+rights.
+
+**Claude Desktop** (and claude.ai, and Cowork) — Customize in the left sidebar →
+**Plugins** → **Add from a repository**, and give it
+`https://github.com/surrealdb/surrealfs`. Then install `surrealfs` from it. The
+repo root's [`.claude-plugin/marketplace.json`](../../../.claude-plugin/marketplace.json)
+is what Claude reads there.
+
+**Claude Code**:
 
 ```
 /plugin marketplace add surrealdb/surrealfs
 /plugin install surrealfs@surrealfs
 ```
 
-The plugin bundles the MCP server and the `/brain` skill together, so there is
-nothing else to install and no client config to edit. Its tools arrive namespaced —
-`mcp__plugin_surrealfs_surrealfs__ls` and so on — and the skill as
-`/surrealfs:brain`.
+Either way the plugin brings the MCP server and the `/brain` skill together, so
+there is nothing else to install and no client config to edit. In Claude Code the
+tools arrive namespaced — `mcp__plugin_surrealfs_surrealfs__ls` and so on — and
+the skill as `/surrealfs:brain`.
 
 Then write the configuration to `~/.config/surrealfs/env` — see
 [Configuration](../mcp/README.md#configuration) for the file and every variable in
 it. The plugin's `.mcp.json` deliberately passes no `env` block at all, so nothing
 about SurrealDB needs to be in your environment.
 
-### Installing from a local checkout
+### Installing from a local clone
 
-Before this is pushed, or while working on it, nothing needs editing — the
-package source in [`.mcp.json`](.mcp.json) is
-`${SURREALFS_SOURCE:-git+https://github.com/surrealdb/surrealfs.git}`, so one
-variable redirects it at your working tree:
+Before this is pushed, or while working on it, nothing needs editing. A
+marketplace can be a local directory, and `SURREALFS_SOURCE` redirects the
+package the server is built from at your working tree:
 
 ```bash
 export SURREALFS_SOURCE=/path/to/surrealfs   # in your shell profile
@@ -47,10 +55,20 @@ claude plugin install surrealfs@surrealfs
 `SURREALFS_SOURCE` is the one variable that *must* be exported rather than
 filed: it decides what `uvx` builds, so it is read before the server exists to
 load anything. It is also ours alone, so it cannot clash with another tool.
+Unset it once the branch is pushed and the plugin goes back to the git URL.
 
-A marketplace can be a local directory, so `source` resolves against the
-checkout. Unset `SURREALFS_SOURCE` once the branch is pushed and the plugin goes
-back to the git URL.
+Its default lives in [`scripts/surrealfs-mcp`](scripts/surrealfs-mcp), the
+launcher that [`.mcp.json`](.mcp.json) names, and **not** in `.mcp.json` itself:
+a plugin's MCP config expands plain `${VAR}` only, so a `${VAR:-default}`
+written there reaches `uvx` as literal text and `uvx` exits with
+`Failed to parse` — the server never starts, and the client says only that the
+connection closed. A shell does support the default, so that is where the choice
+is made. The launcher also finds `uvx` by absolute path, for the minimal `PATH`
+Desktop launches servers with.
+
+Local directory marketplaces are a Claude Code feature; Desktop takes a git URL.
+To try a local clone there, push a branch and point **Add from a repository** at
+it.
 
 For a one-off session with no install at all:
 
@@ -71,7 +89,8 @@ uv sync --extra mcp
 ```
 
 `claude plugin marketplace update surrealfs` picks up changes to `plugin.json`,
-`.mcp.json` or the skill, since those are copied in at install time.
+`.mcp.json`, the launcher or the skill, since those are copied in at install
+time.
 
 To remove it again:
 
@@ -82,18 +101,35 @@ claude plugin marketplace remove surrealfs
 
 ## Claude Desktop
 
-Two Desktop-specific traps.
+The plugin above is the Desktop route too, and it is the one to use: it brings
+the server and the skill in one step, and needs no permission to add a
+connector. Two things about Desktop are worth knowing anyway.
 
-**Desktop does not read a plugin's bundled `.mcp.json`** — that is a Claude Code
-feature. In Desktop the skill loads from the plugin but the server has to go in
-`claude_desktop_config.json` yourself, which needs permission to add a connector:
+**Desktop launches servers with a bare environment**, so nothing your shell
+exports reaches them: no project `.env`, no `export` in `.zshrc`. That is the
+whole reason the server reads `~/.config/surrealfs/env` itself — see
+[Configuration](../mcp/README.md#configuration). `SURREALFS_SOURCE` is the one
+exception, and it is only for a local clone, which is a Claude Code affair.
+
+**That bare environment has a minimal `PATH`** that excludes `~/.local/bin`, so
+a bare `"command": "uvx"` fails with nothing written to any log. The plugin's
+launcher searches for `uvx` by absolute path for exactly this; a hand-written
+config has to give one itself.
+
+Adding it as a connector by hand instead — for an older Desktop, or to run a
+build the plugin does not point at — means editing
+`claude_desktop_config.json`, which needs permission to add a connector:
 
 ```json
 {
   "mcpServers": {
     "surrealfs": {
-      "command": "uvx",
-      "args": ["--from", "surrealfs[mcp]", "surrealfs-mcp"]
+      "command": "/Users/you/.local/bin/uvx",
+      "args": [
+        "--from",
+        "surrealfs[mcp] @ git+https://github.com/surrealdb/surrealfs.git",
+        "surrealfs-mcp"
+      ]
     }
   }
 }
@@ -102,16 +138,12 @@ feature. In Desktop the skill loads from the plugin but the server has to go in
 The file lives at `~/Library/Application Support/Claude/claude_desktop_config.json`
 on macOS and `%APPDATA%\Claude\claude_desktop_config.json` on Windows. No `env`
 block is needed — the server reads `~/.config/surrealfs/env` however it is
-launched. What you cannot rely on is your shell: Desktop launches the server with
-a bare environment, so a project `.env` or an `export` in `.zshrc` reaches
-nothing.
+launched. Note the absolute `uvx`, and the explicit `git+…` source: `surrealfs`
+is not on PyPI yet, so a bare `surrealfs[mcp]` cannot resolve.
 
-**Desktop launches servers with a minimal `PATH`** that excludes `~/.local/bin`,
-so `"command": "uvx"` fails with nothing logged. Give an absolute path.
-
-Installed this way the server brings no skill with it, so add the `/brain` skill
-separately: Settings → Capabilities → Skills, and point it at
-[`skills/brain/`](skills/brain). The plugin does both in one step.
+A connector added this way brings no skill with it, so add `/brain` separately:
+Settings → Capabilities → Skills, pointed at [`skills/brain/`](skills/brain).
+The plugin does both at once.
 
 ## When a client shows no tools
 
