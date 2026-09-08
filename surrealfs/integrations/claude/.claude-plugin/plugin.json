@@ -1,0 +1,14 @@
+{
+  "name": "surrealfs",
+  "displayName": "SurrealFS",
+  "description": "A persistent filesystem shared across your agents and your team, backed by SurrealDB, with Spectron memory behind it. Adds the surrealfs tools and the /brain skill.",
+  "version": "0.2.0",
+  "author": {
+    "name": "SurrealDB",
+    "url": "https://surrealdb.com"
+  },
+  "homepage": "https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/claude/README.md",
+  "repository": "https://github.com/surrealdb/surrealfs",
+  "license": "MIT",
+  "keywords": ["filesystem", "memory", "surrealdb", "spectron", "mcp"]
+}

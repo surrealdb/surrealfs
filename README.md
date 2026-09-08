@@ -21,6 +21,8 @@
     <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/openai/default.svg" alt="OpenAI" width="48" height="48" /></a>
     &nbsp;
     <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/anthropic/default.svg" alt="Anthropic" width="48" height="48" /></a>
+    &nbsp;
+    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/claude/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/claude/default.svg" alt="Claude" width="48" height="48" /></a>
 </p>
 
 <br>
@@ -53,6 +55,7 @@ search, all queryable with SurrealQL because it is just a table.
 ```bash
 pip install surrealfs                    # core, and the Hermes plugin
 pip install "surrealfs[pydantic-ai]"     # + the pydantic-ai toolset
+pip install "surrealfs[mcp]"             # + the MCP server
 pip install "surrealfs[browser]"         # + the file browser
 ```
 
@@ -97,7 +100,7 @@ pre-formatted strings. Build whatever integration you like on top.
 
 ## Integrations
 
-Four ways to hand it to an agent, each with its own README:
+Six ways to hand it to an agent, each with its own README:
 
 |                                                                          |                                                                       |                          |
 | ------------------------------------------------------------------------ | --------------------------------------------------------------------- | ------------------------ |
@@ -105,8 +108,10 @@ Four ways to hand it to an agent, each with its own README:
 | **[Raw JSON tool schemas](surrealfs/integrations/json_tools/README.md)** | plain dicts in Anthropic or OpenAI shape, no framework                | core                     |
 | **[Hermes](surrealfs/integrations/hermes/README.md)**                    | the 14 `surrealfs_*` tools plus a bundled notes skill                 | core                     |
 | **[Hermes memory](surrealfs/integrations/hermes_memory/README.md)**      | files every completed turn, and recalls context before each one       | core                     |
+| **[MCP](surrealfs/integrations/mcp/README.md)**                          | the 16 tools over stdio, for Claude, Cursor, Zed, Codex or your own    | `surrealfs[mcp]`         |
+| **[Claude](surrealfs/integrations/claude/README.md)**                    | that server as a plugin, bundled with the `/brain` skill              | `surrealfs[mcp]`         |
 
-The first three tool surfaces are generated from one registry in
+The four tool surfaces are generated from one registry in
 `surrealfs/tools/`, so they cannot drift apart. Tool descriptions are markdown in
 `surrealfs/tools/docs/`. Edit them as prose; they are prompt text. The memory
 provider is the odd one out: it exposes no tools of its own, because the Hermes
@@ -261,6 +266,7 @@ just check     # lint + test
 just browser   # the file browser on :7933
 just agent     # the note-taking chat agent on :7932
 just loop "…"  # the framework-free Anthropic tool-use loop
+just mcp       # the MCP server over stdio, as Claude Desktop launches it
 ```
 
 Tests start a throwaway `surreal` server; set `SURREALFS_TEST_URL` to reuse one

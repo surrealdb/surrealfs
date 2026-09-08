@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "surrealfs": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/scripts/surrealfs-mcp"
+    }
+  }
+}

@@ -45,6 +45,10 @@ ui-dev:
 browser *ARGS: ui
     uv run --extra browser python -m surrealfs.browser {{ARGS}}
 
+# Run the MCP server over stdio, as an MCP client launches it.
+mcp:
+    uv run --extra mcp surrealfs-mcp
+
 # Run the framework-free Anthropic tool-use loop.
 loop *ARGS:
     uv run --extra demo python examples/anthropic_loop.py {{ARGS}}

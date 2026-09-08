@@ -3,7 +3,7 @@
 These tests need a real SurrealDB server, so we start a throwaway in-memory one.
 
 The embedded engine (``mem://``, via ``surrealdb[embedded]``) is *not* usable,
-even though as of surrealdb-py 3.0.0a4 it does parse the schema. The engine it
+even though as of surrealdb-py 3.0.0b8 it does parse the schema. The engine it
 bundles is 3.0.0-alpha.4, which returns ``null`` for COMPUTED fields whenever a
 row is reached through an index — and `path` and `is_folder` are both computed.
 Every indexed read (`ls`, path resolution, full-text search) would silently come
@@ -48,8 +48,19 @@ def _clean_surrealdb_env(monkeypatch):
     ``SURREALDB_USER``/``PASS``/``AUTH_LEVEL`` reach ``integrations._connect``,
     which reads the environment, and signin against the local root-only server
     fails. Each test sets the variables it needs itself.
+
+    ``SURREALFS_`` and ``SPECTRON_`` go too, and for a sharper reason than
+    tidiness: ``SURREALFS_SEMANTIC=1`` in a developer's ``.env`` makes the memory
+    provider import ``surrealfs.embed``, which imports ``openai`` -- absent
+    unless the ``embed`` extra happens to be synced -- so fourteen tests failed
+    under ``just test`` and passed under a bare ``uv run pytest``.
+    ``SURREALFS_AGENT_USER`` would likewise repoint every home the tests assert
+    on. ``SURREALFS_TEST_URL`` is the exception: this file reads it itself, to
+    reuse a server the developer already has running.
     """
-    for name in [n for n in os.environ if n.startswith("SURREALDB_")]:
+    keep = {"SURREALFS_TEST_URL"}
+    prefixes = ("SURREALDB_", "SURREALFS_", "SPECTRON_")
+    for name in [n for n in os.environ if n.startswith(prefixes) and n not in keep]:
         monkeypatch.delenv(name)
 
 

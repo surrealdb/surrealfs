@@ -13,6 +13,7 @@ from surrealfs import (
     NotATextFile,
     NotFound,
 )
+from surrealfs.fs import _parent_key
 from surrealfs.paths import HOME_ROOT as HOME
 
 # `/home` is seeded root-owned by the schema (see `schema/file.surql`), so it is
@@ -333,7 +334,12 @@ async def test_parent_key_follows_a_move(fs, db):
     (rows,) = await db.query(
         "SELECT parent_key FROM file WHERE id = $id", {"id": moved.id}
     )
-    assert rows[0]["parent_key"] == str((await fs.stat("/d")).id)
+    # Against `_parent_key`, not `str(id)`: the two disagree on surrealdb-py
+    # 3.0.0b8, which escapes an id that would otherwise parse as something else.
+    # Asserting on `str()` here failed roughly one run in four -- whenever `/d`
+    # drew an id starting with a digit -- which is the same defect this field
+    # exists to avoid.
+    assert rows[0]["parent_key"] == _parent_key((await fs.stat("/d")).id)
     # And the name is free again at the root.
     await fs.write_text("/a.md", "y")
     assert await fs.read_text("/a.md") == "y"
@@ -346,3 +352,23 @@ async def test_query_errors_are_not_swallowed(fs):
 
     with pytest.raises(QueryError):
         await fs._query("LET $x = 1; THROW 'boom';")
+
+
+def test_parent_key_never_escapes_a_numeric_looking_id():
+    """The index key is built by hand because `str(RecordID)` disagrees with it.
+
+    surrealdb-py 3.0.0b8 escapes an id that would otherwise parse as something
+    else, while the schema's server-side `<string>` cast never does. An id
+    beginning with a digit is the case that diverges, and when it did, `ls`
+    silently listed nothing for that one folder.
+    """
+    from surrealdb import RecordID
+
+    from surrealfs.fs import _parent_key
+
+    numeric = RecordID("file", "3213bqpjgjifypwk6y23")
+    assert _parent_key(numeric) == "file:3213bqpjgjifypwk6y23"
+    assert _parent_key(RecordID("file", "o39nm9qrdqzss2i7b348")) == (
+        "file:o39nm9qrdqzss2i7b348"
+    )
+    assert _parent_key(None) == "root"
