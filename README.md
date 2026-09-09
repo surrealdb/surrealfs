@@ -6,7 +6,6 @@
 
 <h1 align="center">SurrealDB filesystem</h1><br/>
 <p align="center">A filesystem-based memory layer for agents, with hybrid search, backed by SurrealDB.</p>
-<p align="center"><img src="https://img.shields.io/badge/status-beta-f2a33c.svg?style=flat-square" alt="Beta" /></p>
 
 <br>
 
@@ -29,6 +28,8 @@
 <br>
 
 <p align="center">
+    <img src="https://img.shields.io/badge/status-beta-f2a33c.svg?style=flat-square" alt="Beta" />
+    &nbsp;
     <a href="https://surrealdb.com/discord"><img src="https://img.shields.io/discord/902568124350599239?label=discord&style=flat-square&color=5a66f6"></a>
     &nbsp;
     <a href="https://x.com/surrealdb"><img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/surrealdb"></a>
