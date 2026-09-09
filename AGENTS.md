@@ -26,9 +26,9 @@ surrealfs/
                     Hermes surfaces), and one dir per integration, each with its
                     own README.md: pydantic_ai/, json_tools/, hermes/ (plugin +
                     bundled skill), hermes_memory/ (memory provider),
-                    claude/ (MCP server + Spectron mirror + brain skill; the
-                    directory doubles as a Claude plugin, listed by the
-                    .claude-plugin/marketplace.json at the repo root)
+                    claude/ (the MCP server plus the brain and brain-memory
+                    skills; the directory doubles as a Claude plugin, listed by
+                    the .claude-plugin/marketplace.json at the repo root)
 examples/           chat_agent.py, anthropic_loop.py, semantic_search.py,
                     company-brain/ (the Claude Desktop demo, markdown only)
 tests/
@@ -134,6 +134,17 @@ those must sit at *its* root with no duplicated files, as would `commands/`,
 now just that drift guard, and `claude plugin validate
 ./surrealfs/integrations/claude` checks the manifest.
 
+**Agent memory is optional, and the surface has to say so.** It is a managed service
+with an API key, so `surrealfs[mcp]` plus a SurrealDB URL is the whole product:
+`tool_specs()` advertises `brain_recall` only when `agent_memory.configured()`, the
+server's `instructions` string drops the memory clause, and the `brain` skill is
+written to stand on files alone (`tests/test_claude.py` asserts it never says
+"agent memory"). The `agent-memory` extra carries `httpx` alone; a key set on an install
+without it raises through `_httpx()` naming the extra, rather than being folded
+into `configured()` — a memory layer that silently files nothing for someone who
+did sign up is the worse failure. `run_tool` still answers `brain_recall` when
+unconfigured, for a client holding a tool list from before the key went away.
+
 **The `mcp` extra is what to install; `claude` is an alias for it.** A plugin
 copies `.mcp.json` in at install time, so every already-installed plugin keeps
 asking `uvx` for `surrealfs[claude] @ git+…`. Dropping the extra would break them
@@ -186,9 +197,10 @@ old behaviour persisted, silently. Develop against `./.venv/bin/surrealfs-mcp`
 from an editable `uv sync --extra mcp`, never through `uvx --from <directory>`.
 
 **`surrealfs-mcp --selftest` is the first thing to run** when a client shows no
-tools. It reports config path, server, database, identity, tool count, `ls /` and
-Spectron in one pass, and treats an empty database as a failure — see
-`selftest()`.
+tools. It reports config path, server, database, identity, tool count, `ls /` and,
+when there is a key, agent memory — in one pass, treating an empty database as a
+failure. Its tool count follows the environment, so 15 vs 16 is itself the answer
+to "why is `brain_recall` missing". See `selftest()`.
 
 **The plugin's `.mcp.json` carries no `env` block, on purpose.** `surrealfs-mcp`
 reads `~/.config/surrealfs/env` itself (`config_path()`), with `override=False` so
@@ -209,15 +221,16 @@ worse than a crash: it connects *successfully* to an empty filesystem, so an age
 finds an empty brain and reports a clean risk board for a company it never
 reached. `just mcp` still works because the Justfile dotenv-loads the repo `.env`.
 
-**All three of the `mcp` extra's packages are in the `dev` dependency group as
-well**, for the same reason `pydantic-ai` is: otherwise `just test` imports
+**The `mcp` and `agent-memory` extras' packages are all in the `dev` dependency group
+as well**, for the same reason `pydantic-ai` is: otherwise `just test` imports
 nothing and `tests/test_mcp.py` does not exercise the integration. `python-dotenv`
 is the easy one to forget and the one that does not merely skip — nothing else in
 the dev set pulls it in (mcp 2.x wants it only under its `cli` extra), so without
 it `_load_config` takes its ImportError branch and
 `test_the_config_file_is_a_default_not_a_mandate` *fails*. Check with
 `uv export --only-group dev`, not by looking at a `.venv` that an
-`--extra mcp` sync has already populated.
+`--extra mcp` sync has already populated. `httpx` is in there for the same reason,
+now that it is the `agent-memory` extra rather than part of `mcp`.
 
 **`mcp` is floored at `>=2.1`, not `>=1.2`.** `serve()` builds the lowlevel
 `Server` with `on_list_tools=`/`on_call_tool=` handler kwargs, which do not exist

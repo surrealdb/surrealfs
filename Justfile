@@ -46,8 +46,10 @@ browser *ARGS: ui
     uv run --extra browser python -m surrealfs.browser {{ARGS}}
 
 # Run the MCP server over stdio, as an MCP client launches it.
+# `agent-memory` too: the repo .env this dotenv-loads carries a key, and a key without
+# that extra is refused. Drop it to see the filesystem-only surface.
 mcp:
-    uv run --extra mcp surrealfs-mcp
+    uv run --extra mcp --extra agent-memory surrealfs-mcp
 
 # Run the framework-free Anthropic tool-use loop.
 loop *ARGS:

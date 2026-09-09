@@ -1,6 +1,6 @@
 {
   "name": "surrealfs",
-  "description": "SurrealFS \u2014 a filesystem for agents, backed by SurrealDB.",
+  "description": "SurrealFS — a filesystem for agents, backed by SurrealDB.",
   "owner": {
     "name": "SurrealDB",
     "url": "https://surrealdb.com"
@@ -9,7 +9,7 @@
     {
       "name": "surrealfs",
       "source": "./surrealfs/integrations/claude",
-      "description": "The SurrealFS tools plus the /brain skill, over a bundled MCP server. Installs without admin rights.",
+      "description": "The SurrealFS tools plus the /brain skill, over a bundled MCP server. Installs without admin rights; agent memory is optional.",
       "version": "0.2.0",
       "author": {
         "name": "SurrealDB"

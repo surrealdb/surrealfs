@@ -1,6 +1,8 @@
-"""The MCP server every client shares, and its Spectron mirror."""
+"""The MCP server every client shares, and its agent memory mirror."""
 
 from __future__ import annotations
+
+import sys
 
 from surrealfs.integrations import mcp
 from surrealfs.tools import select_tools
@@ -8,15 +10,62 @@ from surrealfs.tools import select_tools
 
 def test_mcp_surface_matches_the_registry():
     """The drift guard: a tool added to the registry has to reach MCP too."""
-    names = [spec["name"] for spec in mcp.tool_specs()]
-    assert names == [spec.name for spec in select_tools()] + [mcp.RECALL_TOOL]
+    registry = [spec.name for spec in select_tools()]
+    assert [spec["name"] for spec in mcp.tool_specs(recall=False)] == registry
+    assert [spec["name"] for spec in mcp.tool_specs(recall=True)] == registry + [
+        mcp.RECALL_TOOL
+    ]
 
-    for spec in mcp.tool_specs():
+    for spec in mcp.tool_specs(recall=True):
         assert spec["description"].strip(), spec["name"]
         assert spec["schema"].get("type") == "object", spec["name"]
 
     # Unprefixed, unlike Hermes: an MCP client namespaces tools by server.
-    assert not any(name.startswith("surrealfs_") for name in names)
+    assert not any(name.startswith("surrealfs_") for name in registry)
+
+
+def test_recall_is_only_offered_once_agent_memory_is_configured(monkeypatch):
+    """Agent memory is optional, so the tool that needs it is too.
+
+    A `brain_recall` whose every answer is "agent memory is not configured" costs the
+    model a tool slot and a round trip to learn nothing it can act on.
+    """
+    # `_clean_surrealdb_env` in conftest has already stripped every AGENT_MEMORY_ var.
+    assert mcp.RECALL_TOOL not in [spec["name"] for spec in mcp.tool_specs()]
+
+    monkeypatch.setenv("AGENT_MEMORY_CONTEXT_ID", "ctx")
+    monkeypatch.setenv("AGENT_MEMORY_API_KEY", "sp-key")
+    assert mcp.RECALL_TOOL in [spec["name"] for spec in mcp.tool_specs()]
+
+    # A key on its own is not a configuration, and neither is a context.
+    monkeypatch.delenv("AGENT_MEMORY_API_KEY")
+    assert mcp.RECALL_TOOL not in [spec["name"] for spec in mcp.tool_specs()]
+
+
+async def test_a_configured_agent_memory_without_httpx_names_the_extra(
+    ctx, monkeypatch
+):
+    """The one failure mode the `agent-memory` extra introduces.
+
+    httpx is no longer part of `surrealfs[mcp]`, so a key can be set on an install
+    that cannot make an HTTP request. That has to name the missing extra rather
+    than surface as a bare ModuleNotFoundError, and it must not be swallowed: a
+    memory layer that silently files nothing is the worse failure.
+    """
+    monkeypatch.setenv("AGENT_MEMORY_CONTEXT_ID", "ctx")
+    monkeypatch.setenv("AGENT_MEMORY_API_KEY", "sp-key")
+    monkeypatch.setitem(sys.modules, "httpx", None)  # `import httpx` now raises
+
+    recalled = await mcp.run_tool(
+        ctx, mcp.RECALL_TOOL, {"query": "what is blocking us"}
+    )
+    assert "surrealfs[mcp,agent-memory]" in recalled
+
+    written = await mcp.run_tool(
+        ctx, "write_file", {"path": "/brain/note.md", "content": "kept"}
+    )
+    assert "surrealfs[mcp,agent-memory]" in written
+    assert await ctx.fs.read_text("/brain/note.md") == "kept"
 
 
 async def test_a_write_is_mirrored_and_a_read_is_not(ctx):
@@ -35,7 +84,7 @@ async def test_a_write_is_mirrored_and_a_read_is_not(ctx):
     assert sent == [("/brain/acme/risks/okta.md", "cert expires 2026-10-02")]
 
     await mcp.run_tool(ctx, "cat", {"path": "/brain/acme/risks/okta.md"}, mirror=fake)
-    assert len(sent) == 1, "reads must not touch Spectron"
+    assert len(sent) == 1, "reads must not touch agent memory"
 
     # An `edit` mirrors the file as it now stands, not the replacement text.
     await mcp.run_tool(
@@ -62,7 +111,7 @@ async def test_a_failed_write_is_not_mirrored(ctx):
 
 async def test_a_broken_mirror_keeps_the_write_and_says_so(ctx):
     async def broken(path: str, text: str) -> None:
-        raise RuntimeError("spectron unreachable")
+        raise RuntimeError("agent memory unreachable")
 
     result = await mcp.run_tool(
         ctx, "write_file", {"path": "/brain/note.md", "content": "kept"}, mirror=broken
@@ -87,25 +136,25 @@ async def test_the_mirror_root_confines_what_is_sent(ctx, monkeypatch):
     assert sent == ["/brain/in.md"]
 
 
-async def test_spectron_is_a_no_op_when_unconfigured(monkeypatch):
+async def test_agent_memory_is_a_no_op_when_unconfigured(monkeypatch):
     """Without a key this stays a plain SurrealFS server, and says so.
 
     `mirror` must not raise -- it runs inside every write -- and `recall` has to
     return text a model can act on rather than an error, since "unconfigured" is
     a legitimate state, not a failure.
     """
-    monkeypatch.delenv("SPECTRON_CONTEXT_ID", raising=False)
-    monkeypatch.delenv("SPECTRON_API_KEY", raising=False)
-    assert not mcp.spectron.configured()
+    monkeypatch.delenv("AGENT_MEMORY_CONTEXT_ID", raising=False)
+    monkeypatch.delenv("AGENT_MEMORY_API_KEY", raising=False)
+    assert not mcp.agent_memory.configured()
 
-    # No network: a configured Spectron would post to it here.
-    assert await mcp.spectron.mirror("/brain/x.md", "text") is None
-    assert "not configured" in await mcp.spectron.recall("what is blocking us")
+    # No network: a configured agent memory would post to it here.
+    assert await mcp.agent_memory.mirror("/brain/x.md", "text") is None
+    assert "not configured" in await mcp.agent_memory.recall("what is blocking us")
 
 
 def test_a_hit_with_a_null_score_still_renders():
     """A `"score": null` has the key, so a `.get` default never applies."""
-    line = mcp.spectron._render({"source": "chunk", "score": None}, {})
+    line = mcp.agent_memory._render({"source": "chunk", "score": None}, {})
     assert line.startswith("chunk · ? · 0.00")
 
 
@@ -137,20 +186,20 @@ def test_the_config_file_is_a_default_not_a_mandate(tmp_path, monkeypatch):
     config = tmp_path / "env"
     config.write_text(
         "SURREALDB_URL=ws://from-the-file/rpc\n"
-        "SPECTRON_SCOPE=filed\n"
+        "AGENT_MEMORY_SCOPE=filed\n"
         # A secret is copied through verbatim: dotenv interpolation would eat it.
-        "SPECTRON_API_KEY=sk-a${b}c\n"
+        "AGENT_MEMORY_API_KEY=sk-a${b}c\n"
     )
     monkeypatch.setenv("SURREALFS_ENV_FILE", str(config))
     monkeypatch.setenv("SURREALDB_URL", "ws://from-the-environment/rpc")
-    monkeypatch.delenv("SPECTRON_SCOPE", raising=False)
+    monkeypatch.delenv("AGENT_MEMORY_SCOPE", raising=False)
 
     assert mcp._load_config() == config
     import os
 
     assert os.environ["SURREALDB_URL"] == "ws://from-the-environment/rpc"
-    assert os.environ["SPECTRON_SCOPE"] == "filed"
-    assert os.environ["SPECTRON_API_KEY"] == "sk-a${b}c"
+    assert os.environ["AGENT_MEMORY_SCOPE"] == "filed"
+    assert os.environ["AGENT_MEMORY_API_KEY"] == "sk-a${b}c"
 
 
 def test_a_missing_config_file_is_not_an_error(tmp_path, monkeypatch):

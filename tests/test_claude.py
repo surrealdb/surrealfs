@@ -24,7 +24,18 @@ def test_the_plugin_manifest_matches_the_marketplace_and_the_skill():
     )
 
     # Skills live at the plugin root, never inside .claude-plugin/.
-    assert (root / "skills" / "brain" / "SKILL.md").is_file()
+    brain = root / "skills" / "brain" / "SKILL.md"
+    recall = root / "skills" / "brain-memory" / "SKILL.md"
+    assert brain.is_file()
+    assert recall.is_file()
+
+    # The point of the split: agent memory is a paid, keyed service, and the plugin
+    # ships both skills either way -- so `brain` has to be complete without it,
+    # and one stray mention would send the model looking for a `brain_recall` the
+    # server does not advertise. `brain-memory` says outright that it needs it.
+    assert "agent memory" not in brain.read_text().lower()
+    assert "brain_recall" not in brain.read_text()
+    assert "Requires the `brain_recall` tool" in recall.read_text()
 
     entry = next(p for p in market["plugins"] if p["name"] == manifest["name"])
     assert entry["source"].endswith(root.name)

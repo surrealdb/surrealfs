@@ -28,6 +28,8 @@
 <br>
 
 <p align="center">
+    <img src="https://img.shields.io/badge/status-beta-f2a33c.svg?style=flat-square" alt="Beta" />
+    &nbsp;
     <a href="https://surrealdb.com/discord"><img src="https://img.shields.io/discord/902568124350599239?label=discord&style=flat-square&color=5a66f6"></a>
     &nbsp;
     <a href="https://x.com/surrealdb"><img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/surrealdb"></a>
@@ -36,6 +38,11 @@
     &nbsp;
     <a href="https://www.youtube.com/@SurrealDB"><img src="https://img.shields.io/badge/youtube-subscribe-fc1c1c.svg?style=flat-square"></a>
 </p>
+
+> [!WARNING]
+> **SurrealFS is in beta.** The API, schema, and CLI may change in breaking ways
+> between releases, and it is not yet recommended for production use. Bug
+> reports and feedback are very welcome.
 
 Give an agent somewhere durable to keep its work. SurrealFS is a `file` table
 plus the tools to hand it to a model: files and folders, full-text and semantic
