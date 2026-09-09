@@ -49,8 +49,10 @@ mcp = ["mcp>=2.1", "python-dotenv>=1"]
 agent-memory = ["httpx>=0.27"]
 # An alias, and not politeness: a Claude plugin copies `.mcp.json` in at install
 # time, so every already-installed plugin keeps asking for
-# `surrealfs[claude] @ git+...` and would fail to build if this went away.
-claude = ["surrealfs[mcp]"]
+# `surrealfs[claude] @ git+...` and would fail to build if this went away. It
+# pulls `agent-memory` as well: a plugin whose whole point is the brain that was
+# resolved without httpx mirrored nothing, and said so only inside a tool result.
+claude = ["surrealfs[mcp,agent-memory]"]
 # The file browser (`surrealfs-browser`). starlette is listed explicitly because
 # it reaches the tree today only as a transitive of pydantic-ai's `web` extra,
 # and it is imported directly here. The page itself is a React SPA -- see

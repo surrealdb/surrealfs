@@ -75,6 +75,9 @@ async def mirror(path: str, text: str) -> None:
     becomes a second document rather than replacing the first -- which is the
     point of having agent memory at all: the superseded version stays recallable
     after the filesystem has moved on.
+
+    A scope has to exist before anything can be filed under it, so the first
+    write into a fresh context registers `scope()` and posts again.
     """
     if not configured() or not text.strip():
         # An empty file -- a bare `touch` -- is not knowledge, and uploading one
@@ -98,7 +101,25 @@ async def mirror(path: str, text: str) -> None:
         response = await client.post(
             f"{_base()}/documents", files=parts, headers=_auth()
         )
-        response.raise_for_status()
+        if response.status_code == 400 and "scope" in response.text.lower():
+            # A fresh context has only the root scope registered, and an upload
+            # into an unregistered one is a 400 whose *body* is the only thing
+            # that names the reason. Register and retry: the first write into a
+            # new context is exactly when nobody is watching for a failure.
+            # `parts` is bytes, not a stream, so it survives being posted twice.
+            await client.post(
+                f"{_base()}/scopes", json={"path": scope()}, headers=_auth()
+            )
+            response = await client.post(
+                f"{_base()}/documents", files=parts, headers=_auth()
+            )
+        if response.is_error:
+            # Not `raise_for_status`: its message carries the status and the URL
+            # but not the body, and every message this API sends is in the body.
+            raise RuntimeError(
+                f"agent memory rejected {path}: "
+                f"{response.status_code} {response.text[:200]}"
+            )
 
 
 async def recall(query: str, k: int = RECALL_K) -> str:

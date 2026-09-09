@@ -24,7 +24,7 @@ for candidate in \
     /usr/local/bin/uvx
 do
     if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-        exec "$candidate" --from "surrealfs[mcp] @ $SURREALFS_SOURCE" surrealfs-mcp "$@"
+        exec "$candidate" --from "surrealfs[mcp,agent-memory] @ $SURREALFS_SOURCE" surrealfs-mcp "$@"
     fi
 done
 

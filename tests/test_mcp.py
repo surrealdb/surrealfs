@@ -205,3 +205,51 @@ def test_the_config_file_is_a_default_not_a_mandate(tmp_path, monkeypatch):
 def test_a_missing_config_file_is_not_an_error(tmp_path, monkeypatch):
     monkeypatch.setenv("SURREALFS_ENV_FILE", str(tmp_path / "absent"))
     assert mcp._load_config() is None
+
+
+async def test_an_unregistered_scope_is_registered_and_the_upload_retried(monkeypatch):
+    """The failure that cost a routine its whole first day of digests.
+
+    A fresh context has only the root scope, and an upload into any other one
+    comes back `400 {"message": "unknown scope node -- register it first"}`. The
+    status alone says nothing, so `mirror` reads the body, registers the scope
+    and posts again.
+    """
+    monkeypatch.setenv("AGENT_MEMORY_CONTEXT_ID", "ctx")
+    monkeypatch.setenv("AGENT_MEMORY_API_KEY", "sp-key")
+    posts: list[tuple[str, dict | None]] = []
+
+    class Response:
+        def __init__(self, status_code: int, text: str = "") -> None:
+            self.status_code = status_code
+            self.text = text
+
+        @property
+        def is_error(self) -> bool:
+            return self.status_code >= 400
+
+    class Client:
+        def __init__(self, **_) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_) -> None:
+            return None
+
+        async def post(self, url, *, files=None, json=None, headers=None):
+            posts.append((url.rsplit("/", 1)[-1], json))
+            if url.endswith("/documents") and len(posts) == 1:
+                return Response(400, '{"message":"unknown scope node"}')
+            return Response(201)
+
+    monkeypatch.setattr(
+        mcp.agent_memory, "_httpx", lambda: type("m", (), {"AsyncClient": Client})
+    )
+    await mcp.agent_memory.mirror("/brain/x.md", "text")
+    assert posts == [
+        ("documents", None),
+        ("scopes", {"path": "brain"}),
+        ("documents", None),
+    ]
