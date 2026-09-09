@@ -38,15 +38,15 @@ embed = ["openai>=2.0"]
 # raise `TypeError: unexpected keyword argument` on launch, which a client
 # reports as nothing but "no such tools".
 mcp = ["mcp>=2.1", "python-dotenv>=1"]
-# Spectron, the hosted memory layer behind `brain_recall`, is a managed service
+# Agent memory, the hosted memory layer behind `brain_recall`, is a managed service
 # that needs a context id and an API key -- so the MCP server has to be complete
 # without it, and this is its own extra rather than part of `mcp`. The client is a
-# handful of functions in `integrations/mcp/spectron.py` which import httpx inside
-# themselves, so nothing here is needed until SPECTRON_CONTEXT_ID and
-# SPECTRON_API_KEY are set. httpx is listed because that module imports it
+# handful of functions in `integrations/mcp/agent_memory.py` which import httpx inside
+# themselves, so nothing here is needed until AGENT_MEMORY_CONTEXT_ID and
+# AGENT_MEMORY_API_KEY are set. httpx is listed because that module imports it
 # directly and it is *not* a transitive of `mcp` any more: mcp 2.x depends on
 # `httpx2`.
-spectron = ["httpx>=0.27"]
+agent-memory = ["httpx>=0.27"]
 # An alias, and not politeness: a Claude plugin copies `.mcp.json` in at install
 # time, so every already-installed plugin keeps asking for
 # `surrealfs[claude] @ git+...` and would fail to build if this went away.
@@ -82,7 +82,7 @@ surrealfs-mcp = "surrealfs.integrations.mcp:main"
 surrealfs = "surrealfs.integrations.hermes"
 
 [dependency-groups]
-# pydantic-ai and the packages of the `mcp` and `spectron` extras are here as well
+# pydantic-ai and the packages of the `mcp` and `agent-memory` extras are here as well
 # as in those extras so `just test` exercises those integrations instead of silently
 # skipping their tests. python-dotenv is not optional among them: without it
 # `_load_config` takes its ImportError branch and returns None, and

@@ -49,7 +49,7 @@ def _clean_surrealdb_env(monkeypatch):
     which reads the environment, and signin against the local root-only server
     fails. Each test sets the variables it needs itself.
 
-    ``SURREALFS_`` and ``SPECTRON_`` go too, and for a sharper reason than
+    ``SURREALFS_`` and ``AGENT_MEMORY_`` go too, and for a sharper reason than
     tidiness: ``SURREALFS_SEMANTIC=1`` in a developer's ``.env`` makes the memory
     provider import ``surrealfs.embed``, which imports ``openai`` -- absent
     unless the ``embed`` extra happens to be synced -- so fourteen tests failed
@@ -59,7 +59,7 @@ def _clean_surrealdb_env(monkeypatch):
     reuse a server the developer already has running.
     """
     keep = {"SURREALFS_TEST_URL"}
-    prefixes = ("SURREALDB_", "SURREALFS_", "SPECTRON_")
+    prefixes = ("SURREALDB_", "SURREALFS_", "AGENT_MEMORY_")
     for name in [n for n in os.environ if n.startswith(prefixes) and n not in keep]:
         monkeypatch.delenv(name)
 

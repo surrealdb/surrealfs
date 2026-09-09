@@ -1,28 +1,28 @@
-"""The slice of the Spectron REST API the company brain needs.
+"""The slice of the SurrealDB agent memory REST API the company brain needs.
 
-Spectron (SurrealDB Agent Memory) is the layer that remembers what SurrealFS no
-longer says. A file is current state; Spectron keeps every version that was ever
-mirrored into it, extracts entities and relations out of the prose, and answers
-questions across the lot.
+Agent memory is the layer that remembers what SurrealFS no longer says. A file
+is current state; agent memory keeps every version that was ever mirrored into
+it, extracts entities and relations out of the prose, and answers questions
+across the lot.
 
 Two calls, so this is a module of two functions rather than a client class:
 
     await mirror("/brain/acme/risks/okta-cert.md", text)   # after every write
     print(await recall("what is blocking the SOC2 audit"))  # for `brain_recall`
 
-Spectron is optional, and this module is the whole of it. It needs the `spectron`
-extra (`pip install 'surrealfs[mcp,spectron]'`, for httpx) plus the three variables
-Spectron Cloud hands you and one of ours:
+Agent memory is optional, and this module is the whole of it. It needs the
+`agent-memory` extra (`pip install 'surrealfs[mcp,agent-memory]'`, for httpx)
+plus the three variables SurrealDB Cloud hands you and one of ours:
 
-    SPECTRON_URL         https://srv1.spectron.aws-usw2.surreal.cloud
-    SPECTRON_CONTEXT_ID  the context (tenant) to write into
-    SPECTRON_API_KEY     bearer token
-    SPECTRON_SCOPE       scope path to file under, default "brain"
+    AGENT_MEMORY_URL         https://srv1.spectron.aws-usw2.surreal.cloud
+    AGENT_MEMORY_CONTEXT_ID  the context (tenant) to write into
+    AGENT_MEMORY_API_KEY     bearer token
+    AGENT_MEMORY_SCOPE       scope path to file under, default "brain"
 
 With the context id or the key missing, `configured()` is False, `mirror` is a
 no-op and `recall` says so, and the server does not advertise `brain_recall` at
 all. That is deliberate: the MCP server has to be a complete SurrealFS server for
-anyone who has not signed up for Spectron.
+anyone who has not signed up for agent memory.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import os
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # `httpx` is imported by `_httpx()`, inside the functions that
-    import httpx  # use it, so importing this module works without the `spectron`
+    import httpx  # use it, so importing this module works without the `agent-memory`
     # extra -- otherwise a missing extra is a module-level traceback that an MCP
     # client renders as a bare CONNECTION_CLOSED, with nothing to point at the
     # cause.
@@ -51,8 +51,8 @@ DEFAULT_SCOPE = "brain"
 
 
 def configured() -> bool:
-    """Whether there is a Spectron to talk to."""
-    return bool(os.environ.get("SPECTRON_CONTEXT_ID") and _key())
+    """Whether there is an agent memory to talk to."""
+    return bool(os.environ.get("AGENT_MEMORY_CONTEXT_ID") and _key())
 
 
 def scope() -> str:
@@ -62,16 +62,18 @@ def scope() -> str:
     ``lens`` of ``brain/`` matches nothing, while ``brain`` matches. Send the
     bare form to both.
     """
-    return os.environ.get("SPECTRON_SCOPE", DEFAULT_SCOPE).strip("/") or DEFAULT_SCOPE
+    return (
+        os.environ.get("AGENT_MEMORY_SCOPE", DEFAULT_SCOPE).strip("/") or DEFAULT_SCOPE
+    )
 
 
 async def mirror(path: str, text: str) -> None:
-    """Upload one SurrealFS file to Spectron as a document.
+    """Upload one SurrealFS file to agent memory as a document.
 
     Uploads are deduplicated by content hash, so re-mirroring a file nobody
     changed costs one request and creates nothing. A file that *did* change
     becomes a second document rather than replacing the first -- which is the
-    point of having Spectron at all: the superseded version stays recallable
+    point of having agent memory at all: the superseded version stays recallable
     after the filesystem has moved on.
     """
     if not configured() or not text.strip():
@@ -100,11 +102,11 @@ async def mirror(path: str, text: str) -> None:
 
 
 async def recall(query: str, k: int = RECALL_K) -> str:
-    """Ask Spectron what it knows, rendered for a model to read."""
+    """Ask agent memory what it knows, rendered for a model to read."""
     if not configured():
         return (
-            "Spectron is not configured: set SPECTRON_CONTEXT_ID and "
-            "SPECTRON_API_KEY to recall anything beyond the filesystem."
+            "Agent memory is not configured: set AGENT_MEMORY_CONTEXT_ID and "
+            "AGENT_MEMORY_API_KEY to recall anything beyond the filesystem."
         )
     body = {"query": query, "k": k, "mode": "hybrid", "lens": [[scope()]]}
     async with _httpx().AsyncClient(timeout=TIMEOUT) as client:
@@ -113,8 +115,10 @@ async def recall(query: str, k: int = RECALL_K) -> str:
         hits = response.json().get("hits") or []
         titles = await _titles(client, hits)
     if not hits:
-        return f"Nothing recalled from Spectron for {query!r}."
-    return "Recalled from Spectron:\n" + "\n".join(_render(hit, titles) for hit in hits)
+        return f"Nothing recalled from agent memory for {query!r}."
+    return "Recalled from agent memory:\n" + "\n".join(
+        _render(hit, titles) for hit in hits
+    )
 
 
 async def _titles(
@@ -155,7 +159,7 @@ def _render(hit: dict[str, Any], titles: dict[str, str]) -> str:
     Same two-line shape the Hermes memory provider uses for a recalled file, so
     an agent reading both surfaces sees one format. The label names where the hit
     came from: a `chunk` or `section` cites the document it was cut from, an
-    `entity` or `attribute` is something Spectron extracted that was never
+    `entity` or `attribute` is something agent memory extracted that was never
     written down anywhere.
     """
     resource = hit.get("resource") or {}
@@ -167,7 +171,7 @@ def _render(hit: dict[str, Any], titles: dict[str, str]) -> str:
     text = " ".join((hit.get("text") or "").split())[:SNIPPET_CHARS]
     # `or 0` and not a `.get` default: a hit that carries `"score": null` has the
     # key, so the default never applies and `:.2f` raises -- which surfaces as
-    # "could not reach Spectron" for a recall that in fact came back fine.
+    # "could not reach agent memory" for a recall that in fact came back fine.
     score = float(hit.get("score") or 0)
     return f"{hit.get('source', 'hit')} · {where} · {score:.2f}\n    {text}"
 
@@ -183,15 +187,15 @@ def _httpx() -> Any:
         import httpx
     except ImportError as exc:  # pragma: no cover -- see tests/test_mcp.py
         raise RuntimeError(
-            "SPECTRON_CONTEXT_ID and SPECTRON_API_KEY are set but httpx is not "
-            "installed. Install: pip install 'surrealfs[mcp,spectron]'"
+            "AGENT_MEMORY_CONTEXT_ID and AGENT_MEMORY_API_KEY are set but httpx is not "
+            "installed. Install: pip install 'surrealfs[mcp,agent-memory]'"
         ) from exc
     return httpx
 
 
 def _base() -> str:
-    url = os.environ.get("SPECTRON_URL", DEFAULT_URL).rstrip("/")
-    return f"{url}/api/v1/{os.environ['SPECTRON_CONTEXT_ID']}"
+    url = os.environ.get("AGENT_MEMORY_URL", DEFAULT_URL).rstrip("/")
+    return f"{url}/api/v1/{os.environ['AGENT_MEMORY_CONTEXT_ID']}"
 
 
 def _auth() -> dict[str, str]:
@@ -199,7 +203,7 @@ def _auth() -> dict[str, str]:
 
 
 def _key() -> str:
-    return os.environ.get("SPECTRON_API_KEY", "")
+    return os.environ.get("AGENT_MEMORY_API_KEY", "")
 
 
 def _content_type(path: str) -> str:

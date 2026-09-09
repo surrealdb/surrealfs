@@ -134,12 +134,12 @@ those must sit at *its* root with no duplicated files, as would `commands/`,
 now just that drift guard, and `claude plugin validate
 ./surrealfs/integrations/claude` checks the manifest.
 
-**Spectron is optional, and the surface has to say so.** It is a managed service
+**Agent memory is optional, and the surface has to say so.** It is a managed service
 with an API key, so `surrealfs[mcp]` plus a SurrealDB URL is the whole product:
-`tool_specs()` advertises `brain_recall` only when `spectron.configured()`, the
+`tool_specs()` advertises `brain_recall` only when `agent_memory.configured()`, the
 server's `instructions` string drops the memory clause, and the `brain` skill is
 written to stand on files alone (`tests/test_claude.py` asserts it never says
-"Spectron"). The `spectron` extra carries `httpx` alone; a key set on an install
+"agent memory"). The `agent-memory` extra carries `httpx` alone; a key set on an install
 without it raises through `_httpx()` naming the extra, rather than being folded
 into `configured()` — a memory layer that silently files nothing for someone who
 did sign up is the worse failure. `run_tool` still answers `brain_recall` when
@@ -198,7 +198,7 @@ from an editable `uv sync --extra mcp`, never through `uvx --from <directory>`.
 
 **`surrealfs-mcp --selftest` is the first thing to run** when a client shows no
 tools. It reports config path, server, database, identity, tool count, `ls /` and,
-when there is a key, Spectron — in one pass, treating an empty database as a
+when there is a key, agent memory — in one pass, treating an empty database as a
 failure. Its tool count follows the environment, so 15 vs 16 is itself the answer
 to "why is `brain_recall` missing". See `selftest()`.
 
@@ -221,7 +221,7 @@ worse than a crash: it connects *successfully* to an empty filesystem, so an age
 finds an empty brain and reports a clean risk board for a company it never
 reached. `just mcp` still works because the Justfile dotenv-loads the repo `.env`.
 
-**The `mcp` and `spectron` extras' packages are all in the `dev` dependency group
+**The `mcp` and `agent-memory` extras' packages are all in the `dev` dependency group
 as well**, for the same reason `pydantic-ai` is: otherwise `just test` imports
 nothing and `tests/test_mcp.py` does not exercise the integration. `python-dotenv`
 is the easy one to forget and the one that does not merely skip — nothing else in
@@ -230,7 +230,7 @@ it `_load_config` takes its ImportError branch and
 `test_the_config_file_is_a_default_not_a_mandate` *fails*. Check with
 `uv export --only-group dev`, not by looking at a `.venv` that an
 `--extra mcp` sync has already populated. `httpx` is in there for the same reason,
-now that it is the `spectron` extra rather than part of `mcp`.
+now that it is the `agent-memory` extra rather than part of `mcp`.
 
 **`mcp` is floored at `>=2.1`, not `>=1.2`.** `serve()` builds the lowlevel
 `Server` with `on_list_tools=`/`on_call_tool=` handler kwargs, which do not exist

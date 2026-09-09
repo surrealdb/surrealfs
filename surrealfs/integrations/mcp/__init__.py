@@ -13,8 +13,8 @@ Configuration is read from ``~/.config/surrealfs/env``, so none of the
 ``SURREALDB_*`` names, which every other SurrealDB tool on the machine also
 reads, has to be exported for this.
 
-Spectron -- the hosted memory layer in `spectron.py` -- is optional, and nothing
-above needs it. Configure it and two things appear: a sixteenth tool,
+Agent memory -- the hosted memory layer in `agent_memory.py` -- is optional, and
+nothing above needs it. Configure it and two things appear: a sixteenth tool,
 `brain_recall`, and a mirror of every text file written through this server. The
 mirror lives in the dispatch path rather than in a tool the model is asked to call
 afterwards: a memory layer that depends on remembering to update it is not one.
@@ -37,7 +37,7 @@ from ...errors import SurrealFsError
 from ...paths import normalize
 from ...tools import ToolContext
 from ..json_tools import call_tool, tool_definitions
-from . import spectron
+from . import agent_memory
 
 __all__ = [
     "RECALL_TOOL",
@@ -60,12 +60,12 @@ RECALL_TOOL = "brain_recall"
 CONFIG_DIR = "surrealfs"
 CONFIG_NAME = "env"
 
-# The tools that leave new text behind for Spectron to read. `write_bytes` is
-# absent on purpose: Spectron indexes prose, and a base64 PNG is not prose.
+# The tools that leave new text behind for agent memory to read. `write_bytes` is
+# absent on purpose: agent memory indexes prose, and a base64 PNG is not prose.
 MIRRORED = frozenset({"write_file", "edit", "touch"})
 
 RECALL_DESCRIPTION = """\
-Recall from Spectron, the memory layer behind SurrealFS. Use it *after* reading
+Recall from agent memory, the memory layer behind SurrealFS. Use it *after* reading
 the relevant files, not instead: it answers what the filesystem no longer says --
 superseded versions of a file, entities and relationships extracted out of the
 prose, context filed by someone else's session. Ask a question, not a keyword."""
@@ -81,7 +81,7 @@ RECALL_SCHEMA: dict[str, Any] = {
         "k": {
             "type": "integer",
             "description": "How many results to return",
-            "default": spectron.RECALL_K,
+            "default": agent_memory.RECALL_K,
         },
     },
     "required": ["query"],
@@ -100,12 +100,12 @@ def tool_specs(
     `surrealfs:surrealfs_ls`.
 
     `recall` decides whether `brain_recall` is among them; the default asks
-    Spectron whether it is configured. Advertising it unconditionally would put a
-    tool in front of the model whose every answer is "Spectron is not configured",
-    which it cannot act on and cannot fix.
+    agent memory whether it is configured. Advertising it unconditionally would
+    put a tool in front of the model whose every answer is "agent memory is not
+    configured", which it cannot act on and cannot fix.
     """
     if recall is None:
-        recall = spectron.configured()
+        recall = agent_memory.configured()
     specs = [
         {
             "name": definition["name"],
@@ -131,9 +131,9 @@ async def run_tool(
     arguments: dict[str, Any],
     *,
     semantic: bool = False,
-    mirror: Mirror = spectron.mirror,
+    mirror: Mirror = agent_memory.mirror,
 ) -> str:
-    """Run one tool and mirror to Spectron whatever it wrote.
+    """Run one tool and mirror to agent memory whatever it wrote.
 
     Errors come back as text, the same as `json_tools.call_tool`: a tool-calling
     loop needs something the model can read and correct.
@@ -144,19 +144,19 @@ async def run_tool(
     nobody the wiser, so it is said out loud where the model and the user both
     see it.
 
-    `RECALL_TOOL` is handled whether or not Spectron is configured, even though
+    `RECALL_TOOL` is handled whether or not agent memory is configured, even though
     `tool_specs` only advertises it when it is: a client holding a tool list from
     before the key was removed has to get "not configured" back, not "unknown
     tool".
     """
     if name == RECALL_TOOL:
         try:
-            return await spectron.recall(
+            return await agent_memory.recall(
                 str(arguments.get("query", "")),
-                int(arguments.get("k") or spectron.RECALL_K),
+                int(arguments.get("k") or agent_memory.RECALL_K),
             )
         except Exception as exc:  # noqa: BLE001 -- any transport failure is the model's to report
-            return f"Error: could not reach Spectron: {exc}"
+            return f"Error: could not reach agent memory: {exc}"
 
     result = await call_tool(ctx, name, arguments, semantic=semantic)
     path = _to_mirror(name, arguments, result)
@@ -205,15 +205,15 @@ async def serve() -> None:
     from .._connect import agent_user, connect
 
     semantic = _semantic()
-    recall = spectron.configured()
+    recall = agent_memory.configured()
     if not recall:
         # Said out loud, for the same reason as the `SURREALFS_SEMANTIC` line
         # below: a tool that is simply absent looks identical, from the client
         # side, to a server that failed to start.
         print(
-            "surrealfs-mcp: Spectron is not configured, so this is a filesystem "
+            "surrealfs-mcp: Agent memory is not configured, so this is a filesystem "
             "server only and `brain_recall` is not offered. Set "
-            "SPECTRON_CONTEXT_ID and SPECTRON_API_KEY to enable it.",
+            "AGENT_MEMORY_CONTEXT_ID and AGENT_MEMORY_API_KEY to enable it.",
             file=sys.stderr,
         )
     db = await connect()
@@ -267,7 +267,7 @@ async def serve() -> None:
         instructions=(
             "A persistent filesystem shared with other agents and with the people "
             "who own them"
-            + (", plus the Spectron memory behind it" if recall else "")
+            + (", plus the agent memory behind it" if recall else "")
             + ". Not the local disk."
         ),
         on_list_tools=on_list_tools,
@@ -286,7 +286,7 @@ async def selftest() -> int:
     `surrealfs-mcp --selftest`. Exists because the failure everyone hits is a
     client not launching the server at all, and the symptom -- a model saying it
     has no such tools -- looks identical whether the fault is the config file, the
-    database, the client, or Spectron. This separates them: run it, and whatever
+    database, the client, or agent memory. This separates them: run it, and whatever
     it prints is the layer to fix. Printing to stdout is safe here; nothing is
     speaking MCP on it.
     """
@@ -320,26 +320,28 @@ async def selftest() -> int:
         )
         return 1
 
-    if not spectron.configured():
-        print("spectron  not configured (SPECTRON_CONTEXT_ID / SPECTRON_API_KEY)")
-        # Not a warning. A filesystem server is the product; Spectron is an extra
+    if not agent_memory.configured():
+        print(
+            "memory    not configured (AGENT_MEMORY_CONTEXT_ID / AGENT_MEMORY_API_KEY)"
+        )
+        # Not a warning. A filesystem server is the product; agent memory is an extra
         # you opt into, and 0 here says so rather than nagging about a service
         # nobody has to buy.
-        print("\nOK        filesystem reachable; Spectron memory off, so no")
+        print("\nOK        filesystem reachable; agent memory off, so no")
         print(f"          {RECALL_TOOL} tool. Everything else works.")
         return 0
-    # The default, not `.get('SPECTRON_URL')`: printing `None` for the host the
+    # The default, not `.get('AGENT_MEMORY_URL')`: printing `None` for the host the
     # server is in fact about to talk to defeats the point of a selftest that
     # exists to name the layer that failed.
-    url = os.environ.get("SPECTRON_URL") or spectron.DEFAULT_URL
-    print(f"spectron  {url} scope={spectron.scope()}")
+    url = os.environ.get("AGENT_MEMORY_URL") or agent_memory.DEFAULT_URL
+    print(f"memory    {url} scope={agent_memory.scope()}")
     try:
-        first = (await spectron.recall("status", 1)).splitlines()[0]
+        first = (await agent_memory.recall("status", 1)).splitlines()[0]
     except Exception as exc:  # noqa: BLE001 -- same
-        print(f"\nFAIL      Spectron unreachable: {exc}")
+        print(f"\nFAIL      agent memory unreachable: {exc}")
         return 1
     print(f"recall    {first}")
-    print("\nOK        filesystem and Spectron both reachable")
+    print("\nOK        filesystem and agent memory both reachable")
     return 0
 
 
@@ -462,7 +464,7 @@ def _unexpanded() -> list[str]:
     return [
         name
         for name, value in os.environ.items()
-        if name.startswith(("SURREALDB_", "SURREALFS_", "SPECTRON_"))
+        if name.startswith(("SURREALDB_", "SURREALFS_", "AGENT_MEMORY_"))
         and value.startswith("${")
         and value.endswith("}")
     ]

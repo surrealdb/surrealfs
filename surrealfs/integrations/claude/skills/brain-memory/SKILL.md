@@ -1,16 +1,17 @@
 ---
 name: brain-memory
-description: Reach what the company brain's files no longer say — a superseded version of a risk, a relationship nobody wrote down, context filed by a session you never saw — using the brain_recall tool. Use it only when that tool is present; it is absent unless Spectron is configured, and then the `brain` skill alone is the whole answer. Read the files first with `brain`, then come here for the why and the history behind them.
+description: Reach what the company brain's files no longer say — a superseded version of a risk, a relationship nobody wrote down, context filed by a session you never saw — using the brain_recall tool. Use it only when that tool is present; it is absent unless agent memory is configured, and then the `brain` skill alone is the whole answer. Read the files first with `brain`, then come here for the why and the history behind them.
 ---
 
-# Recalling from Spectron
+# Recalling from agent memory
 
 **Requires the `brain_recall` tool.** It exists only when the `surrealfs` server
-has a Spectron key. If you do not see it, stop here: use the `brain` skill and
+has an agent memory key. If you do not see it, stop here: use the `brain` skill and
 answer from the files, which are complete on their own.
 
-Spectron is the memory layer behind SurrealFS. Every text file written through the
-server is mirrored into it automatically, so it keeps every version that was ever
+Agent memory is the memory layer behind SurrealFS. Every text file written
+through the server is mirrored into it automatically, so it keeps every version
+that was ever
 filed plus the entities and relationships it extracted from the prose. That is
 what makes it worth asking: it answers what the *current* files no longer say.
 
@@ -41,4 +42,4 @@ what makes it worth asking: it answers what the *current* files no longer say.
   with the current files unread, is usually out of date.
 - Nothing you say in chat reaches it. Only what you *write* through the SurrealFS
   tools gets mirrored — so file the outcome.
-- `write_bytes` is not mirrored. Spectron indexes prose.
+- `write_bytes` is not mirrored. Agent memory indexes prose.

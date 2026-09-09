@@ -29,11 +29,11 @@ def test_the_plugin_manifest_matches_the_marketplace_and_the_skill():
     assert brain.is_file()
     assert recall.is_file()
 
-    # The point of the split: Spectron is a paid, keyed service, and the plugin
+    # The point of the split: agent memory is a paid, keyed service, and the plugin
     # ships both skills either way -- so `brain` has to be complete without it,
     # and one stray mention would send the model looking for a `brain_recall` the
     # server does not advertise. `brain-memory` says outright that it needs it.
-    assert "spectron" not in brain.read_text().lower()
+    assert "agent memory" not in brain.read_text().lower()
     assert "brain_recall" not in brain.read_text()
     assert "Requires the `brain_recall` tool" in recall.read_text()
 

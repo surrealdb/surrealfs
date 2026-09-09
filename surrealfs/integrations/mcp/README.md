@@ -5,7 +5,7 @@ SurrealDB URL is the only thing it needs, and nothing here is specific to one
 client — Claude Code, Claude Desktop, Cursor, Zed, Codex or a hand-rolled client
 all get the same fifteen tools.
 
-[Spectron](#optional-spectron-memory) is optional and off by default. Configure it
+[Agent memory](#optional-agent-memory) is optional and off by default. Configure it
 and a sixteenth tool appears, plus a mirror of every text file written through the
 server; leave it alone and everything above still works.
 
@@ -76,8 +76,8 @@ from the environment, whichever has it — the environment wins:
 | `SURREALFS_SEMANTIC` | unset | `1` makes `search` match on meaning too |
 | `SURREALFS_ENV_FILE` | `$XDG_CONFIG_HOME/surrealfs/env` | where the above are read from |
 
-The four `SPECTRON_*` variables go in the same file — see
-[Optional: Spectron memory](#optional-spectron-memory).
+The four `AGENT_MEMORY_*` variables go in the same file — see
+[Optional: Agent memory](#optional-agent-memory).
 
 ```bash
 mkdir -p ~/.config/surrealfs
@@ -120,32 +120,32 @@ The same fifteen as every other surface, generated from `surrealfs/tools/`, and
 **unprefixed** — unlike the Hermes plugin's `surrealfs_*`. An MCP client namespaces
 tools by server, so a prefix here would read as `surrealfs:surrealfs_ls`.
 
-With Spectron configured there is a sixteenth, `brain_recall` — see below.
+With agent memory configured there is a sixteenth, `brain_recall` — see below.
 
-## Optional: Spectron memory
+## Optional: Agent memory
 
-Spectron is SurrealDB's hosted memory layer, and it is a managed service: it needs
-a context id and an API key. **Everything above works without it.** Set no key and
-the server is a filesystem server, does not advertise `brain_recall` at all, and
-says so once on stderr at startup.
+Agent memory is SurrealDB's hosted memory layer, and it is a managed service: it
+needs a context id and an API key. **Everything above works without it.** Set no
+key and the server is a filesystem server, does not advertise `brain_recall` at
+all, and says so once on stderr at startup.
 
 To turn it on, install the extra and add two variables to the same config file:
 
 ```bash
-pip install "surrealfs[mcp,spectron] @ git+https://github.com/surrealdb/surrealfs.git"
+pip install "surrealfs[mcp,agent-memory] @ git+https://github.com/surrealdb/surrealfs.git"
 ```
 
 ```bash
-SPECTRON_CONTEXT_ID=your-context
-SPECTRON_API_KEY=your-key
+AGENT_MEMORY_CONTEXT_ID=your-context
+AGENT_MEMORY_API_KEY=your-key
 ```
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `SPECTRON_CONTEXT_ID` | unset | the context (tenant) to file into |
-| `SPECTRON_API_KEY` | unset | bearer token |
-| `SPECTRON_URL` | `https://srv1.spectron.aws-usw2.surreal.cloud` | Spectron host |
-| `SPECTRON_SCOPE` | `brain` | scope path to file under and lens queries to |
+| `AGENT_MEMORY_CONTEXT_ID` | unset | the context (tenant) to file into |
+| `AGENT_MEMORY_API_KEY` | unset | bearer token |
+| `AGENT_MEMORY_URL` | `https://srv1.spectron.aws-usw2.surreal.cloud` | agent memory host |
+| `AGENT_MEMORY_SCOPE` | `brain` | scope path to file under and lens queries to |
 | `SURREALFS_MIRROR_ROOT` | `/` | only mirror writes under this path |
 
 A key with the extra missing is refused loudly, naming the extra — it is not
@@ -154,7 +154,7 @@ someone who paid for one is the worse failure.
 
 ### `brain_recall`, the sixteenth tool
 
-It queries Spectron, not the filesystem: it answers what the current files no
+It queries agent memory, not the filesystem: it answers what the current files no
 longer say — a superseded version of a file, entities and relationships extracted
 out of the prose, context filed by a session you never saw. It takes a question,
 not a keyword, and each hit is labelled with the SurrealFS path it was filed from
@@ -162,10 +162,11 @@ so you can open the file next.
 
 ### Mirroring on write
 
-`write_file`, `edit` and `touch` upload the file's new contents to Spectron as a
+`write_file`, `edit` and `touch` upload the file's new contents to agent memory as a
 document, in the same call. Not a separate tool the model is asked to call
 afterwards: a memory layer that depends on remembering to update it is not one.
-`write_bytes` is left out — Spectron indexes prose, and a base64 PNG is not prose.
+`write_bytes` is left out — agent memory indexes prose, and a base64 PNG is not
+prose.
 
 Uploads deduplicate by content hash, so re-mirroring an unchanged file creates
 nothing. A file that *did* change becomes a second document rather than replacing
@@ -178,7 +179,7 @@ rolled back over it, but swallowing the failure would let the memory layer drift
 out of date with nobody the wiser.
 
 Set `SURREALFS_MIRROR_ROOT=/brain` to confine mirroring to the brain and keep the
-rest of the filesystem out of Spectron.
+rest of the filesystem out of agent memory.
 
 ## Checking it works
 
@@ -187,14 +188,15 @@ surrealfs-mcp --selftest
 ```
 
 It prints the config file it read, the server and database it reached, the
-identity it acts as, the tool count, `ls /`, and — if Spectron is configured —
-whether it answers, then `OK` or a line naming the layer that failed. Exit code 0 only when
-everything it checked worked.
+identity it acts as, the tool count, `ls /`, and — if agent memory is configured
+— whether it answers, then `OK` or a line naming the layer that failed. Exit code
+0 only when everything it checked worked.
 
 It exists because every misconfiguration has the same symptom: the model says it
 has no such tools. That one message covers a client that never launched the
-server, a missing config file, an unreachable database, a wrong namespace, and a
-Spectron key that does not work (when there is one). The selftest separates them.
+server, a missing config file, an unreachable database, a wrong namespace, and
+an agent memory key that does not work (when there is one). The selftest
+separates them.
 
 An empty database is reported as a **failure**, not a success, even though the
 connection worked:
@@ -227,7 +229,7 @@ Run the client's exact `command` and `args` in a terminal to see which.
 [`examples/company-brain/`](https://github.com/surrealdb/surrealfs/tree/main/examples/company-brain)
 — a devsecops company brain: two Claude Desktop routines file Snyk, Drata,
 SonarQube, Okta and Slack state into `/brain/acme/`, and `/brain plan my
-next high-priority task` answers from the files, plus Spectron if it is
+next high-priority task` answers from the files, plus agent memory if it is
 configured. Runs with no vendor accounts.
 
 ## See also
