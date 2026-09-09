@@ -1,7 +1,7 @@
 {
   "name": "surrealfs",
   "displayName": "SurrealFS",
-  "description": "A persistent filesystem shared across your agents and your team, backed by SurrealDB, with Spectron memory behind it. Adds the surrealfs tools and the /brain skill.",
+  "description": "A persistent filesystem shared across your agents and your team, backed by SurrealDB. Adds the surrealfs tools and the /brain skill, plus optional Spectron memory and /brain-memory if you have a Spectron key.",
   "version": "0.2.0",
   "author": {
     "name": "SurrealDB",

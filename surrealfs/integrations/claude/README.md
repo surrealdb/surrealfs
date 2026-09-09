@@ -1,8 +1,11 @@
 # SurrealFS for Claude
 
-A plugin that bundles [the SurrealFS MCP server](../mcp/README.md) with the
-`/brain` skill: the fifteen filesystem tools, `brain_recall` for the Spectron
-memory behind them, and a skill that knows how to use both.
+A plugin that bundles [the SurrealFS MCP server](../mcp/README.md) with two
+skills: the fifteen filesystem tools, `/brain` for working in the shared company
+brain, and `/brain-memory` for the optional [Spectron
+memory](../mcp/README.md#optional-spectron-memory) behind it. Spectron is a hosted
+service with an API key; without one the plugin is complete and `/brain` is the
+whole story.
 
 This page is the Claude-specific half — installing, and where Desktop differs.
 **What the server reads, what the tools are, and how to check it works all live
@@ -29,10 +32,12 @@ is what Claude reads there.
 /plugin install surrealfs@surrealfs
 ```
 
-Either way the plugin brings the MCP server and the `/brain` skill together, so
+Either way the plugin brings the MCP server and both skills together, so
 there is nothing else to install and no client config to edit. In Claude Code the
 tools arrive namespaced — `mcp__plugin_surrealfs_surrealfs__ls` and so on — and
-the skill as `/surrealfs:brain`.
+the skills as `/surrealfs:brain` and `/surrealfs:brain-memory`. The latter needs
+Spectron: without a key the server does not offer `brain_recall`, and the skill
+says so and hands back to `/brain`.
 
 Then write the configuration to `~/.config/surrealfs/env` — see
 [Configuration](../mcp/README.md#configuration) for the file and every variable in
@@ -141,8 +146,9 @@ block is needed — the server reads `~/.config/surrealfs/env` however it is
 launched. Note the absolute `uvx`, and the explicit `git+…` source: `surrealfs`
 is not on PyPI yet, so a bare `surrealfs[mcp]` cannot resolve.
 
-A connector added this way brings no skill with it, so add `/brain` separately:
-Settings → Capabilities → Skills, pointed at [`skills/brain/`](skills/brain).
+A connector added this way brings no skill with it, so add them separately:
+Settings → Capabilities → Skills, pointed at [`skills/brain/`](skills/brain) and,
+if you use Spectron, [`skills/brain-memory/`](skills/brain-memory).
 The plugin does both at once.
 
 ## When a client shows no tools
@@ -161,8 +167,8 @@ client never launched the server. Its log:
 [`examples/company-brain/`](https://github.com/surrealdb/surrealfs/tree/main/examples/company-brain)
 — a devsecops company brain: two Claude Desktop routines file Snyk, Drata,
 SonarQube, Okta and Slack state into `/brain/acme/`, and `/brain plan my
-next high-priority task` answers from the files plus Spectron. Runs with no
-vendor accounts.
+next high-priority task` answers from the files, plus Spectron if it is
+configured. Runs with no vendor accounts.
 
 ## See also
 

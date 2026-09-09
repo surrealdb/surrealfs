@@ -10,7 +10,9 @@ Two calls, so this is a module of two functions rather than a client class:
     await mirror("/brain/acme/risks/okta-cert.md", text)   # after every write
     print(await recall("what is blocking the SOC2 audit"))  # for `brain_recall`
 
-Configuration is the three variables Spectron Cloud hands you plus one of ours:
+Spectron is optional, and this module is the whole of it. It needs the `spectron`
+extra (`pip install 'surrealfs[mcp,spectron]'`, for httpx) plus the three variables
+Spectron Cloud hands you and one of ours:
 
     SPECTRON_URL         https://srv1.spectron.aws-usw2.surreal.cloud
     SPECTRON_CONTEXT_ID  the context (tenant) to write into
@@ -18,8 +20,9 @@ Configuration is the three variables Spectron Cloud hands you plus one of ours:
     SPECTRON_SCOPE       scope path to file under, default "brain"
 
 With the context id or the key missing, `configured()` is False, `mirror` is a
-no-op and `recall` says so. That is deliberate: the MCP server has to stay a
-working SurrealFS server for anyone who has not signed up for Spectron.
+no-op and `recall` says so, and the server does not advertise `brain_recall` at
+all. That is deliberate: the MCP server has to be a complete SurrealFS server for
+anyone who has not signed up for Spectron.
 """
 
 from __future__ import annotations
@@ -30,10 +33,11 @@ import mimetypes
 import os
 from typing import TYPE_CHECKING, Any
 
-if TYPE_CHECKING:  # `httpx` is imported inside the functions that use it, so
-    import httpx  # importing this module works without the `claude` extra --
-    # otherwise a missing extra is a module-level traceback that an MCP client
-    # renders as a bare CONNECTION_CLOSED, with nothing to point at the cause.
+if TYPE_CHECKING:  # `httpx` is imported by `_httpx()`, inside the functions that
+    import httpx  # use it, so importing this module works without the `spectron`
+    # extra -- otherwise a missing extra is a module-level traceback that an MCP
+    # client renders as a bare CONNECTION_CLOSED, with nothing to point at the
+    # cause.
 
 __all__ = ["DEFAULT_URL", "configured", "mirror", "recall", "scope"]
 
@@ -84,13 +88,11 @@ async def mirror(path: str, text: str) -> None:
     # upload still succeeds, silently titled after the filename and filed in the
     # root scope. And the file part must carry an explicit content type -- omit it
     # and the upload is a 500. Hence a list of parts, not a dict.
-    import httpx
-
     parts = [
         ("metadata", (None, json.dumps(metadata), "application/json")),
         ("file", (path.rsplit("/", 1)[-1], text.encode(), _content_type(path))),
     ]
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with _httpx().AsyncClient(timeout=TIMEOUT) as client:
         response = await client.post(
             f"{_base()}/documents", files=parts, headers=_auth()
         )
@@ -104,10 +106,8 @@ async def recall(query: str, k: int = RECALL_K) -> str:
             "Spectron is not configured: set SPECTRON_CONTEXT_ID and "
             "SPECTRON_API_KEY to recall anything beyond the filesystem."
         )
-    import httpx
-
     body = {"query": query, "k": k, "mode": "hybrid", "lens": [[scope()]]}
-    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+    async with _httpx().AsyncClient(timeout=TIMEOUT) as client:
         response = await client.post(f"{_base()}/query", json=body, headers=_auth())
         response.raise_for_status()
         hits = response.json().get("hits") or []
@@ -133,7 +133,7 @@ async def _titles(
         if (hit.get("resource") or {}).get("documentId")
     }
 
-    import httpx
+    httpx = _httpx()
 
     async def one(document_id: str) -> tuple[str, str]:
         try:
@@ -170,6 +170,23 @@ def _render(hit: dict[str, Any], titles: dict[str, str]) -> str:
     # "could not reach Spectron" for a recall that in fact came back fine.
     score = float(hit.get("score") or 0)
     return f"{hit.get('source', 'hit')} · {where} · {score:.2f}\n    {text}"
+
+
+def _httpx() -> Any:
+    """The httpx module, or an error that names the extra it is missing from.
+
+    Configured-but-not-installed has to be loud. Folding this into `configured()`
+    would turn a typo in an install command into a memory layer that silently
+    files nothing for someone who did sign up for one.
+    """
+    try:
+        import httpx
+    except ImportError as exc:  # pragma: no cover -- see tests/test_mcp.py
+        raise RuntimeError(
+            "SPECTRON_CONTEXT_ID and SPECTRON_API_KEY are set but httpx is not "
+            "installed. Install: pip install 'surrealfs[mcp,spectron]'"
+        ) from exc
+    return httpx
 
 
 def _base() -> str:

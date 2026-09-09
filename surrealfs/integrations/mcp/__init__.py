@@ -1,21 +1,25 @@
 """SurrealFS as an MCP server, for any client that speaks MCP.
 
 The surface is the same fifteen filesystem tools as every other integration,
-generated from `surrealfs.tools`, plus `brain_recall` for the memory layer behind
-them. It serves over stdio as `surrealfs-mcp`, so Claude Code, Claude Desktop,
-Cursor, Zed, Codex or a hand-rolled client all get the same thing.
+generated from `surrealfs.tools`. It serves over stdio as `surrealfs-mcp`, so
+Claude Code, Claude Desktop, Cursor, Zed, Codex or a hand-rolled client all get
+the same thing.
 
 Nothing here is specific to one client. The Claude *plugin* that wraps this
-server -- its manifest, its bundled `.mcp.json` and the `/brain` skill -- lives
-next door in `surrealfs/integrations/claude/`.
+server -- its manifest, its bundled `.mcp.json` and the skills -- lives next door
+in `surrealfs/integrations/claude/`.
 
 Configuration is read from ``~/.config/surrealfs/env``, so none of the
 ``SURREALDB_*`` names, which every other SurrealDB tool on the machine also
 reads, has to be exported for this.
 
-Every text file written through this server is also mirrored into Spectron. That
-lives here, in the dispatch path, rather than in a tool the model is asked to call
+Spectron -- the hosted memory layer in `spectron.py` -- is optional, and nothing
+above needs it. Configure it and two things appear: a sixteenth tool,
+`brain_recall`, and a mirror of every text file written through this server. The
+mirror lives in the dispatch path rather than in a tool the model is asked to call
 afterwards: a memory layer that depends on remembering to update it is not one.
+Leave it unconfigured and `brain_recall` is not advertised at all, because a tool
+whose only answer is "not configured" is worse than no tool.
 
 See `README.md` beside this file, and `examples/company-brain/` for the demo.
 """
@@ -86,13 +90,22 @@ RECALL_SCHEMA: dict[str, Any] = {
 Mirror = Callable[[str, str], Awaitable[None]]
 
 
-def tool_specs(*, semantic: bool = False) -> list[dict[str, Any]]:
+def tool_specs(
+    *, semantic: bool = False, recall: bool | None = None
+) -> list[dict[str, Any]]:
     """Every tool this server offers, as ``{name, description, schema}``.
 
     Deliberately unprefixed, unlike the Hermes plugin's `surrealfs_*`: an MCP
     client namespaces tools by server, so prefixing here reads as
     `surrealfs:surrealfs_ls`.
+
+    `recall` decides whether `brain_recall` is among them; the default asks
+    Spectron whether it is configured. Advertising it unconditionally would put a
+    tool in front of the model whose every answer is "Spectron is not configured",
+    which it cannot act on and cannot fix.
     """
+    if recall is None:
+        recall = spectron.configured()
     specs = [
         {
             "name": definition["name"],
@@ -101,13 +114,14 @@ def tool_specs(*, semantic: bool = False) -> list[dict[str, Any]]:
         }
         for definition in tool_definitions(semantic=semantic)
     ]
-    specs.append(
-        {
-            "name": RECALL_TOOL,
-            "description": RECALL_DESCRIPTION,
-            "schema": RECALL_SCHEMA,
-        }
-    )
+    if recall:
+        specs.append(
+            {
+                "name": RECALL_TOOL,
+                "description": RECALL_DESCRIPTION,
+                "schema": RECALL_SCHEMA,
+            }
+        )
     return specs
 
 
@@ -129,6 +143,11 @@ async def run_tool(
     swallowing the failure would let the memory layer drift out of date with
     nobody the wiser, so it is said out loud where the model and the user both
     see it.
+
+    `RECALL_TOOL` is handled whether or not Spectron is configured, even though
+    `tool_specs` only advertises it when it is: a client holding a tool list from
+    before the key was removed has to get "not configured" back, not "unknown
+    tool".
     """
     if name == RECALL_TOOL:
         try:
@@ -186,6 +205,17 @@ async def serve() -> None:
     from .._connect import agent_user, connect
 
     semantic = _semantic()
+    recall = spectron.configured()
+    if not recall:
+        # Said out loud, for the same reason as the `SURREALFS_SEMANTIC` line
+        # below: a tool that is simply absent looks identical, from the client
+        # side, to a server that failed to start.
+        print(
+            "surrealfs-mcp: Spectron is not configured, so this is a filesystem "
+            "server only and `brain_recall` is not offered. Set "
+            "SPECTRON_CONTEXT_ID and SPECTRON_API_KEY to enable it.",
+            file=sys.stderr,
+        )
     db = await connect()
     try:
         # Usually a no-op -- the table is already there on a shared database, and
@@ -219,7 +249,7 @@ async def serve() -> None:
             description=spec["description"],
             inputSchema=spec["schema"],
         )
-        for spec in tool_specs(semantic=semantic)
+        for spec in tool_specs(semantic=semantic, recall=recall)
     ]
 
     async def on_list_tools(_ctx: Any, _params: Any) -> types.ListToolsResult:
@@ -236,7 +266,9 @@ async def serve() -> None:
         version=__version__,
         instructions=(
             "A persistent filesystem shared with other agents and with the people "
-            "who own them, plus the Spectron memory behind it. Not the local disk."
+            "who own them"
+            + (", plus the Spectron memory behind it" if recall else "")
+            + ". Not the local disk."
         ),
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
@@ -268,7 +300,7 @@ async def selftest() -> int:
         f" / {os.environ.get('SURREALDB_DATABASE', 'demo')}"
     )
     print(f"acting as {agent_user()}")
-    print(f"tools     {len(tool_specs(semantic=_semantic()))}")
+    print(f"tools     {len(tool_specs(semantic=_semantic()))}")  # follows the env
     try:
         async with connected() as db:
             entries = await SurrealFs(db, user=agent_user()).ls("/")
@@ -290,7 +322,11 @@ async def selftest() -> int:
 
     if not spectron.configured():
         print("spectron  not configured (SPECTRON_CONTEXT_ID / SPECTRON_API_KEY)")
-        print("\nOK        filesystem reachable; Spectron memory off")
+        # Not a warning. A filesystem server is the product; Spectron is an extra
+        # you opt into, and 0 here says so rather than nagging about a service
+        # nobody has to buy.
+        print("\nOK        filesystem reachable; Spectron memory off, so no")
+        print(f"          {RECALL_TOOL} tool. Everything else works.")
         return 0
     # The default, not `.get('SPECTRON_URL')`: printing `None` for the host the
     # server is in fact about to talk to defeats the point of a selftest that

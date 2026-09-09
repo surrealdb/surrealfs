@@ -8,12 +8,13 @@
 * :mod:`surrealfs.integrations.hermes` — a Hermes plugin, discovered through an
   entry point as soon as this package is installed. Depends on nothing.
 * :mod:`surrealfs.integrations.mcp` — an MCP server (`surrealfs-mcp`) for any
-  client that speaks MCP, which also mirrors every write into Spectron. Requires
-  the ``mcp`` extra.
+  client that speaks MCP. Requires the ``mcp`` extra. Configure Spectron and it
+  also offers ``brain_recall`` and mirrors every write into it; that half is
+  optional and needs the ``spectron`` extra plus an API key.
 * :mod:`surrealfs.integrations.claude` — the Claude plugin around that server:
   ``.claude-plugin/plugin.json``, the ``.mcp.json`` that launches it, and
-  ``skills/brain/``. No Python at all, which is the point — the server above is
-  client-agnostic.
+  ``skills/brain/`` and ``skills/brain-memory/``. No Python at all, which is the
+  point — the server above is client-agnostic.
 
 The first four are generated from the registry in :mod:`surrealfs.tools`;
 ``claude`` has no tools of its own, being packaging around ``mcp``.
