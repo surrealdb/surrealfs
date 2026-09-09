@@ -44,9 +44,10 @@ the filesystem enforces it — never put brain material there.
 
 ## How to work
 
-1. **Files first, always.** `ls` the folders the question touches and `cat` what
-   looks relevant. `search` when you do not know the filename. This is the current
-   state and it is cheap.
+1. **Every claim comes from a file you read.** If something already told you which
+   paths matter, `cat` those; otherwise `ls` the folders the question touches and
+   read what looks relevant, or `search` when you do not know the filename. The
+   files are the current state, and reading them is cheap.
 2. **Answer with citations.** Name the file each claim came from. A claim no file
    backs up is a claim to check, not to report.
 3. **Write the outcome back.** A plan, a decision, an updated risk. Anything you
