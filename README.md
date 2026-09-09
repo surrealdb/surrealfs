@@ -6,6 +6,7 @@
 
 <h1 align="center">SurrealDB filesystem</h1><br/>
 <p align="center">A filesystem-based memory layer for agents, with hybrid search, backed by SurrealDB.</p>
+<p align="center"><img src="https://img.shields.io/badge/status-beta-f2a33c.svg?style=flat-square" alt="Beta" /></p>
 
 <br>
 
@@ -36,6 +37,11 @@
     &nbsp;
     <a href="https://www.youtube.com/@SurrealDB"><img src="https://img.shields.io/badge/youtube-subscribe-fc1c1c.svg?style=flat-square"></a>
 </p>
+
+> [!WARNING]
+> **SurrealFS is in beta.** The API, schema, and CLI may change in breaking ways
+> between releases, and it is not yet recommended for production use. Bug
+> reports and feedback are very welcome.
 
 Give an agent somewhere durable to keep its work. SurrealFS is a `file` table
 plus the tools to hand it to a model: files and folders, full-text and semantic
