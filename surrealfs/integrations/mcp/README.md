@@ -154,11 +154,16 @@ someone who paid for one is the worse failure.
 
 ### `brain_recall`, the sixteenth tool
 
-It queries agent memory, not the filesystem: it answers what the current files no
-longer say — a superseded version of a file, entities and relationships extracted
-out of the prose, context filed by a session you never saw. It takes a question,
-not a keyword, and each hit is labelled with the SurrealFS path it was filed from
-so you can open the file next.
+It queries agent memory, not the filesystem, and it is the tool to reach for
+*first*: it answers across every version ever filed plus the entities and
+relationships extracted out of the prose, including context filed by a session you
+never saw, and each hit is labelled with the SurrealFS path it was filed from. One
+question therefore names the files worth opening, which `ls` only finds a folder at
+a time. It takes a question, not a keyword.
+
+Because nothing is ever replaced, a hit may be a superseded version of the file it
+names — so recall locates and the file confirms: `cat` the path a hit names before
+reporting current state, and answer from recall alone only for history and why.
 
 ### Mirroring on write
 

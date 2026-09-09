@@ -3,9 +3,10 @@
 A plugin that bundles [the SurrealFS MCP server](../mcp/README.md) with two
 skills: the fifteen filesystem tools, `/brain` for working in the shared company
 brain, and `/brain-memory` for the optional [agent
-memory](../mcp/README.md#optional-agent-memory) behind it. Agent memory is a hosted
-service with an API key; without one the plugin is complete and `/brain` is the
-whole story.
+memory](../mcp/README.md#optional-agent-memory) behind it — which, when it is
+configured, is where a question starts, because one recall names the files to open.
+Agent memory is a hosted service with an API key; without one the plugin is
+complete and `/brain` is the whole story.
 
 This page is the Claude-specific half — installing, and where Desktop differs.
 **What the server reads, what the tools are, and how to check it works all live

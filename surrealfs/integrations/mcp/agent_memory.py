@@ -43,8 +43,8 @@ __all__ = ["DEFAULT_URL", "configured", "mirror", "recall", "scope"]
 
 TIMEOUT = 30.0
 RECALL_K = 8
-# Long enough for a chunk to make its point, short enough that eight of them do
-# not crowd out the files the skill has already read.
+# Long enough for a chunk to make its point, short enough that eight of them leave
+# room for the files those hits point at, which get read next.
 SNIPPET_CHARS = 500
 DEFAULT_URL = "https://srv1.spectron.aws-usw2.surreal.cloud"
 DEFAULT_SCOPE = "brain"

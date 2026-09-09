@@ -65,10 +65,12 @@ CONFIG_NAME = "env"
 MIRRORED = frozenset({"write_file", "edit", "touch"})
 
 RECALL_DESCRIPTION = """\
-Recall from agent memory, the memory layer behind SurrealFS. Use it *after* reading
-the relevant files, not instead: it answers what the filesystem no longer says --
-superseded versions of a file, entities and relationships extracted out of the
-prose, context filed by someone else's session. Ask a question, not a keyword."""
+Recall from agent memory, the memory layer behind SurrealFS. Ask it *before* reading
+files, not after: it answers across every version ever filed plus the entities and
+relationships extracted out of the prose, including context filed by someone else's
+session, and labels each hit with the SurrealFS path it came from -- so it tells you
+which files to open. A hit can be a superseded version, so `cat` the path it names
+before reporting current state. Ask a question, not a keyword."""
 
 RECALL_SCHEMA: dict[str, Any] = {
     "type": "object",

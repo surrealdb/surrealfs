@@ -145,6 +145,18 @@ into `configured()` — a memory layer that silently files nothing for someone w
 did sign up is the worse failure. `run_tool` still answers `brain_recall` when
 unconfigured, for a client holding a tool list from before the key went away.
 
+**Recall comes first and the file confirms it, but only two surfaces may say so.**
+With a key, one `brain_recall` names the files worth opening — every hit is
+labelled with the path `mirror` filed it under — where `ls` finds the same thing a
+folder at a time, so `brain-memory/SKILL.md` and `RECALL_DESCRIPTION` both put
+recall ahead of reading. They must be edited together: `RECALL_DESCRIPTION` is the
+only ordering signal a non-Claude client gets. `brain/SKILL.md` cannot join them —
+it may not mention memory at all — so it is written *ordering-neutral* rather than
+files-first: it requires every claim to come from a file that was read, and does
+not say when to go looking. And because agent memory replaces no document, a hit
+can be a superseded version of the file it names, which is why the rule is recall
+to locate, `cat` to confirm, and recall alone only for history and why.
+
 **The `mcp` extra is what to install; `claude` is an alias for it.** A plugin
 copies `.mcp.json` in at install time, so every already-installed plugin keeps
 asking `uvx` for `surrealfs[claude] @ git+…`. Dropping the extra would break them
