@@ -116,7 +116,7 @@ Six ways to hand it to an agent, each with its own README:
 | **[Hermes](surrealfs/integrations/hermes/README.md)**                    | the 14 `surrealfs_*` tools plus a bundled notes skill                 | core                     |
 | **[Hermes memory](surrealfs/integrations/hermes_memory/README.md)**      | files every completed turn, and recalls context before each one       | core                     |
 | **[MCP](surrealfs/integrations/mcp/README.md)**                          | the 16 tools over stdio, for Claude, Cursor, Zed, Codex or your own    | `surrealfs[mcp]`         |
-| **[Claude](surrealfs/integrations/claude/README.md)**                    | that server as a plugin, bundled with the `/brain` skill              | `surrealfs[mcp]`         |
+| **[Claude](surrealfs/integrations/claude/README.md)**                    | that server as a plugin, bundled with the `/brain` skill              | `surrealfs[mcp,agent-memory]` |
 
 The four tool surfaces are generated from one registry in
 `surrealfs/tools/`, so they cannot drift apart. Tool descriptions are markdown in

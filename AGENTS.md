@@ -149,7 +149,10 @@ unconfigured, for a client holding a tool list from before the key went away.
 copies `.mcp.json` in at install time, so every already-installed plugin keeps
 asking `uvx` for `surrealfs[claude] @ git+…`. Dropping the extra would break them
 all at their next launch, with nothing in any log but a build failure — hence
-`claude = ["surrealfs[mcp]"]` in `pyproject.toml`. It has no expiry.
+`claude = ["surrealfs[mcp,agent-memory]"]` in `pyproject.toml`. It has no expiry.
+The alias pulls the memory extra even though `mcp` does not: the plugin exists to
+be a brain, and resolved without `httpx` it wrote files and mirrored none of them,
+with the `_httpx()` error reaching no log.
 
 **Never turn a `RecordID` into a string with `str()`.** `parent_key` is a stored
 string the schema fills with a server-side `<string>$this.parent`, which never

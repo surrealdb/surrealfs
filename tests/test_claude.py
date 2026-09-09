@@ -62,4 +62,7 @@ def test_the_plugin_manifest_matches_the_marketplace_and_the_skill():
     # The default source lives in the shell, which does support it, and a local
     # clone must stay redirectable.
     assert "SURREALFS_SOURCE:=git+https://github.com/surrealdb/surrealfs.git" in script
-    assert "surrealfs[mcp] @ $SURREALFS_SOURCE" in script
+    # With `agent-memory`, not a bare `mcp`: resolved without httpx the plugin
+    # writes files and mirrors none of them, and `_httpx()` says so only inside
+    # a tool result -- no log anywhere carries it.
+    assert "surrealfs[mcp,agent-memory] @ $SURREALFS_SOURCE" in script

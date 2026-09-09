@@ -132,7 +132,7 @@ build the plugin does not point at — means editing
       "command": "/Users/you/.local/bin/uvx",
       "args": [
         "--from",
-        "surrealfs[mcp] @ git+https://github.com/surrealdb/surrealfs.git",
+        "surrealfs[mcp,agent-memory] @ git+https://github.com/surrealdb/surrealfs.git",
         "surrealfs-mcp"
       ]
     }
@@ -144,7 +144,9 @@ The file lives at `~/Library/Application Support/Claude/claude_desktop_config.js
 on macOS and `%APPDATA%\Claude\claude_desktop_config.json` on Windows. No `env`
 block is needed — the server reads `~/.config/surrealfs/env` however it is
 launched. Note the absolute `uvx`, and the explicit `git+…` source: `surrealfs`
-is not on PyPI yet, so a bare `surrealfs[mcp]` cannot resolve.
+is not on PyPI yet, so a bare `surrealfs[mcp]` cannot resolve. Keep
+`agent-memory` in the extras if you file into agent memory: without it every
+mirror raises, and only the tool result says so.
 
 A connector added this way brings no skill with it, so add them separately:
 Settings → Capabilities → Skills, pointed at [`skills/brain/`](skills/brain) and,
