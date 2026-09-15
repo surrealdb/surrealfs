@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { json } from "../api";
 import type { Entry, Hit } from "../types";
 import { FileTree } from "./FileTree";
+import { SignedIn } from "./SignedIn";
 
 interface Results {
     hybrid: boolean;
@@ -58,6 +59,7 @@ export function Sidebar({
                 <Text size="xs" tt="uppercase">
                     <span className="brand-mark">SurrealFS browser</span>
                 </Text>
+                <SignedIn />
             </Box>
 
             <Stack gap="xs" p="sm" style={{ borderBottom: "1px solid var(--mantine-color-obsidian-7)" }}>

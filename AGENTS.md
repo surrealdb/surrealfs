@@ -21,7 +21,9 @@ surrealfs/
   tools/            args.py, handlers.py, registry, docs/*.md
   browser/          the `surrealfs-browser` web UI — the Starlette JSON API,
                     the React page under ui/ (built into the gitignored
-                    static/), its chat agent, and the CLI in __main__.py
+                    static/), its chat agent, and the CLI in __main__.py.
+                    sso.py is the same app with a login (`surrealfs-browser-sso`),
+                    deployed by deploy/cloudflare/
   integrations/     _connect.py (env connection, shared by the browser and the
                     Hermes surfaces), and one dir per integration, each with its
                     own README.md: pydantic_ai/, json_tools/, hermes/ (plugin +
@@ -266,6 +268,44 @@ but the asset is emitted when the module is loaded, which happens before the unu
 bindings are dropped — 31 MB of build output. `pruneUnreferencedAssets` in
 `ui/vite.config.ts` deletes what no chunk or stylesheet names, which takes it to 2 MB.
 Fonts survive because the bundled CSS references them.
+
+**`new_session()` replays the connection's token, so the socket the SSO browser
+serves requests on must never be signed in.** SurrealDB 3.x multiplexes sessions
+over one WebSocket (`AsyncSurreal.new_session()` → `attach`), which is how
+`browser/sso.py` gives each request its own identity for three RPCs instead of a
+new connection. But a fresh session inherits the *connection's* token when there
+is one — so on a socket signed in as root, an `authenticate()` that raised would
+leave a **root** session behind, and the failure would open the whole tree rather
+than close it. With nothing to replay, an unauthenticated session has no identity
+at all and the `file` clause denies everything. `Sessions` therefore holds an
+unauthenticated connection, and the system credential lives on a second one used
+only by `reindex_embeddings`. `tests/test_browser_sso.py` asserts the empty read.
+
+**An SSO assertion cannot be handed to SurrealDB; it has to be re-minted.**
+SurrealDB finds the access method for a third-party JWT from its `ns`, `db` and
+`ac` claims and takes the record from `id`. A Cloudflare Access token has none of
+them, so `browser/sso.py` verifies the assertion and signs a fresh 15m HS512
+token. This looks like an avoidable hop and is not — verified against 3.2.3. The
+secret must be ≥64 bytes (HMAC-SHA512's block size); `apply_sso_access` and
+`Identity` both refuse a shorter one rather than let PyJWT warn.
+
+**`sso.surql`'s `AUTHENTICATE` must check `record::exists($auth)`.** With `id` in
+the token SurrealDB binds `$auth` before the clause runs and does *not* check the
+row is there, so without it `user:ghost` gets a working session and can own
+`/home/ghost`. Same squatting hole the missing SIGNUP clause exists to avoid.
+
+**`on_error` looks up the status by `isinstance`, not `type(exc)`.** An exact-type
+lookup in `STATUS` gives any *subclass* of a mapped error the 500 fallback —
+which is how `sso.Unauthenticated`, a `PermissionDenied`, first reported as a
+server fault instead of a denial. The hierarchy in `errors.py` is flat, so at most
+one entry matches.
+
+**Identity is checked in middleware, not in the session factory.** `chat` returns
+a `StreamingResponse` whose body runs after the handler returns and catches
+everything inside it to report errors down the stream — so a denial raised there
+would arrive as a 200 with an error frame rather than a 403. `Gate` verifies once,
+before any handler, and leaves the name in `request.scope`; `request.state` would
+not survive `BaseHTTPMiddleware` building its own Request.
 
 **The browser's `.env` must be found with `find_dotenv(usecwd=True)`.** Plain
 `load_dotenv()` walks up from the *calling module's* directory, not the working

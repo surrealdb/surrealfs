@@ -168,6 +168,27 @@ The server binds loopback. `--host 0.0.0.0` exposes it, and then anyone who can
 reach the port has whatever access those credentials do. The page has no login
 of its own.
 
+### …with a login
+
+For a team rather than a laptop there is a second browser, and the same page:
+
+```bash
+pip install "surrealfs[browser-sso]"
+surrealfs-browser-sso
+```
+
+It sits behind SSO — Cloudflare Access in the deployment we ship — and signs
+each request in as the person who made it, so **SurrealDB** enforces the owner
+and mode bits rather than the process being trusted. Other people's private
+homes are not merely unreadable, they are absent.
+
+`deploy/cloudflare/` is a wrangler project that puts it on a Cloudflare
+Container, and its README has the setup. `docs/permissions.md` has the reasoning,
+including why an identity provider's token has to be re-minted before SurrealDB
+will take it. Users are provisioned by an admin (`python -m surrealfs.users add
+alice`); there is deliberately no self-registration, because `/home/<name>`
+belongs to the name it carries.
+
 The page is a React app built on the [SurrealDB UI Kit][ui-kit]. Its source is
 in `surrealfs/browser/ui/`, and the build output it serves is gitignored, so
 working on this repo needs [bun][bun]:

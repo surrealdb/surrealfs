@@ -45,6 +45,17 @@ ui-dev:
 browser *ARGS: ui
     uv run --extra browser python -m surrealfs.browser {{ARGS}}
 
+# Loopback only: `--dev-identity` turns SSO off, so it is refused on any other
+# bind. Needs `schema --record-auth --sso` and a provisioned user first.
+# Browse as USER with the authenticated browser, on http://127.0.0.1:7933
+browser-sso USER: ui
+    uv run --extra browser-sso python -m surrealfs.browser.sso \
+        --host 127.0.0.1 --dev-identity {{USER}}
+
+# Deploy that browser to Cloudflare. See deploy/cloudflare/README.md.
+deploy: ui
+    cd deploy/cloudflare && npx wrangler deploy
+
 # Run the MCP server over stdio, as an MCP client launches it.
 # `agent-memory` too: the repo .env this dotenv-loads carries a key, and a key without
 # that extra is refused. Drop it to see the filesystem-only surface.

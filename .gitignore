@@ -26,3 +26,8 @@ node_modules/
 # Test caches
 .pytest_cache/
 .ruff_cache/
+
+# The wrangler project's dependencies; `npm install` in deploy/cloudflare.
+deploy/cloudflare/node_modules/
+deploy/cloudflare/.wrangler/
+deploy/cloudflare/worker-configuration.d.ts

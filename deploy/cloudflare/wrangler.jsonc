@@ -1,0 +1,46 @@
+{
+    "$schema": "node_modules/wrangler/config-schema.json",
+    "name": "surrealfs-browser",
+    "main": "worker.ts",
+    "compatibility_date": "2026-09-01",
+
+    // The Worker is a doorway, not the app: it forwards every request to the
+    // container and nothing else. The Starlette app inside is the same one
+    // `surrealfs-browser-sso` runs locally, so there is no second implementation
+    // of the API to keep in step -- see deploy/cloudflare/README.md.
+    "containers": [
+        {
+            "class_name": "BrowserContainer",
+            "image": "./Dockerfile",
+            // The build needs the whole checkout: pyproject.toml, the surrealfs
+            // package, and the vite output in surrealfs/browser/static. Without
+            // this the context would be this directory, which holds none of it.
+            "image_build_context": "../..",
+            "instance_type": "basic",
+            // One instance holds one WebSocket to SurrealDB and multiplexes a
+            // session per request onto it, so this is about concurrency, not
+            // about isolation between users -- the database provides that.
+            "max_instances": 3
+        }
+    ],
+
+    "durable_objects": {
+        "bindings": [{ "name": "BROWSER", "class_name": "BrowserContainer" }]
+    },
+
+    // Containers require the SQLite-backed Durable Object storage; the classic
+    // `new_classes` form is rejected for them.
+    "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BrowserContainer"] }],
+
+    // Non-secret configuration only. Everything that is a credential --
+    // SURREALDB_PASS, SURREALFS_SSO_SECRET, OPENAI_API_KEY, ANTHROPIC_API_KEY --
+    // goes in with `wrangler secret put` and is read from `env` by worker.ts.
+    "vars": {
+        "SURREALFS_SSO_ISSUER": "https://CHANGEME.cloudflareaccess.com",
+        "SURREALFS_SSO_JWKS": "https://CHANGEME.cloudflareaccess.com/cdn-cgi/access/certs",
+        "SURREALFS_SSO_AUD": "CHANGEME-the-access-application-aud-tag",
+        "SURREALDB_URL": "wss://CHANGEME.surreal.cloud/rpc",
+        "SURREALDB_NAMESPACE": "surrealfs",
+        "SURREALDB_DATABASE": "demo"
+    }
+}

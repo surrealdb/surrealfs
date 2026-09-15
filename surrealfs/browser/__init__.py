@@ -25,7 +25,8 @@ from __future__ import annotations
 import json
 import os
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -89,6 +90,13 @@ SESSIONS = "/_sessions"
 # chat() prefixes each user message with whatever was open at the time. Strip it
 # back out so a reloaded transcript shows what the user actually typed.
 OPEN_FILE_NOTE = re.compile(r"^\[The user has .*? open in the file browser\.\]\n\n")
+
+Session = Callable[[Request], AbstractAsyncContextManager["SurrealFs"]]
+"""Resolves the `SurrealFs` a request acts through, and releases it afterwards.
+
+`one_user` is the trivial one. `browser/sso.py` returns a different identity per
+request, which is the whole of the difference between the two browsers.
+"""
 
 
 def _session_path(first_message: str) -> str:
@@ -165,13 +173,43 @@ def _entry_json(entry: Any) -> dict[str, Any]:
     }
 
 
-class Browser:
-    """Route handlers over one `SurrealFs`."""
+def one_user(fs: SurrealFs) -> Session:
+    """A session factory that hands every request the same `SurrealFs`.
 
-    def __init__(self, fs: SurrealFs, embed: Any = None, agent: Any = None) -> None:
-        self.fs = fs
+    What the plain `surrealfs-browser` runs on: one credential, one identity,
+    no login. `browser/sso.py` passes a factory that opens a database session
+    per request instead, authenticated as whoever signed in.
+    """
+
+    @asynccontextmanager
+    async def session(request: Request) -> AsyncIterator[SurrealFs]:
+        yield fs
+
+    return session
+
+
+class Browser:
+    """Route handlers over a `SurrealFs` resolved per request.
+
+    The indirection is what lets one set of handlers serve both browsers. It is
+    a factory rather than an argument because an authenticated request has a
+    database session to close afterwards, which only a context manager can do.
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        embed: Any = None,
+        agent: Any = None,
+        indexer: SurrealFs | None = None,
+    ) -> None:
+        self.session = session
         self.embed = embed
         self.agent = agent
+        # Re-embedding reads every text file, so it is root-only by design and
+        # cannot run as the person who happens to have made the request. Held
+        # apart from `session` for that reason: it is never a request's handle.
+        self.indexer = indexer
 
     async def page(self, request: Request) -> Response:
         return FileResponse(INDEX)
@@ -179,13 +217,15 @@ class Browser:
     async def tree(self, request: Request) -> Response:
         # ponytail: whole tree in one request; paginate if a DB ever holds
         # thousands of files. ls(recursive=True) is a BFS over the child index.
-        entries = await self.fs.ls("/", recursive=True)
+        async with self.session(request) as fs:
+            entries = await fs.ls("/", recursive=True)
         return JSONResponse([_entry_json(e) for e in entries])
 
     async def raw(self, request: Request) -> Response:
         path = _param(request, "path")
-        entry = await self.fs.stat(path)
-        data = await self.fs.read_bytes(path)
+        async with self.session(request) as fs:
+            entry = await fs.stat(path)
+            data = await fs.read_bytes(path)
         # This serves agent-authored HTML from our own origin. nosniff stops a
         # text/plain file being re-read as script; `CSP: sandbox` drops the
         # response into an opaque origin so it cannot touch the browser UI even
@@ -202,36 +242,40 @@ class Browser:
     async def save(self, request: Request) -> Response:
         body = await request.json()
         path = body["path"]
-        entry = await self.fs.stat(path)
-        saved = await self.fs.write_text(
-            path, body["content"], content_type=entry.content_type
-        )
+        async with self.session(request) as fs:
+            entry = await fs.stat(path)
+            saved = await fs.write_text(
+                path, body["content"], content_type=entry.content_type
+            )
         await self._reindex()
         return JSONResponse(_entry_json(saved))
 
     async def create(self, request: Request) -> Response:
         body = await request.json()
         path = body["path"]
-        if await self.fs.exists(path):
-            raise AlreadyExists(f"Already exists: {path}")
-        if body.get("folder"):
-            entry = await self.fs.mkdir(path, parents=True)
-        else:
-            # Not touch(): it hardcodes text/plain, so a new .md would open in
-            # the plain editor with no preview toggle. write_text sniffs the
-            # extension instead.
-            entry = await self.fs.write_text(path, "")
+        async with self.session(request) as fs:
+            if await fs.exists(path):
+                raise AlreadyExists(f"Already exists: {path}")
+            if body.get("folder"):
+                entry = await fs.mkdir(path, parents=True)
+            else:
+                # Not touch(): it hardcodes text/plain, so a new .md would open
+                # in the plain editor with no preview toggle. write_text sniffs
+                # the extension instead.
+                entry = await fs.write_text(path, "")
         return JSONResponse(_entry_json(entry))
 
     async def move(self, request: Request) -> Response:
         body = await request.json()
-        entry = await self.fs.mv(body["src"], body["dst"])
+        async with self.session(request) as fs:
+            entry = await fs.mv(body["src"], body["dst"])
         return JSONResponse(_entry_json(entry))
 
     async def delete(self, request: Request) -> Response:
         path = _param(request, "path")
         recursive = request.query_params.get("recursive") == "1"
-        removed = await self.fs.rm(path, recursive=recursive)
+        async with self.session(request) as fs:
+            removed = await fs.rm(path, recursive=recursive)
         await self._reindex()
         return JSONResponse({"removed": removed})
 
@@ -242,7 +286,8 @@ class Browser:
 
         # The fusion lives in the library, so the agent's `search` tool and this
         # box rank identically.
-        hits = await self.fs.search(query, vector=await self._embed(query), limit=20)
+        async with self.session(request) as fs:
+            hits = await fs.search(query, vector=await self._embed(query), limit=20)
         results = [{**_entry_json(hit.entry), "snippet": hit.snippet} for hit in hits]
         return JSONResponse({"hybrid": self.embed is not None, "results": results})
 
@@ -268,43 +313,53 @@ class Browser:
 
         # The conversation lives in the file, not in this process: an absent
         # `session` starts a new one, and the page adopts the path we return.
-        # ponytail: the whole history goes back to the model every turn. Trim the
-        # middle of it if a conversation ever outgrows the context window.
-        session = body.get("session")
-        history = (
-            ModelMessagesTypeAdapter.validate_json(await self.fs.read_bytes(session))
-            if session
-            else []
-        )
+        transcript = body.get("session")
 
         async def stream() -> AsyncIterator[bytes]:
             messages: list[Any] = []
             try:
-                async with self.agent.run_stream_events(
-                    message,
-                    # Read `self.embed` per turn: it is set to None if the
-                    # provider ever fails, and the tool must follow.
-                    deps=ToolContext(fs=self.fs, embed=self.embed),
-                    message_history=history,
-                ) as events:
-                    async for event in events:
-                        if isinstance(event, AgentRunResultEvent):
-                            messages = event.result.all_messages()
-                        elif (payload := _stream_event(event)) is not None:
-                            yield _line(payload)
-                # write_bytes, not write_text: `search_text` and
-                # `reindex_embeddings` both filter on the row's `content`, which
-                # this leaves unset -- so transcripts cost no embeddings and stay
-                # out of note search, while /raw still serves them to the viewer.
-                # `messages` is empty only if the run ended without a result
-                # event; writing that would blank an existing transcript.
-                stored_at = session or _session_path(body["message"])
-                if messages:
-                    await self.fs.write_bytes(
-                        stored_at,
-                        ModelMessagesTypeAdapter.dump_json(messages),
-                        content_type="application/json",
+                # Inside the generator, not around it: a StreamingResponse body
+                # runs *after* the handler returns, so a database session opened
+                # out here would already be closed by the time the agent ran.
+                async with self.session(request) as fs:
+                    # ponytail: the whole history goes back to the model every
+                    # turn. Trim the middle if a conversation ever outgrows the
+                    # context window.
+                    history = (
+                        ModelMessagesTypeAdapter.validate_json(
+                            await fs.read_bytes(transcript)
+                        )
+                        if transcript
+                        else []
                     )
+                    async with self.agent.run_stream_events(
+                        message,
+                        # Read `self.embed` per turn: it is set to None if the
+                        # provider ever fails, and the tool must follow. `fs` is
+                        # this request's, so the agent's tools act as whoever
+                        # asked -- and are refused what they may not touch.
+                        deps=ToolContext(fs=fs, embed=self.embed),
+                        message_history=history,
+                    ) as events:
+                        async for event in events:
+                            if isinstance(event, AgentRunResultEvent):
+                                messages = event.result.all_messages()
+                            elif (payload := _stream_event(event)) is not None:
+                                yield _line(payload)
+                    # write_bytes, not write_text: `search_text` and
+                    # `reindex_embeddings` both filter on the row's `content`,
+                    # which this leaves unset -- so transcripts cost no
+                    # embeddings and stay out of note search, while /raw still
+                    # serves them to the viewer. `messages` is empty only if the
+                    # run ended without a result event; writing that would blank
+                    # an existing transcript.
+                    stored_at = transcript or _session_path(body["message"])
+                    if messages:
+                        await fs.write_bytes(
+                            stored_at,
+                            ModelMessagesTypeAdapter.dump_json(messages),
+                            content_type="application/json",
+                        )
                 # The agent writes files, so the search index is now stale.
                 await self._reindex()
                 yield _line(
@@ -312,7 +367,7 @@ class Browser:
                     # the session it already had. The page re-renders what it
                     # accumulated from the deltas as markdown; the reply does not
                     # come back a second time.
-                    {"done": True, "session": stored_at if messages else session}
+                    {"done": True, "session": stored_at if messages else transcript}
                 )
             except Exception as exc:  # noqa: BLE001 -- any failure, same answer
                 # The 200 is already on the wire, so failures have to ride the
@@ -321,9 +376,10 @@ class Browser:
 
         return StreamingResponse(stream(), media_type="application/x-ndjson")
 
-    async def session(self, request: Request) -> Response:
+    async def transcript(self, request: Request) -> Response:
         """One stored conversation, as the bubbles the chat panel draws."""
-        raw = await self.fs.read_bytes(_param(request, "path"))
+        async with self.session(request) as fs:
+            raw = await fs.read_bytes(_param(request, "path"))
         return JSONResponse(_transcript(ModelMessagesTypeAdapter.validate_json(raw)))
 
     async def _embed(self, text: str) -> Any:
@@ -343,10 +399,10 @@ class Browser:
         every text file to embed it, which is not a thing `--user alice` may do.
         Semantic *search* still works for them against what root has indexed.
         """
-        if self.embed is None or not self.fs.is_root:
+        if self.embed is None or self.indexer is None or not self.indexer.is_root:
             return
         try:
-            await self.fs.reindex_embeddings(self.embed, version=INDEXER_VERSION)
+            await self.indexer.reindex_embeddings(self.embed, version=INDEXER_VERSION)
         except Exception as exc:  # noqa: BLE001
             # A dead embedding provider must not fail the write that just
             # succeeded, nor take the server down.
@@ -362,19 +418,37 @@ def on_error(request: Request, exc: Exception) -> Response:
     # class catches every SurrealFs error subclass.
     if isinstance(exc, KeyError):  # a request body missing a required field
         return JSONResponse({"error": f"missing field: {exc}"}, status_code=400)
-    status = STATUS.get(type(exc), 400 if isinstance(exc, ValueError) else 500)
+    # isinstance, not `STATUS[type(exc)]`: an exact-type lookup gives a subclass
+    # of a mapped error the 500 fallback instead of its parent's status, which
+    # is how `sso.Unauthenticated` -- a `PermissionDenied` -- first reported as a
+    # server fault rather than a denial. The hierarchy in `errors.py` is flat, so
+    # at most one entry ever matches.
+    status = next(
+        (code for kind, code in STATUS.items() if isinstance(exc, kind)),
+        400 if isinstance(exc, ValueError) else 500,
+    )
     return JSONResponse({"error": str(exc)}, status_code=status)
 
 
-def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
-    b = Browser(fs, embed, agent)
+def assemble(
+    b: Browser,
+    routes: list[Any] | None = None,
+    middleware: list[Any] | None = None,
+) -> Starlette:
+    """The Starlette app around a `Browser`, with one route table.
+
+    Both browsers come through here so the page cannot be served a different API
+    depending on which one is running: `sso.py` adds routes and middleware, it
+    does not restate these.
+    """
     app = Starlette(
         routes=[
+            *(routes or []),
             Route("/", b.page),
             Route("/raw", b.raw),
             Route("/api/tree", b.tree),
             Route("/api/search", b.search),
-            Route("/api/session", b.session),
+            Route("/api/session", b.transcript),
             Route("/api/chat", b.chat, methods=["POST"]),
             Route("/api/move", b.move, methods=["POST"]),
             Route("/api/file", b.save, methods=["PUT"]),
@@ -388,10 +462,16 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
                 StaticFiles(directory=STATIC / "assets", check_dir=False),
             ),
         ],
+        middleware=middleware or [],
         exception_handlers={SurrealFsError: on_error, KeyError: on_error},
     )
     app.state.browser = b
     return app
+
+
+def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
+    """The single-identity browser: every request acts as `fs`."""
+    return assemble(Browser(one_user(fs), embed, agent, indexer=fs))
 
 
 async def serve(host: str = "127.0.0.1", port: int = 7933) -> None:

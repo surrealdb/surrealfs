@@ -2,6 +2,7 @@
 
     python -m surrealfs.schema
     python -m surrealfs.schema --record-auth
+    SURREALFS_SSO_SECRET=... python -m surrealfs.schema --record-auth --sso
     python -m surrealfs.schema --url ws://localhost:8000/rpc --namespace notes
     python -m surrealfs.schema --print          # dump the DDL, connect to nothing
 
@@ -17,7 +18,7 @@ import asyncio
 import os
 import sys
 
-from . import apply_schema, schema_sql
+from . import apply_schema, apply_sso_access, schema_sql
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -58,6 +59,13 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "enforces the file permissions itself (see docs/permissions.md)",
     )
     parser.add_argument(
+        "--sso",
+        action="store_true",
+        help="also define the `sso` record access, so a browser can sign people "
+        "in with a JWT minted from an SSO assertion. Implies --record-auth, and "
+        "needs SURREALFS_SSO_SECRET (see surrealfs/browser/sso.py)",
+    )
+    parser.add_argument(
         "--print",
         action="store_true",
         dest="print_only",
@@ -74,15 +82,41 @@ async def _apply(args: argparse.Namespace) -> None:
         await db.signin({"username": args.username, "password": args.password})
         await db.use(args.namespace, args.database)
         await apply_schema(db, record_auth=args.record_auth)
+        if args.sso:
+            await apply_sso_access(db, _sso_secret())
     finally:
         await db.close()
+
+
+def _sso_secret() -> str:
+    """The signing key for the `sso` access, or a message saying how to make one."""
+    secret = os.environ.get("SURREALFS_SSO_SECRET", "")
+    if not secret:
+        raise ValueError(
+            "--sso needs SURREALFS_SSO_SECRET: the key the browser signs its "
+            "minted tokens with. Generate one with `openssl rand -base64 48` and "
+            "give the same value to `surrealfs-browser-sso`."
+        )
+    return secret
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
 
+    # The `sso` access authenticates a `user` record, so the table it names has
+    # to exist. Implied rather than required, so that the pairing cannot be got
+    # wrong: `--sso` alone would otherwise apply DDL that can never authenticate.
+    if args.sso:
+        args.record_auth = True
+
     if args.print_only:
         print(schema_sql(record_auth=args.record_auth))
+        if args.sso:
+            # Printed, not bundled into schema_sql: it is applied with a bound
+            # parameter, so this is DDL to read rather than DDL to pipe.
+            from . import SSO_SCHEMA
+
+            print(SSO_SCHEMA)
         return 0
 
     try:
@@ -93,6 +127,8 @@ def main(argv: list[str] | None = None) -> int:
 
     target = f"{args.namespace}/{args.database} on {args.url}"
     tables = "file + user" if args.record_auth else "file"
+    if args.sso:
+        tables += " + sso access"
     print(f"Applied schema ({tables}) to {target}")
     return 0
 

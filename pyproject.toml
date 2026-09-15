@@ -64,6 +64,12 @@ browser = [
     "python-dotenv>=1",
     "openai>=2.0",
 ]
+# The same browser with a login (`surrealfs-browser-sso`), for a deployment in
+# front of a team rather than a laptop. `pyjwt[crypto]` does both halves of the
+# identity swap and is the only thing it adds: RS256 verification of the SSO
+# assertion (which needs `cryptography`, hence the extra) and HS512 signing of
+# the short-lived SurrealDB token minted from it. See `surrealfs/browser/sso.py`.
+browser-sso = ["surrealfs[browser]", "pyjwt[crypto]>=2.8"]
 demo = [
     "pydantic-ai-slim[web,anthropic]>=2.0",
     "anthropic>=0.40",
@@ -74,6 +80,10 @@ demo = [
 
 [project.scripts]
 surrealfs-browser = "surrealfs.browser.__main__:main"
+# The authenticated browser. A separate script rather than a flag: it needs an
+# identity provider in front of it, and a deployment that forgot to configure
+# one should fail to start rather than serve the whole tree to anyone.
+surrealfs-browser-sso = "surrealfs.browser.sso:main"
 # What an MCP client launches over stdio. See
 # `surrealfs/integrations/mcp/README.md`.
 surrealfs-mcp = "surrealfs.integrations.mcp:main"
@@ -97,6 +107,8 @@ dev = [
     "mcp>=2.1",
     "httpx>=0.27",
     "python-dotenv>=1",
+    # So `just test` exercises tests/test_browser_sso.py instead of skipping it.
+    "pyjwt[crypto]>=2.8",
 ]
 
 [build-system]

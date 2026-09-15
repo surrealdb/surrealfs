@@ -289,6 +289,74 @@ kind of leak a shared-index search engine has by construction. If a deployment
 ever needs corpus statistics to be per-tenant too, the answer is a table per
 tenant, not a scorer in the client.
 
+## SSO, on top of record auth
+
+`surrealfs-browser-sso` is the one surface where the person asking is not the
+process asking. It signs each request in as a *record* user, so everything above
+applies unchanged -- the browser adds identity, not a second permission model.
+
+### The identity provider's token is not the database's
+
+SurrealDB routes a third-party JWT to an access method by its `ns`, `db` and
+`ac` claims, and takes the record from `id`. A Cloudflare Access assertion -- or
+a Google or Okta id_token -- carries none of those. So the assertion cannot be
+forwarded to `authenticate()` whatever its signature says, and the browser
+verifies it itself and mints a 15-minute SurrealDB token from the verified
+email. `schema/sso.surql` is the access that trusts it.
+
+That is a constraint, not a preference, but it buys two things worth having. The
+mint is where "this person was never provisioned" becomes a readable 403 instead
+of an empty result six layers down. And the database's trust is in one secret we
+rotate, not in the identity provider's key rotation.
+
+### `AUTHENTICATE` must check the row exists
+
+With `id` in the token SurrealDB binds `$auth` **before** `AUTHENTICATE` runs,
+and without checking that the record is there. A token naming `user:ghost`
+therefore yields a working session for somebody who was never provisioned:
+`fn::sfs_me()` returns `ghost`, and `fn::sfs_home_ok` would let them create and
+own `/home/ghost`. That is the squatting hole the missing SIGNUP clause exists
+to avoid, so `sso.surql` closes it too -- `IF record::exists($auth)`, else THROW.
+`tests/test_browser_sso.py` asserts the THROW.
+
+### The socket serving requests is never signed in
+
+`new_session()` multiplexes a session per request over one WebSocket, and
+**replays the connection's own token when it has one**. On a socket signed in as
+root, an `authenticate()` that raised would therefore leave a *root* session
+behind -- the failure would open the tree rather than close it.
+
+So there are two connections, and the split is the whole safety argument. The
+one requests are served on is never authenticated at all: a session that fails
+to authenticate has no identity, `fn::sfs_me()` is NONE, and the clause denies
+everything. The other holds a system credential and is used for exactly one
+thing, `reindex_embeddings`, which is root-only for the reason given above. It
+is never handed to a request, and it is not opened at all unless there is an
+embedding key to justify it.
+
+### An email is not a username
+
+`/home/<name>` belongs to the name it carries and there is no `chown`, so
+mapping two people to one name is permanent. An Access policy can admit more
+than one domain, which makes the local part alone unsafe: `alice@contractor.com`
+would land in `alice@corp.com`'s home.
+
+The default is therefore the whole address slugged -- `alice-corp-com`.
+`SURREALFS_SSO_DOMAIN=corp.com` shortens exactly that one domain to `alice`, and
+everyone else keeps the long form, so turning it on cannot create a collision.
+It privileges one domain and names it.
+
+### What SSO does not change
+
+Provisioning is still an admin operation (`python -m surrealfs.users add`), the
+password access `account` still exists for agents and the CLI, and the two-layer
+split in the table above is untouched: the request still goes through
+`SurrealFs`, so the exact mode bits are enforced in Python and the database
+remains the backstop. A future "simplification" of this browser into a thin
+SurrealQL proxy would quietly drop the strict half -- writes are
+reachability-only in the clause, deliberately.
+
+
 ## Known ceilings
 
 Both are marked `ponytail:` where they live.
