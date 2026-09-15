@@ -648,8 +648,8 @@ name = "httpcore2"
 version = "2.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "h11" },
-    { name = "truststore" },
+    { name = "h11", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
+    { name = "truststore", marker = "python_full_version < '3.12' or python_full_version >= '3.14' or sys_platform != 'emscripten'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/be/ad/f4f0e57345f1870f3e8cb624e058d7eca6e5a27d33bcc3311d9b618734cd/httpcore2-2.12.0.tar.gz", hash = "sha256:9293522bba0aa7c4c8e9e3f040c16575bd8868e155a77fa30c7a9085a5eae648", size = 67548, upload-time = "2026-08-18T13:22:08.211Z" }
 wheels = [
@@ -1813,6 +1813,7 @@ browser = [
     { name = "uvicorn" },
 ]
 claude = [
+    { name = "httpx" },
     { name = "mcp" },
     { name = "python-dotenv" },
 ]
@@ -1862,7 +1863,7 @@ requires-dist = [
     { name = "python-dotenv", marker = "extra == 'mcp'", specifier = ">=1" },
     { name = "starlette", marker = "extra == 'browser'", specifier = ">=0.37" },
     { name = "surrealdb", specifier = "==3.0.0b8" },
-    { name = "surrealfs", extras = ["mcp"], marker = "extra == 'claude'" },
+    { name = "surrealfs", extras = ["mcp", "agent-memory"], marker = "extra == 'claude'" },
     { name = "uvicorn", marker = "extra == 'browser'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'demo'", specifier = ">=0.30" },
 ]
