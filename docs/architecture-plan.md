@@ -14,7 +14,19 @@ This revision keeps every workstream from v1 and adds to it. The main changes:
 4. **New workstreams**: optimistic concurrency via `generation` (§1.3), server-side history, provenance and undo (§7), derived links and frontmatter metadata (§8.3, §8.4), agent-facing tool additions such as `grep` (§15), and retrieval evals (§3.2).
 5. **Design notes** added to branching, FUSE, the control plane, xattrs, the graph, section embeddings and watchers. They record interactions with the existing schema that the implementation has to respect.
 6. **Verified engine behaviour** (Appendix A): the SurrealDB 3.2.4 semantics this plan relies on, re-tested on `3.2.4+20260803.93ab219`, including new results: `EVENT`s can abort writes with `THROW` and write history into client-locked tables, `$access` scopes service principals, and a hash-keyed `generation` counter supports compare-and-swap.
-7. Upstream contributions (§19) and the roadmap (§20) are extended to cover the above.
+7. Upstream contributions (§25) and the roadmap (§26) are extended to cover the above.
+
+## Revision Notes (v3)
+
+v3 keeps everything in v2 and adds six sections, §19 to §24; the upstream and roadmap sections move to §25 and §26.
+
+1. **Large files & content-addressed storage** (§19): content-defined chunking, BLAKE3-addressed chunks with scoped deduplication, tiered storage (inline, SurrealDB buckets, object stores via presigned URLs), resumable parallel uploads, range reads, sparse files, transparent zstd compression, and quotas with instant `du`.
+2. **The automatic understanding pipeline** (§20): a job queue driven by writes; content-based type, language and encoding detection; type-aware chunking for code, documents, spreadsheets, notebooks, transcripts and more; rolled-up folder digests that never leak private files; token-aware reads; a `pack` tool for token budgets; auto-tagging and entity extraction; near-duplicate warnings.
+3. **Languages & code intelligence** (§21): per-language full-text analyzers, multilingual and code-specific embeddings, a symbol index with navigation tools, broad tree-sitter coverage, git import/history/remote helper, and notebooks and tabular files as queryable data.
+4. **Additional interfaces** (§22): WebDAV, NFSv3 loopback, an S3-compatible API, VS Code and JetBrains, Obsidian, a TUI, Raycast/Alfred, Slack/Teams bots, SFTP and a PWA/mobile app, all connecting as the end user's own principal.
+5. **Connectors, webhooks & export** (§23): Drive, Notion, Confluence, Slack, email, GitHub and more mirrored as permission-mapped folders; signed webhooks dispatched as their owner; export and import at any point in time.
+6. **Trust, sharing & operations** (§24): groups, share links on bearer access, at-rest and per-folder end-to-end encryption (with its search trade-off stated), retention and legal hold, incremental backups and point-in-time restore, and OpenTelemetry observability.
+7. New tools in §15, new upstream asks in §25, new roadmap phases 6 to 9 in §26, and four more verified engine behaviours (A.13 to A.16) plus new open questions in Appendix A.
 
 ---
 
@@ -28,7 +40,10 @@ This revision keeps every workstream from v1 and adds to it. The main changes:
                                   │  • History, provenance & undo (EVENT-written)            │
                                   │  • Swarm Advisory Leases (`file_lock`) & CRDTs           │
                                   │  • Streaming Blob Storage (`file_chunk`, 512 KB)         │
+                                  │  • Content-addressed chunks, dedup & blob tiers          │
+                                  │  • Understanding pipeline (detect, chunk, digest, pack)  │
                                   │  • Hierarchical AST Embeddings (`file_section`, HNSW)    │
+                                  │  • Per-language analyzers & symbol index                 │
                                   │  • Distributed Event Bus (Live Queries & Global Inotify) │
                                   └──────────────▲─────────────▲─────────────▲───────────────┘
                                                  │             │             │
@@ -71,6 +86,8 @@ This revision keeps every workstream from v1 and adds to it. The main changes:
 
 Every arrow into the core is an authenticated principal. No surface in this diagram holds a root, namespace or database credential at runtime; see §2.
 
+Not drawn, for space: the v3 surfaces of §22 (WebDAV, NFS loopback, S3 API, SFTP, VS Code, JetBrains, Obsidian, TUI, launchers, chat bots, PWA) and the connectors of §23. Each sits beside the Rust CLI and connects the same way.
+
 ---
 
 ## Executive Summary
@@ -79,7 +96,7 @@ SurrealFS bridges the fundamental impedance mismatch between how AI agents work 
 - **For Agents**: It presents as a familiar Unix filesystem with folders, files, paths, atomic diff edits, and shell-friendly navigation, extended with zero-copy workspace branching, semantic knowledge graph traversal, conflict-free concurrent editing, undo, and an in-mount synthetic control plane (`.surrealfs/`).
 - **For Humans & Infrastructure**: It is an ACID-compliant, multi-model, vector-indexed database in SurrealDB 3.x that persists across container lifecycles, branches deterministically, syncs across distributed nodes in real-time, and **enforces unix permissions inside the database itself**, so every client, in every language, is exactly as trustworthy as the schema.
 
-This plan details the full evolution of SurrealFS: a **server-side security model**, a **pure Python client library**, a **native TypeScript/JavaScript SDK**, a **high-performance Rust CLI & FUSE POSIX mounter**, a **Deterministic Simulation Testing (DST)** suite, **Zero-Copy Branching and Time-Travel**, **History, Provenance & Undo**, **Living Multi-Modal Projections**, **Fine-Grained AST Vector Embeddings**, **Client-Transparent Distributed CRDTs**, **Cross-Machine Inotify/Mailboxes**, **Zero-Privilege Runtimes (WASI & `LD_PRELOAD` Shim)**, a **native macOS Menubar Application**, and the **Spatial Brain Studio Canvas**.
+This plan details the full evolution of SurrealFS: a **server-side security model**, a **pure Python client library**, a **native TypeScript/JavaScript SDK**, a **high-performance Rust CLI & FUSE POSIX mounter**, a **Deterministic Simulation Testing (DST)** suite, **Zero-Copy Branching and Time-Travel**, **History, Provenance & Undo**, **Living Multi-Modal Projections**, **Fine-Grained AST Vector Embeddings**, **Client-Transparent Distributed CRDTs**, **Cross-Machine Inotify/Mailboxes**, **Zero-Privilege Runtimes (WASI & `LD_PRELOAD` Shim)**, **Content-Addressed Large-File Storage**, an **Automatic Understanding Pipeline**, **Multi-Language & Code Intelligence**, **WebDAV, NFS, S3, SFTP, editor, Obsidian, chat and mobile interfaces**, **Permission-Mapped Connectors**, **Groups, Sharing, Encryption, Retention & Backups**, a **native macOS Menubar Application**, and the **Spatial Brain Studio Canvas**.
 
 ---
 
@@ -122,7 +139,7 @@ DEFINE FIELD chunk_index ON file_chunk TYPE int;
 DEFINE FIELD bytes       ON file_chunk TYPE bytes;
 DEFINE INDEX idx_file_chunk ON file_chunk FIELDS file_id, chunk_index UNIQUE;
 ```
-`rm` of a chunked file must delete its chunks in the same transaction (or via a `DELETE` EVENT on `file`), otherwise chunks outlive the permission row they derive from.
+`rm` of a chunked file must delete its chunks in the same transaction (or via a `DELETE` EVENT on `file`), otherwise chunks outlive the permission row they derive from. v3 turns this table into a manifest over content-addressed blobs, with content-defined rather than fixed boundaries; see §19.
 
 #### 3. `file_lock` Table (Swarm Advisory Leases)
 Prevents concurrent agents in a swarm from overwriting each other's work:
@@ -662,6 +679,7 @@ Full-file embeddings degrade search precision on large codebases and documents. 
 - Code files (`.rs`, `.py`, `.ts`, `.go`) are parsed with Tree-sitter into syntactic units (functions, structs, classes, modules).
 - Markdown files are split along heading boundaries (`#`, `##`, `###`).
 - Chunks populate the `file_section` table with exact line ranges (`line_start`, `line_end`) and vector embeddings.
+- v3 generalises this to every content type, chosen automatically from the detected type and language; see §20.3 and §21.4.
 
 ### 10.2 Surgical Retrieval in Search & MCP
 Instead of handing 50KB files to an agent, `search_semantic` returns the exact section match with surrounding context, slashing LLM prompt token consumption by up to 80%:
@@ -833,7 +851,17 @@ Implemented natively in the Rust CLI for sub-5ms cold starts, while keeping full
    - `search_graph(path, relation, depth)`: Query semantic file dependencies.
    - *(new)* `backlinks(path)` (§8.3).
 4. **History Tools** *(new)*: `history`, `diff`, `restore`, `undelete` (§7.4).
-5. **Tool contract changes** *(new)*:
+5. **Understanding, code & data tools** *(new in v3)*:
+   - `pack(question, budget, scope)`: the best material that fits a token budget (§20.6).
+   - `digest(path)`: the folder's rolled-up summary (§20.4).
+   - `outline(path)`: sections and symbols with line ranges and token counts (§20.5).
+   - `symbols(path)`, `definition(name)`, `references(name)`, `callers(fn)`, `implementations(trait)` (§21.3).
+   - `entities(query)` and `mentions(entity)` (§20.7).
+   - `query_table(path, where, limit)` for tabular files (§21.6).
+   - `du(path)` and `quota()` (§19.6).
+   - `share(path, expires, mode)` and `revoke_share(id)` (§24.2).
+   - Write results carry near-duplicate warnings (§20.8); `cat` of an oversized file returns its outline (§20.5).
+6. **Tool contract changes** *(new)*:
    - Reads return `generation`; `edit` and `write_file` accept `if_generation`, filled in automatically from the session's last read.
    - Errors carry the `sfs:*` codes, and each tool's `docs/*.md` explains what to do on each (re-read on `sfs:conflict`; "not found or not permitted" on `sfs:not_found`).
    - Adding tools follows the existing convention: an entry in `surrealfs/tools/__init__.py`, an args model, a handler, a `docs/<kebab-name>.md`, and `provides_tools` in `integrations/hermes/plugin.yaml`; `tests/test_tools.py` keeps every surface in sync. The Hermes `surrealfs_` prefix applies to every new name.
@@ -956,7 +984,301 @@ A lightweight, native SwiftUI application for the macOS status bar.
 
 ---
 
-## 19. Upstream SurrealDB Engine Contributions
+## 19. Large Files & Content-Addressed Storage *(new)*
+
+§1.1's `file_chunk` splits large files into fixed 512 KB segments. v3 turns that into a content-addressed chunk store, so large files, history (§7) and branches (§6) cost only the bytes that actually changed.
+
+### 19.1 Content-Defined Chunking
+- Chunk boundaries come from a rolling hash over the content (**FastCDC**, min 256 KB / average 1 MB / max 4 MB), not from fixed offsets. Inserting a byte near the start of a file changes one or two chunks instead of shifting every chunk after it.
+- Small text files (below 256 KB) stay inline in `file.content`/`file.file` as today, so the common agent case is unchanged and FULLTEXT indexing keeps working on `content`.
+- Chunking happens in the client (Rust crate, TS SDK, Python library) before upload, which is also where compression (§19.5) and hashing happen. The server never needs to re-chunk.
+
+### 19.2 Content Addressing & Deduplication
+A chunk's id is the hash of its uncompressed bytes (BLAKE3), and a file is a manifest of chunk ids:
+```surrealql
+-- One row per distinct chunk. The id *is* the hash: blob:⟨b3:9f2c…⟩.
+DEFINE TABLE OVERWRITE blob SCHEMAFULL
+    -- Never readable directly: bytes are reached only through a manifest the caller can read.
+    PERMISSIONS FOR select, create, update, delete NONE;
+DEFINE FIELD size       ON blob TYPE int;
+DEFINE FIELD stored     ON blob TYPE int;            -- bytes after compression
+DEFINE FIELD codec      ON blob TYPE string;         -- 'none' | 'zstd'
+DEFINE FIELD tier       ON blob TYPE string;         -- 'inline' | 'bucket' | 'object'
+DEFINE FIELD bytes      ON blob TYPE option<bytes>;  -- inline tier only
+DEFINE FIELD location   ON blob TYPE option<string>; -- bucket path or object key
+DEFINE FIELD refs       ON blob TYPE int DEFAULT 0;  -- maintained by manifest events
+DEFINE FIELD scope      ON blob TYPE string;         -- dedup scope, see below
+
+-- v1's file_chunk becomes the manifest: which blob holds which byte range.
+DEFINE FIELD offset     ON file_chunk TYPE int;
+DEFINE FIELD length     ON file_chunk TYPE int;
+DEFINE FIELD blob       ON file_chunk TYPE record<blob>;
+DEFINE INDEX idx_chunk_offset ON file_chunk FIELDS file_id, offset;
+```
+- **History and branches become cheap.** A new version whose manifest shares 99% of its chunks with the previous one stores 1% new bytes. A branch fork (§6) copies manifests, not bytes.
+- **Whole-file hash.** `file.hash` for a chunked file is the hash over its ordered chunk ids (a Merkle root), so `generation` (§1.1) and embedding staleness work for large and binary files too. This closes the "`hash` covers only `content`" gap noted in §1.1.
+- **Dedup is a side channel, so it is scoped.** Cross-user deduplication lets anyone test whether some exact content exists anywhere (upload it and watch whether the server already had it). `blob.scope` is the owner (or the tenant, by configuration), and dedup happens only within a scope. The upload protocol never tells a client that a chunk already exists outside its own scope; a client can skip uploading only chunks its own scope already holds.
+- **Garbage collection.** `refs` is kept by `CREATE`/`DELETE` events on `file_chunk` and on `file_version` manifests (A.8: event writes bypass the caller's permissions, so a user can release a reference without being able to touch `blob`). A collector principal deletes zero-ref blobs after a grace period, which also protects in-flight uploads.
+
+### 19.3 Tiered Blob Storage
+| Tier | Where | When |
+|---|---|---|
+| `inline` | `blob.bytes` in SurrealDB | chunks of files below a size threshold, and every chunk in small deployments |
+| `bucket` | a SurrealDB `DEFINE BUCKET` | the default for large files where the deployment's bucket backend is suitable |
+| `object` | S3, R2, GCS or Azure Blob, with the key in `blob.location` | very large files, cold history, and deployments that already run an object store |
+
+- `DEFINE BUCKET` works on 3.2.4 behind `--allow-experimental files` (A.13): `f'b:/path'.put(...)`, `.get()` and `.head()` behave as expected on the `memory` backend. Which persistent backends are production-ready, and whether bucket permissions can be derived from a `file` row, needs verifying before it becomes the default tier.
+- For the `object` tier, the database stores only keys. Reads and writes go through **presigned URLs** issued by a small blob gateway that authenticates the end user, asks SurrealDB (as that user) for the manifest, and signs URLs only for chunks in a manifest the user could read. The object store therefore needs no permission rules of its own, and a URL leaks one chunk for a few minutes at most.
+- A background mover migrates blobs between tiers by age and access frequency, with no change visible to readers.
+
+### 19.4 Uploads, Range Reads & Sparse Files
+- **Resumable, parallel uploads.** `fn::sfs_upload_begin(path, size, chunk_ids)` returns which chunks are missing (within the caller's dedup scope); clients upload missing chunks in parallel and in any order; `fn::sfs_upload_commit(upload_id, if_generation)` swaps the manifest in one transaction. Readers see the old file until commit and the new one after, never a mix. An `upload` table records progress, so a dropped connection resumes where it stopped; abandoned uploads expire.
+- **Range reads.** `fn::sfs_read_bytes(path, offset, length)` finds the covering chunks through `idx_chunk_offset` and returns only those, which is what FUSE `read()`, WebDAV/S3 `Range:` requests and video seeking need.
+- **Sparse files.** A hole is a range with no manifest entry, and reads return zeros for it. `stat` reports both the logical size and the allocated size, so a 10 GB file with holes stores only its data.
+
+### 19.5 Transparent Compression
+- Each chunk is compressed with **zstd** before upload, unless its content is already compressed (detected by magic bytes and entropy: images, video, audio, archives, most office formats). The hash is taken over the *uncompressed* bytes, so dedup is independent of the codec.
+- Compression is invisible: every read path decompresses, and `stat` reports the logical size.
+
+### 19.6 Quotas & Usage
+- A `usage` table keeps running counters per owner and per folder (files, logical bytes, stored bytes after dedup and compression), updated by events on `file` and `file_chunk`. `du` is then a single row read instead of a tree walk.
+- A quota is a row per owner or folder. `FOR create` and the upload commit check `fn::sfs_quota_ok`, so a quota is enforced by the database like everything else in §2. Deduplicated bytes count once per scope.
+- `.surrealfs/stats` and `surrealfs du` expose the counters; Brain Studio and the menubar app show them.
+
+---
+
+## 20. The Automatic Understanding Pipeline *(new)*
+
+Everything in this section happens without anybody asking for it. A write enqueues work; workers running as scoped principals (§2.3) do it; results land as derived rows that inherit the source file's permissions.
+
+### 20.1 The Job Queue
+```surrealql
+DEFINE TABLE OVERWRITE sfs_job SCHEMAFULL PERMISSIONS FOR select, create, update, delete WHERE $access IN ['indexer', 'projector'];
+DEFINE FIELD file_id    ON sfs_job TYPE record<file>;
+DEFINE FIELD kind       ON sfs_job TYPE string;  -- detect | chunk | embed | digest | extract | dedup | symbols
+DEFINE FIELD source_hash ON sfs_job TYPE string;
+DEFINE FIELD leased_by  ON sfs_job TYPE option<string>;
+DEFINE FIELD lease_until ON sfs_job TYPE option<datetime>;
+DEFINE FIELD attempts   ON sfs_job TYPE int DEFAULT 0;
+DEFINE INDEX idx_job_unique ON sfs_job FIELDS file_id, kind, source_hash UNIQUE;
+```
+- An event on `file` creates jobs when `hash` changes. The unique index makes enqueueing idempotent, so a burst of writes to one file queues one job per kind per content version, and a job for a superseded hash is skipped.
+- Workers lease jobs with an expiry (the `file_lock` pattern), retry with backoff, and record failures on the file (`meta.pipeline_errors`) rather than dropping them.
+- The pipeline stages run in dependency order: detect, then chunk, then embed, symbols and extract in parallel, then digest and dedup.
+
+### 20.2 Type & Language Detection
+- Detect from **content**, not the extension: magic bytes first (PDF, images, archives, office formats, SQLite, Parquet), then text heuristics (shebangs, modelines, structure), then a code classifier for ambiguous text, with the extension as a tie-break only.
+- For natural-language text, detect the **language** (fastText-style `lid` model) and the **encoding** (normalising to UTF-8 on the way in, keeping the original bytes when they were not UTF-8).
+- Store the results on the row: `content_type`, `language` (for example `de`, `ja`, `python`, `rust`), `encoding`, `is_generated` (§21.5). Every later stage keys off these fields.
+
+### 20.3 Automatic, Type-Aware Chunking
+The chunker picks a strategy from `content_type` and `language`, and fills `file_section` (§1.1) with line or byte ranges and, where it applies, a heading path:
+
+| Content | Strategy |
+|---|---|
+| Source code | tree-sitter: functions, methods, classes, modules; oversized units split at nested boundaries; a file-level unit carries imports and top-level docs |
+| Markdown, reStructuredText, AsciiDoc | heading hierarchy, with the heading path (`Architecture > Auth > Tokens`) stored for display and search |
+| HTML | readability extraction, then headings |
+| PDF | pages, then the extracted structure (headings, tables) from the §9 projection |
+| Word, PowerPoint, Google-export formats | sections and slides, through the §9 projection |
+| Spreadsheets | one unit per sheet plus row windows with the header row repeated in each |
+| CSV, TSV, Parquet | schema and statistics as one unit, then row windows with headers |
+| Jupyter notebooks | cells, with outputs excluded from embeddings and kept for display |
+| Transcripts | speaker turns, merged up to a target size |
+| JSON, YAML, TOML | top-level keys, recursively for large documents |
+| Logs | time windows |
+| Anything else | line windows with overlap |
+
+- Targets are measured in tokens (§20.5), not characters, so chunks fit embedding models and context windows predictably.
+- Re-chunking is incremental: unchanged units keep their `file_section` rows and embeddings (matched by content hash), so editing one function re-embeds one function.
+
+### 20.4 Rolled-Up Folder Digests
+- Each folder has a generated **digest**: what the folder is for, its notable files, recent changes and open questions, built from its files' summaries and its subfolders' digests (the RAPTOR pattern). An agent landing in `/projects/acme` reads one digest instead of fifty files.
+- Staleness is a Merkle hash over the children's hashes, so a change deep in the tree marks every ancestor digest stale. Rebuilds are debounced and run bottom-up, so a burst of writes rebuilds each ancestor once.
+- **A digest must not leak what its readers cannot see.** A folder's readers may not be able to read every file in it. A digest therefore summarises only children readable by every principal who can read the folder (in a shared folder, the world-readable children; in a folder private to one owner, all of them), and states "N private files not summarised". Private material appears only in digests of folders that are themselves private to the same owner.
+- Digests are exposed as `.surrealfs/digest/<path>`, as the `digest(path)` tool (§15), and at the top of `ls` output when the folder has one.
+
+### 20.5 Token-Aware Reads
+- The pipeline records token counts per file and per section for each tokenizer family in use (stored as `meta.tokens`).
+- `stat` and `ls` report them. `cat` on a file larger than a configurable budget returns its **outline** (sections, symbols, sizes) and tells the model to use `read_range`, instead of truncating silently or flooding the context.
+
+### 20.6 Context Packing
+- `pack(question, budget, scope)` returns the best material that fits a token budget: hybrid search over sections, expanded with backlinks and derived links (§8.3), symbols (§21.3) and the relevant folder digests, deduplicated, ordered by relevance, and cut to fit.
+- Output is a list of `path:line_start-line_end` blocks with their text, so every claim stays traceable to a file, as the `brain` skill requires.
+- Implemented as `fn::sfs_pack` where possible, so every client gets the same packing; the permission filter applies to every candidate, as in search.
+
+### 20.7 Auto-Tagging & Entity Extraction
+- The pipeline extracts tags into `file.meta.tags` and entities (people, companies, systems, projects, tickets) into an `entity` table, linked by a `mentions` relation.
+- An entity is visible only through files the caller can read: `entity` rows carry no content of their own, and `mentions` edges use the both-ends rule from §1.1. Otherwise a name mentioned only in a private file would leak through the shared entity list.
+- Entities make the graph (§8) useful on day one ("everything that mentions Okta") and feed `pack` and Brain Studio's canvas.
+
+### 20.8 Near-Duplicate Detection
+- On every write, compare the file's MinHash/SimHash signature (cheap, lexical) and its embedding (semantic) against existing files.
+- Close matches come back as a **warning** in the write result ("this looks 94% like `/notes/okta-risk.md`"), never a rejection. This matters because the bundled skill tells agents to search before writing, and a duplicate that slips past search pollutes the brain.
+- The warning names only files the writer can read.
+
+---
+
+## 21. Languages & Code Intelligence *(new)*
+
+### 21.1 Per-Language Full-Text Analyzers
+Today `idx_file_content` stems every file with `snowball(english)`, so German, French or Japanese text is tokenised as if it were English. v3 routes each row to an analyzer that matches its detected language (§20.2):
+```surrealql
+DEFINE ANALYZER OVERWRITE sfs_de   TOKENIZERS blank, class FILTERS lowercase, snowball(german);
+DEFINE ANALYZER OVERWRITE sfs_cjk  TOKENIZERS blank FILTERS ngram(1,2);
+DEFINE ANALYZER OVERWRITE sfs_code TOKENIZERS class, camel FILTERS lowercase;
+
+-- One stored field per language family, populated only for rows in that language.
+DEFINE FIELD OVERWRITE text_de ON file TYPE option<string>
+    VALUE IF language = 'de' THEN content ELSE NONE END;
+DEFINE INDEX OVERWRITE idx_text_de ON file FIELDS text_de FULLTEXT ANALYZER sfs_de BM25;
+```
+- Verified on 3.2.4 (A.14, A.15): the German analyzer stems "Häuser" to `haus`; the CJK analyzer emits uni- and bi-grams for 東京都; the code analyzer splits `getUserById` into `get user by id`; and a language field populated only for matching rows gives each index exactly its own rows.
+- `fn::sfs_search_text` queries the index for the query's detected language plus the language-neutral `sfs_code` and `simple` indexes, and fuses them with RRF, so a mixed-language corpus is searched correctly without the caller choosing.
+- Each row stores one extra copy of its text, in its own language's field. Avoiding that copy needs per-row analyzer selection upstream (§25).
+- Code gets its own analyzer with no stemming: identifiers split on case and underscores, so `grep`-like lookups of `verify_token` and `verifyToken` both work in ranked search.
+
+### 21.2 Multilingual Embeddings
+- The default embedder is multilingual, so a question in English finds a design doc in German. The model is recorded in `indexer_version` as today, and a model change triggers re-embedding through the job queue.
+- Code sections can use a code-specific embedding model, recorded per section, with the semantic arm querying each model's HNSW index and fusing results.
+
+### 21.3 Symbol Index & Code Navigation Tools
+```surrealql
+DEFINE TABLE OVERWRITE symbol SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR create, update, delete WHERE $access = 'indexer';
+DEFINE FIELD file_id    ON symbol TYPE record<file>;
+DEFINE FIELD name       ON symbol TYPE string;
+DEFINE FIELD qualified  ON symbol TYPE string;     -- auth.jwt.verify_token
+DEFINE FIELD kind       ON symbol TYPE string;     -- function | method | class | struct | trait | const | ...
+DEFINE FIELD language   ON symbol TYPE string;
+DEFINE FIELD signature  ON symbol TYPE option<string>;
+DEFINE FIELD doc        ON symbol TYPE option<string>;
+DEFINE FIELD line_start ON symbol TYPE int;
+DEFINE FIELD line_end   ON symbol TYPE int;
+DEFINE INDEX idx_symbol_name ON symbol FIELDS name;
+DEFINE INDEX idx_symbol_qualified ON symbol FIELDS qualified;
+-- Relations: calls, references_symbol, imports, inherits (IN symbol|file OUT symbol|file)
+```
+- Built from tree-sitter tags queries for every supported grammar (§21.4), so it works with no build and no toolchain.
+- Optional **language-server enrichment**: for a folder marked as a project, a worker materialises a checkout and runs the language's server to resolve cross-file references precisely. It is opt-in per project because it is heavy, and it writes to the same tables.
+- Tools (§15): `symbols(path)` (outline), `definition(name)`, `references(name)`, `callers(fn)`, `implementations(trait)`. Agents navigate code by symbol far more effectively than by grep, and `imports` edges feed the derived links of §8.3.
+
+### 21.4 Broad Grammar Coverage
+- Bundled tree-sitter grammars: Python, TypeScript, JavaScript, TSX/JSX, Rust, Go, Java, Kotlin, Scala, C, C++, C#, Swift, Objective-C, Ruby, PHP, Elixir, Erlang, Haskell, OCaml, Lua, R, Julia, Dart, Zig, SQL, SurrealQL, shell (bash, zsh, fish), PowerShell, HTML, CSS/SCSS, Vue, Svelte, Markdown, JSON, YAML, TOML, XML, HCL/Terraform, Dockerfile, Makefile, Nix, Protobuf, GraphQL.
+- Grammars load as WebAssembly modules, so the Rust, TypeScript and Python workers share one set and new languages ship without a release of every client.
+- Anything without a grammar falls back to line-window chunking (§20.3) and still gets full-text and semantic search.
+
+### 21.5 Git Awareness
+- **Import** a repository (`surrealfs import git <url> /projects/x`), respecting `.gitignore` and `.gitattributes`.
+- **History mapping**: each commit becomes a set of `file_version` rows (§7) with the commit sha, author, date and message, so `history`, `blame` and the timeline work on imported code with its real history.
+- **`git-remote-surrealfs`**: a git remote helper so `git clone surrealfs://brain/projects/x`, `git fetch` and `git push surrealfs main` work, with pushes applied as ordinary writes (and therefore permission-checked, versioned and indexed).
+- **Generated files**: lockfiles, build output, vendored code and minified bundles are classified (linguist-style rules plus `.gitattributes` `linguist-generated`), stay searchable by `grep`, and are excluded from embeddings, digests and entity extraction.
+
+### 21.6 Notebooks & Structured Data
+- `.ipynb`: chunked by cell (§20.3); outputs are stripped from embeddings and kept for display; `read_range` addresses cells.
+- CSV, TSV, Parquet, spreadsheets and SQLite: the §9 projector produces schema, statistics and a sample. Tabular files below a row limit are also loaded into a `file_row` table (file id, sheet, row index, data object) with permissions derived from the file, so an agent can ask `query_table(path, where, limit)` instead of reading the whole file. Larger files keep projector summaries and range reads.
+
+---
+
+## 22. Additional Interfaces *(new)*
+
+**One rule for every surface below:** each one authenticates the end user and connects to SurrealDB as that user's own principal (§2). No gateway holds a shared root credential, since that would turn the gateway into a permission bypass. External credentials (SSH keys, S3 access keys, WebDAV passwords, Slack user ids) map to principals through a `credential` table and a dedicated access method per kind, and revoking the credential row revokes the surface.
+
+### 22.1 WebDAV Server
+- `surrealfs serve webdav` (in the Rust binary). Finder, Windows Explorer, iOS and iPadOS Files, GNOME and KDE mount WebDAV natively, with no kernel extension, no macFUSE and no admin rights. This is the fastest route to "it's just a drive" for people.
+- WebDAV `LOCK`/`UNLOCK` map to `file_lock` (§1.1); ETags are `hash`; `If-Match` maps to `if_generation` (§1.3); `Range` maps to §19.4.
+- Client quirks to absorb: macOS writes `._*` AppleDouble files and `.DS_Store` (store their data as xattrs or in a hidden per-folder row, never as visible files); the Windows client caps file size by default and needs HTTPS for basic auth. Both are documented in the setup guide.
+
+### 22.2 NFSv3 Loopback Server
+- `surrealfs mount --nfs <dir>` runs a user-space NFSv3 server on localhost and mounts it with the OS's built-in NFS client, which gives a real Unix mount on macOS and Linux without FUSE or kernel extensions. Several user-space filesystems already take this route on macOS.
+- NFS is stateless, so file handles encode the record id plus `generation`; a handle to a replaced file returns `ESTALE`, which clients handle natively.
+
+### 22.3 S3-Compatible API
+- `surrealfs serve s3` exposes the tree through the S3 API: a bucket is a top-level folder (or a mount root), and keys are paths. Every data tool, backup system and SDK that speaks S3 can then read and write the brain.
+- SigV4 access keys map to principals (`credential` of kind `s3`), so permissions are still enforced by the database. Multipart uploads map to resumable uploads (§19.4); `ETag` is `hash`; `ListObjectsV2` is `ls`/`glob` with the permission filter.
+
+### 22.4 VS Code & JetBrains
+- A **VS Code extension** implementing `FileSystemProvider` for a `surrealfs://` scheme: browse, open, edit, rename and delete; file watching over live queries; a `TextSearchProvider` backed by `fn::sfs_search`; live collaborative editing through Yjs (§11); history and diff in the timeline view. It is built on the TypeScript SDK, so it also works in `vscode.dev` and GitHub Codespaces.
+- A **JetBrains** plugin through the IntelliJ virtual file system API, with the same features.
+
+### 22.5 Obsidian Plugin
+- Obsidian's model (a folder of markdown, wikilinks, backlinks, frontmatter) lines up almost exactly with the brain use case, and §8.3 and §8.4 already provide backlinks and frontmatter natively.
+- The plugin keeps a vault and a SurrealFS folder in live two-way sync (in the manner of Obsidian Sync), merging concurrent edits through Yjs (§11) so agents and a person can work on the same notes at once. It adds commands for semantic search, `pack`, history and restore inside Obsidian.
+
+### 22.6 Terminal UI & Launchers
+- `surrealfs ui`: a terminal UI (ratatui) for servers and SSH sessions, with a tree, preview, search, history, diff, leases and live activity.
+- **Raycast** and **Alfred** extensions: search the brain, open a file, and quick-capture a note into an inbox folder.
+
+### 22.7 Chat Bots (Slack, Teams)
+- Ask "what do we know about Okta?" in a channel and get an answer built with `pack` (§20.6), citing files by path.
+- Dropping a file in a channel (or reacting to a message with a chosen emoji) files it into a configured folder, and the pipeline indexes it.
+- **The bot must act as the asking user.** A bot with one service credential would answer anyone in the channel from files only some of them may read. Each Slack or Teams user maps to a principal (`credential` of kind `slack`), unmapped users get nothing, and answers in a shared channel are limited to what every channel member can read.
+
+### 22.8 SFTP Server
+- `surrealfs serve sftp`, with SSH keys mapped to principals, for legacy tools, scripts and partners who need a drop box. Large uploads use the chunked path (§19).
+
+### 22.9 Mobile App / PWA
+- Brain Studio (§16) as an installable **PWA** first: search, reading, history and digests, with an offline read cache.
+- **Voice notes** recorded in the app land as audio files, and the §9 projector turns them into transcripts, so they are searchable within seconds.
+- A native app later if push notifications, share-sheet capture and background sync justify it.
+
+---
+
+## 23. Connectors, Webhooks & Export *(new)*
+
+### 23.1 Connectors That Mirror External Sources as Files
+- Google Drive, Notion, Confluence, SharePoint/OneDrive, Slack exports, email (IMAP/Gmail), GitHub/GitLab issues and pull requests, Linear and Jira each appear as a folder under `/sources/<connector>/...`, kept in sync incrementally through each service's change feed.
+- Documents are stored in their most useful text form (Google Docs as markdown, Sheets as CSV plus sheet sections, issues as markdown with frontmatter), with the original link in `meta.source_url` and the source's id and version in `meta.source`.
+- Mirrors are **read-only** by default; a connector may opt in to write-back later.
+- **Source permissions carry over.** Each connector maps the source's ACLs onto owners, modes and groups (§24.1), per document, so a private Google Doc stays private to the same people in SurrealFS. Where an ACL cannot be represented, the connector falls back to the most restrictive mapping and records that in `meta`.
+- Connectors run as a `connector` principal that may write only under `/sources/<its name>/`. Deletions in the source propagate, and appear in history (§7) like any delete.
+- One interface for everything: agents use `ls`, `cat`, `search` and `pack` across all sources at once.
+
+### 23.2 Webhooks & Outbound Events
+- A `webhook` table (owner, path pattern, events, URL, secret). A dispatcher subscribes to the live-query stream **as the webhook's owner**, so a webhook only ever fires for files its owner can read.
+- Payloads are signed with HMAC and delivered with retries, backoff and a dead-letter record visible to the owner.
+- Delivery is never done with `http::` calls inside an `EVENT`: that would put a remote server's latency and failures inside every write transaction.
+
+### 23.3 Import & Export
+- `surrealfs export <path> [--as-of <time> | --version <tag>] --format tar|zip|git|dir` streams any folder at any point in time, so nothing is locked in. `git` export includes history as commits.
+- `surrealfs import` is symmetrical (directory, archive, git repository, or another SurrealFS), preserving timestamps and, where present, owners and modes.
+
+---
+
+## 24. Trust, Sharing & Operations *(new)*
+
+### 24.1 Groups
+- Group bits are stored today but never consulted (a ponytail in `docs/permissions.md`). Teams need a folder outsiders cannot see.
+- Schema: a `group` table, a `member_of` relation from `user` to `group` (admin-managed like users), and `file.group`. `fn::sfs_bits` consults the group digit when the caller is a member.
+- The hard part is `gate`, which today encodes "closed by this owner". It has to become "reachable by this owner or members of this group" without losing the single-column design; the proposal is to encode the gate as a small set of `owner:<x>`/`group:<y>` tokens and check membership with a set intersection. The permission tests (§2.5) must cover nested folders closed by different groups.
+
+### 24.2 Share Links
+- Expiring, read-only (or append-only, for drop boxes) links to one file or folder, for people without an account.
+- Implemented with SurrealDB bearer access (`DEFINE ACCESS share ON DATABASE TYPE BEARER FOR RECORD`), which issues revocable, expiring grants on 3.2.4 (A.16). The grant's subject is a `share` record naming the path and mode, and `fn::sfs_can_read` gains "or the caller is a share principal whose path is an ancestor of this row".
+- Link access is logged in history (§7); revoking the grant ends it immediately.
+
+### 24.3 Encryption
+- **At rest**: rely on encrypted storage for SurrealDB and server-side encryption for the object tier (§19.3). Transparent, and no feature is lost.
+- **End-to-end, per folder**, for material the server must not read: the client encrypts content (and optionally names) before upload, with a per-folder key wrapped for each member's public key.
+- The trade-off is explicit and shown in the UI: the server cannot search, embed, chunk, digest, deduplicate or extract from an encrypted folder. The pipeline skips such folders, and search results say "N encrypted folders not searched".
+
+### 24.4 Retention & Legal Hold
+- Retention policies per folder: keep every version for N days, prune older versions to daily or weekly snapshots, or keep everything.
+- A **legal hold** on a folder blocks deletion and version pruning under it, enforced in `FOR delete` and in the pruning job, and is itself recorded in history.
+
+### 24.5 Backups & Point-in-Time Restore
+- Because data is content-addressed chunks plus manifests plus versions, a backup is incremental by construction: ship new blobs and new rows since the last backup.
+- `surrealfs backup` / `surrealfs restore --as-of <time>` restores a folder or the whole tree to any point covered by retention, into place or into a new folder.
+
+### 24.6 Observability
+- OpenTelemetry traces and metrics from every client and worker: request latency, pipeline lag (time from write to searchable), queue depth, embedding cost, cache hit rates, upload throughput.
+- Server-side counters in `.surrealfs/stats` and per-principal usage for operators, and a health view in Brain Studio.
+
+---
+
+## 25. Upstream SurrealDB Engine Contributions
 
 To optimize SurrealFS further, the following enhancements should be contributed to the upstream `surrealdb/` engine:
 
@@ -972,10 +1294,14 @@ To optimize SurrealFS further, the following enhancements should be contributed 
 7. *(new)* **A second match reference on one field**: `content @1,OR@ $q AND content @2@ $q` silently ignores reference 2; either support it or reject it at parse time.
 8. *(new)* **Embedded engine computed fields**: the `surrealdb[embedded]` core returns `null` for COMPUTED fields on indexed reads, which blocks `mem://` for tests and for the WASI target (§13.2).
 9. *(new)* **In-database extension functions** that can run a Yjs merge, so CRDT materialisation (§11.4) can move into an `EVENT`.
+10. *(new in v3)* **Per-row analyzer selection** for a FULLTEXT index (an analyzer chosen by a field value such as `language`), removing the per-language copy of the text in §21.1.
+11. *(new in v3)* **Production bucket backends and derived permissions**: stable persistent and S3-compatible `DEFINE BUCKET` backends, and bucket permissions that can reference a record (so a chunk's readability can follow its `file` row), which would let §19.3's bucket tier replace the presigned-URL gateway.
+12. *(new in v3)* **Streaming byte ranges over RPC**, so range reads (§19.4) do not buffer whole chunks in the SDKs.
+13. *(new in v3)* **BLAKE3 in `crypto::`**, so the server can verify content-addressed chunk ids (§19.2) instead of trusting the client's hash.
 
 ---
 
-## 20. Execution Roadmap & Milestones
+## 26. Execution Roadmap & Milestones
 
 ```mermaid
 gantt
@@ -1018,6 +1344,41 @@ gantt
     Zero-privilege LD_PRELOAD shim & WASI   :p5_1, 2027-01-10, 14d
     Native SwiftUI macOS Menubar App        :p5_2, after p5_1, 14d
     Spatial Brain Studio 2.0 (Canvas)       :p5_3, after p5_2, 14d
+    section Phase 6: Storage at Scale
+    FastCDC chunking & blob manifests       :p6_1, 2026-11-02, 10d
+    Scoped dedup, refcounts & GC            :p6_2, after p6_1, 6d
+    Resumable uploads & range reads         :p6_3, after p6_1, 7d
+    zstd, sparse files, usage & quotas      :p6_4, after p6_3, 6d
+    Tiering: buckets, object store, gateway :p6_5, after p6_2, 10d
+    section Phase 7: Understanding & Languages
+    Job queue & type/language detection     :p7_1, 2026-11-09, 6d
+    Type-aware chunking (all formats)       :p7_2, after p7_1, 12d
+    Per-language analyzers & multilingual   :p7_3, after p7_1, 8d
+    Token counts, outlines & pack           :p7_4, after p7_2, 8d
+    Folder digests (permission-aware)       :p7_5, after p7_4, 7d
+    Entities, tags & near-duplicates        :p7_6, after p7_4, 8d
+    Symbol index & code tools               :p7_7, after p7_2, 10d
+    Git import, history & remote helper     :p7_8, after p7_7, 8d
+    Notebooks & tabular files               :p7_9, after p7_2, 6d
+    section Phase 8: Interfaces
+    WebDAV server                           :p8_1, 2026-12-01, 10d
+    VS Code FileSystemProvider              :p8_2, after p3_3, 10d
+    S3-compatible API                       :p8_3, after p8_1, 10d
+    NFSv3 loopback mount                    :p8_4, after p8_1, 10d
+    Obsidian sync plugin                    :p8_5, after p4_5, 10d
+    TUI, Raycast & Alfred                   :p8_6, after p8_1, 8d
+    Slack & Teams bots                      :p8_7, after p7_4, 8d
+    SFTP server                             :p8_8, after p8_3, 5d
+    JetBrains plugin                        :p8_9, after p8_2, 8d
+    PWA & voice notes                       :p8_10, after p5_3, 10d
+    section Phase 9: Connectors & Trust
+    Groups (gate token sets)                :p9_1, 2026-12-14, 10d
+    Share links (bearer access)             :p9_2, after p9_1, 5d
+    Connectors: Drive, Notion, Slack, email :p9_3, after p9_1, 20d
+    Webhooks & export/import                :p9_4, after p9_2, 8d
+    Retention, legal hold & backups         :p9_5, after p9_4, 8d
+    E2E encrypted folders                   :p9_6, after p9_5, 10d
+    OpenTelemetry & operator views          :p9_7, after p9_4, 6d
 ```
 
 **Dependencies** *(new)*:
@@ -1025,6 +1386,11 @@ gantt
 - `generation` (p1_6) precedes history (p1_7), leases (p3_2), FUSE base-version tracking (p2_2) and CRDTs (p4_5).
 - History (p1_7) precedes `--as-of`, `.snapshots/`, branching via versions (p4_1) and the timeline scrubber (p5_3).
 - Property tests (p1_9) start before the simulator (p3_1) and share its invariant definitions.
+- Content-addressed chunks (p6_1, p6_2) precede large-file support in FUSE (p2_2), WebDAV/S3/SFTP (p8_1, p8_3, p8_8) and backups (p9_5), and make history (p1_7) and branching (p4_1) cheap for binary files.
+- The job queue and detection (p7_1) precede every pipeline stage; type-aware chunking (p7_2) supersedes and absorbs the markdown/tree-sitter work in p4_3.
+- `pack` (p7_4) precedes the chat bots (p8_7); the TypeScript SDK (p3_3) precedes the VS Code extension (p8_2); CRDTs (p4_5) precede Obsidian sync (p8_5).
+- Groups (p9_1) precede connectors (p9_3), because source ACLs need groups to map onto.
+- Every Phase 8 surface depends on Phase 0: each maps its external credential to a record principal.
 
 ---
 
@@ -1034,7 +1400,7 @@ Tested on SurrealDB `3.2.4+20260803.93ab219`, as a record user signed in through
 
 | # | Behaviour | Result | Used by |
 |---|---|---|---|
-| A.1 | `FOR update WHERE <pred>` on a table | Evaluated against both the stored row and the proposed row; the write applies only if both pass. `$before` and `$after` are NONE inside the clause. | §2.2, §19.5 |
+| A.1 | `FOR update WHERE <pred>` on a table | Evaluated against both the stored row and the proposed row; the write applies only if both pass. `$before` and `$after` are NONE inside the clause. | §2.2, §25.5 |
 | A.2 | A denied `UPDATE`/`CREATE` | Returns `OK` with zero rows. No error. | §1.2, §2.3.5 |
 | A.3 | `DEFINE EVENT ... WHEN $event = 'UPDATE' ... THEN { THROW ... }` | The event sees `$before`, `$after` and `$auth`; `THROW` aborts the write and returns the message as an error. | §2.3.3, §7.1 |
 | A.4 | Field `PERMISSIONS FOR update WHERE $access = 'svc'` | A user signed in via access method `svc` can write the field; the same user shape via `acc` is silently reverted. | §2.3.2, §1.1 |
@@ -1042,9 +1408,17 @@ Tested on SurrealDB `3.2.4+20260803.93ab219`, as a record user signed in through
 | A.6 | `generation` as `VALUE IF $before IS NONE THEN 1 ELSE IF crypto::md5($this.content ?? '') != $this.hash THEN $before + 1 ELSE $before END`, with the existing hash EVENT | Increments on content change only (not on a same-content write, a metadata write, or the event's own `hash` write-back). `UPDATE ... WHERE generation = $g` applies once; the stale retry returns zero rows. In a field `VALUE`, `$before`/`$after`/`$value` are that field's previous value, and `$this` is the new row. | §1.1, §1.3 |
 | A.7 | Record links to deleted rows | A `record<...>` field keeps its value after the target is deleted; dereferencing it yields NONE. | §1.1 (`file_version`) |
 | A.8 | An `EVENT` fired by a record user writing to a table with `FOR create NONE`, and to a field with `FOR update WHERE false` | Both writes succeed; `$auth` inside the event is still the triggering user. An event's own writes fire events again (the `hash` write-back re-triggers `ON file` events). | §1.1, §7.1 |
+| A.13 | `DEFINE BUCKET b BACKEND 'memory'` with `--allow-experimental files`; `f'b:/x.txt'.put('hello')`, `.get()`, `.head()` | Works: `get` returns the bytes, `head` returns size and timestamp. | §19.3 |
+| A.14 | `search::analyze` with `snowball(german)`, `ngram(1,2)` and `TOKENIZERS class, camel` | `Die Häuser wurden gebaut` → `die haus wurd gebaut`; `東京都` → `東 東京 京 京都 都`; `getUserById parse_json` → `get user by id parse _ json`. | §21.1 |
+| A.15 | Per-language FULLTEXT indexes on `option<string>` fields populated only for matching rows | `text_de @@ 'Haus'` finds only the German row and `text_en @@ 'house'` only the English one. | §21.1 |
+| A.16 | `DEFINE ACCESS share ON DATABASE TYPE BEARER FOR RECORD DURATION FOR GRANT 7d, FOR SESSION 1h` and `ACCESS share GRANT FOR RECORD person:alice` | Issues a grant with a bearer key, an expiry seven days out and a revocation field. | §24.2 |
 | A.11 | `$session` contents | Fixed fields only: `ac`, `db`, `id`, `ip`, `ns`, `or`, `rd`, `tk` (the token claims). No custom fields. | §7.2 |
 
 **To verify before relying on it:**
 - **A.9** Whether COMPUTED fields (`path`, `gate`, `is_folder`) are present in `LIVE SELECT DIFF` payloads (§4.2).
 - **A.10** `EXPLAIN` for `(branch, parent_key, filename)` lookups (§6.3) and for section search with the permission predicate (§10.3).
 - **A.12** Whether connection-level parameters set with `let` are visible inside an `EVENT` body (§7.2).
+- **A.17** Which persistent `DEFINE BUCKET` backends are production-ready, and whether bucket `PERMISSIONS` can reference a `file` row (§19.3).
+- **A.18** Signing in with a bearer grant and reading its subject from a permission clause, and revocation taking effect on an open session (§24.2).
+- **A.19** The cost of `fn::sfs_quota_ok` inside `FOR create` on large trees, and whether `usage` counters updated by events conflict under concurrent writes (§19.6).
+- **A.20** That NONE-valued language fields contribute nothing to their FULLTEXT index's statistics (document count and length), so each language's BM25 is computed over its own rows only (§21.1).
