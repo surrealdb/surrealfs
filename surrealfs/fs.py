@@ -139,7 +139,7 @@ def default_owner(path: str, *, is_folder: bool, creator: str) -> str:
 # the only way to get a path or an ancestry check at all.
 _FIELDS = (
     "id, filename, path, content_type, is_folder, owner, mode, gate, "
-    "hash, created_at, updated_at, "
+    "hash, generation, created_at, updated_at, "
     "IF content IS NOT NONE THEN string::len(content) "
     "ELSE IF file IS NOT NONE THEN bytes::len(file) "
     "ELSE 0 END AS size"

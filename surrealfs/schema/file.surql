@@ -182,6 +182,7 @@ DEFINE TABLE OVERWRITE file SCHEMAFULL
     PERMISSIONS
         FOR select
             WHERE fn::sfs_can_read(fn::sfs_gate(parent), owner, mode, fn::sfs_me())
+               OR $access = 'indexer'
         FOR create
             WHERE owner = fn::sfs_me()
               AND fn::sfs_can_enter(parent, fn::sfs_me())
@@ -195,10 +196,11 @@ DEFINE TABLE OVERWRITE file SCHEMAFULL
         -- (`$before` is not bound in one). The per-field clauses below are what
         -- make it precise; this is the coarse union of the two rules.
         FOR update
-            WHERE fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me())
-              AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
-              AND (fn::sfs_w(owner, mode, fn::sfs_me())
-                   OR fn::sfs_can_enter(parent, fn::sfs_me()))
+            WHERE $access = 'indexer'
+               OR (fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me())
+                   AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
+                   AND (fn::sfs_w(owner, mode, fn::sfs_me())
+                        OR fn::sfs_can_enter(parent, fn::sfs_me())))
         -- ponytail: the union is loose in one direction. A record user holding
         -- the `w` bit on a row satisfies it on both passes, so they can also
         -- *move* that row without `w`+`x` on either folder, which `SurrealFs.mv`
@@ -239,6 +241,14 @@ DEFINE FIELD OVERWRITE parent ON file TYPE option<record<file>> DEFAULT NONE;
 DEFINE FIELD OVERWRITE parent_key ON file TYPE string
     VALUE IF $this.parent IS NONE THEN 'root' ELSE <string>$this.parent END;
 
+-- File generation counter (incremented on each content mutation)
+DEFINE FIELD OVERWRITE generation ON file TYPE int
+    VALUE IF $before IS NONE THEN 1
+          ELSE IF ($this.content IS NOT NONE AND crypto::md5($this.content) != $this.hash)
+               OR ($this.file IS NOT NONE AND crypto::md5(encoding::base64::encode($this.file)) != $this.hash) THEN $before + 1
+          ELSE $before END
+    PERMISSIONS FOR update WHERE false;
+
 -- <string> is to avoid error when $this.filename is NONE. This happens when deleting a file.
 DEFINE FIELD OVERWRITE path ON file COMPUTED (
     ($this.parent.path || '') + '/' + <string>$this.filename
@@ -268,12 +278,6 @@ DEFINE FIELD OVERWRITE gate ON TABLE file TYPE option<string>
 -- The write bit, per field, because the table clause above cannot be this
 -- precise: it has to stay permissive enough for a rename, which unix keys on
 -- the folder instead. These are what a content write actually touches.
---
--- ponytail: `hash` and the embedding fields below are left open. They are
--- derived -- `evt_file_hash` recomputes `hash` on any content change, and a
--- wrong `embedded_hash` only makes the indexer re-embed -- and none of them
--- gates access. Guard them too if anything ever trusts them for more than
--- staleness.
 DEFINE FIELD OVERWRITE file       ON TABLE file TYPE option<bytes> DEFAULT NONE
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE content    ON TABLE file TYPE option<string> DEFAULT NONE
@@ -282,7 +286,8 @@ DEFINE FIELD OVERWRITE symlink    ON TABLE file TYPE option<file> DEFAULT NONE
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE content_type ON TABLE file TYPE string
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
-DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT '';
+DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT ''
+    PERMISSIONS FOR update WHERE false;
 
 -- Timestamps
 DEFINE FIELD OVERWRITE created_at ON TABLE file TYPE datetime VALUE time::now() READONLY;
@@ -291,29 +296,45 @@ DEFINE FIELD OVERWRITE deleted_at ON TABLE file TYPE option<datetime> DEFAULT NO
 
 -- Events
 
+-- Abort renames/moves where caller lacks w+x on source or destination folder
+DEFINE EVENT OVERWRITE evt_file_move ON file
+    WHEN $event = 'UPDATE' AND ($before.parent != $after.parent OR $before.filename != $after.filename)
+    THEN {
+        IF $auth IS NOT NONE AND !(fn::sfs_can_enter($before.parent, fn::sfs_me())
+                              AND fn::sfs_can_enter($after.parent, fn::sfs_me())) {
+            THROW 'sfs:denied: rename needs w+x on both folders';
+        };
+    };
+
 -- Update hash when content changes. Guard on $event: a DELETE also satisfies
 -- `$before.content != $after.content` ($after is NONE), and `UPDATE NONE` then
 -- errors out and aborts the DELETE.
 DEFINE EVENT OVERWRITE evt_file_hash ON file
-    WHEN $event != "DELETE" AND $before.content != $after.content
+    WHEN $event != "DELETE" AND ($before.content != $after.content OR $before.file != $after.file)
     THEN (
-        UPDATE $after.id SET hash = crypto::md5($after.content)
+        UPDATE $after.id SET hash = IF $after.content IS NOT NONE THEN crypto::md5($after.content)
+                                    ELSE IF $after.file IS NOT NONE THEN crypto::md5(encoding::base64::encode($after.file))
+                                    ELSE '' END
 );
 
 
 -- Vector embedding
-DEFINE FIELD OVERWRITE embedding       ON TABLE file TYPE option<array<float>> DEFAULT NONE;
+DEFINE FIELD OVERWRITE embedding       ON TABLE file TYPE option<array<float>> DEFAULT NONE
+    PERMISSIONS FOR update WHERE $access = 'indexer';
 -- Stamp set by the indexer when `embedding` is written. Informational only:
 -- it cannot detect staleness, because `updated_at` is bumped by *any* write,
 -- including the indexer's own.
-DEFINE FIELD OVERWRITE embedded_at     ON TABLE file TYPE option<datetime>     DEFAULT NONE;
+DEFINE FIELD OVERWRITE embedded_at     ON TABLE file TYPE option<datetime>     DEFAULT NONE
+    PERMISSIONS FOR update WHERE $access = 'indexer';
 -- md5 of the content the current `embedding` was produced from. This is what
 -- makes staleness detectable: content changed iff it differs from the content's
 -- hash now. Written by the indexer, never by the content-write path.
-DEFINE FIELD OVERWRITE embedded_hash   ON TABLE file TYPE option<string>       DEFAULT NONE;
+DEFINE FIELD OVERWRITE embedded_hash   ON TABLE file TYPE option<string>       DEFAULT NONE
+    PERMISSIONS FOR update WHERE $access = 'indexer';
 -- Identifier of the embedder that produced the current vector (e.g.
 -- "openai:text-embedding-3-small"). Lets a later model swap invalidate stale rows.
-DEFINE FIELD OVERWRITE indexer_version ON TABLE file TYPE option<string>       DEFAULT NONE;
+DEFINE FIELD OVERWRITE indexer_version ON TABLE file TYPE option<string>       DEFAULT NONE
+    PERMISSIONS FOR update WHERE $access = 'indexer';
 
 -- Indexes
 
@@ -438,7 +459,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_text(
     LET $who = fn::sfs_searcher($me);
     LET $terms = array::distinct(search::analyze('fts_simple', $q));
     RETURN SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-            hash, created_at, updated_at, content,
+            hash, generation, created_at, updated_at, content,
             IF content IS NOT NONE THEN string::len(content)
             ELSE IF file IS NOT NONE THEN bytes::len(file)
             ELSE 0 END AS size,
@@ -481,7 +502,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_semantic(
 ) {
     LET $who = fn::sfs_searcher($me);
     RETURN SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-            hash, created_at, updated_at, content,
+            hash, generation, created_at, updated_at, content,
             IF content IS NOT NONE THEN string::len(content)
             ELSE IF file IS NOT NONE THEN bytes::len(file)
             ELSE 0 END AS size,

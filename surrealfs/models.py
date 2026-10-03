@@ -52,6 +52,7 @@ class FileEntry:
     gate: str | None = None
     size: int = 0
     hash: str = ""
+    generation: int = 1
     content: str | None = None
     data: bytes | None = None
     created_at: datetime | None = None
@@ -89,6 +90,7 @@ class FileEntry:
             gate=row.get("gate"),
             size=int(size or 0),
             hash=row.get("hash") or "",
+            generation=int(row.get("generation") or 1),
             content=content,
             data=data,
             created_at=row.get("created_at"),

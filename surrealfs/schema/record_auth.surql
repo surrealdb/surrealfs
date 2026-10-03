@@ -42,6 +42,28 @@ DEFINE FIELD OVERWRITE created_at ON TABLE user TYPE datetime VALUE time::now() 
 DEFINE ACCESS OVERWRITE account ON DATABASE TYPE RECORD
     SIGNIN (
         SELECT * FROM ONLY type::record('user', $user)
-        WHERE $user != 'root' AND crypto::argon2::compare(password, $pass)
+        WHERE $user NOT IN ['root', 'indexer', 'projector', 'compactor']
+          AND crypto::argon2::compare(password, $pass)
+    )
+    DURATION FOR TOKEN 15m, FOR SESSION 12h;
+
+DEFINE ACCESS OVERWRITE indexer ON DATABASE TYPE RECORD
+    SIGNIN (
+        SELECT * FROM ONLY type::record('user', $user)
+        WHERE $user = 'indexer' AND crypto::argon2::compare(password, $pass)
+    )
+    DURATION FOR TOKEN 15m, FOR SESSION 12h;
+
+DEFINE ACCESS OVERWRITE projector ON DATABASE TYPE RECORD
+    SIGNIN (
+        SELECT * FROM ONLY type::record('user', $user)
+        WHERE $user = 'projector' AND crypto::argon2::compare(password, $pass)
+    )
+    DURATION FOR TOKEN 15m, FOR SESSION 12h;
+
+DEFINE ACCESS OVERWRITE compactor ON DATABASE TYPE RECORD
+    SIGNIN (
+        SELECT * FROM ONLY type::record('user', $user)
+        WHERE $user = 'compactor' AND crypto::argon2::compare(password, $pass)
     )
     DURATION FOR TOKEN 15m, FOR SESSION 12h;

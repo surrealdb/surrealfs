@@ -159,13 +159,13 @@ async def signed_in(surreal_url, request):
     """
     opened = []
 
-    async def open_as(name: str, password: str):
+    async def open_as(name: str, password: str, access: str = _connect.RECORD_ACCESS):
         connection = AsyncSurreal(surreal_url)
         await connection.signin(
             {
                 "namespace": _namespace_for(request),
                 "database": "test",
-                "access": _connect.RECORD_ACCESS,
+                "access": access,
                 "variables": {"user": name, "pass": password},
             }
         )

@@ -566,3 +566,151 @@ async def test_rm_reports_only_what_the_database_actually_deleted(tenants, db):
     assert await paths(db, "WHERE path = '/projects/ro/bob.md'") == [
         "/projects/ro/bob.md"
     ]
+
+
+async def test_generation_counter_increments_on_content_change_only(db, signed_in):
+    await apply_schema(db, record_auth=True)
+    await add_user(db, "alice", "pw-alice")
+    fs = SurrealFs(db, user="alice")
+
+    entry1 = await fs.write_text("/home/alice/note.txt", "v1")
+    assert entry1.generation == 1
+    stat1 = await fs.stat("/home/alice/note.txt")
+    assert stat1.generation == 1
+
+    entry2 = await fs.write_text("/home/alice/note.txt", "v2")
+    assert entry2.generation == 2
+    stat2 = await fs.stat("/home/alice/note.txt")
+    assert stat2.generation == 2
+
+    # Metadata update does not increment generation
+    await fs.chmod("/home/alice/note.txt", 0o600)
+    stat_meta = await fs.stat("/home/alice/note.txt")
+    assert stat_meta.generation == 2
+
+    # Identical content write does not increment generation
+    await fs.write_text("/home/alice/note.txt", "v2")
+    stat_same = await fs.stat("/home/alice/note.txt")
+    assert stat_same.generation == 2
+
+    # Binary file generation behaves identically
+    b1 = await fs.write_bytes("/home/alice/blob.bin", b"bytes1")
+    assert b1.generation == 1
+    b2 = await fs.write_bytes("/home/alice/blob.bin", b"bytes2")
+    assert b2.generation == 2
+
+
+async def test_evt_file_move_aborts_unauthorized_rename_with_throw(tenants, db):
+    alice_conn, bob_conn = tenants
+    root = SurrealFs(db, user=ROOT)
+
+    # Root creates /shared_ro, writable only by root, readable by bob
+    await root.mkdir("/shared_ro")
+    await root.chmod("/shared_ro", 0o755)
+    # A file inside is mode 0o666 (world writable)
+    await root.write_text("/shared_ro/file.txt", "hello")
+    await root.chmod("/shared_ro/file.txt", 0o666)
+
+    # Bob can edit the content
+    await rows(
+        bob_conn,
+        "UPDATE file SET content = 'edited by bob' WHERE filename = 'file.txt'",
+    )
+    assert (
+        await rows(db, "SELECT VALUE content FROM file WHERE filename = 'file.txt'")
+    ) == ["edited by bob"]
+
+    # But Bob CANNOT rename or move the file, because he lacks w+x on /shared_ro
+    with pytest.raises(
+        Exception, match=r"sfs:denied: rename needs w\+x on both folders"
+    ):
+        await rows(
+            bob_conn,
+            "UPDATE file SET filename = 'renamed.txt' WHERE filename = 'file.txt'",
+        )
+
+
+async def test_hash_cannot_be_directly_updated_by_record_user(tenants):
+    alice_conn, _ = tenants
+    # Alice creates a file
+    await rows(
+        alice_conn,
+        "CREATE file SET filename = 'protected.txt', owner = 'alice', "
+        "content = 'hello', content_type = 'text/plain'",
+    )
+    orig_hash = (
+        await rows(
+            alice_conn,
+            "SELECT VALUE hash FROM file WHERE filename = 'protected.txt'",
+        )
+    )[0]
+    assert orig_hash != ""
+
+    # Attempting to tamper with hash directly is silently rejected by field permission
+    await rows(
+        alice_conn,
+        "UPDATE file SET hash = 'fake_hash' WHERE filename = 'protected.txt'",
+    )
+    current_hash = (
+        await rows(
+            alice_conn,
+            "SELECT VALUE hash FROM file WHERE filename = 'protected.txt'",
+        )
+    )[0]
+    assert current_hash == orig_hash
+
+
+async def test_indexer_principal_and_embedding_permissions(db, signed_in):
+    from surrealdb.errors import SurrealError
+
+    await apply_schema(db, record_auth=True)
+    await add_user(db, "alice", "pw-alice")
+    await add_user(db, "indexer", "pw-indexer")
+
+    root = SurrealFs(db, user=ROOT)
+    await root.write_text("/home/alice/private.txt", "secret thoughts")
+    await root.chmod("/home/alice/private.txt", 0o600)
+
+    # Alice signed in via account cannot sign in as indexer
+    alice_conn = await signed_in("alice", "pw-alice", access="account")
+
+    # Indexer signing in via account access is rejected by account rule
+    with pytest.raises(SurrealError):
+        await signed_in("indexer", "pw-indexer", access="account")
+
+    # Indexer signing in via indexer access succeeds
+    indexer_conn = await signed_in("indexer", "pw-indexer", access="indexer")
+
+    # Indexer can read private files (OR $access = 'indexer')
+    private_rows = await rows(
+        indexer_conn, "SELECT path FROM file WHERE filename = 'private.txt'"
+    )
+    assert len(private_rows) == 1
+
+    vec = [0.01] * 1536
+
+    # Alice cannot update embedding fields
+    await rows(
+        alice_conn,
+        "UPDATE file SET embedding = $v WHERE filename = 'private.txt'",
+        {"v": vec},
+    )
+    alice_check = await rows(
+        db, "SELECT VALUE embedding FROM file WHERE filename = 'private.txt'"
+    )
+    assert alice_check == [None]
+
+    # Indexer CAN update embedding fields
+    await rows(
+        indexer_conn,
+        "UPDATE file SET embedding = $v, embedded_hash = 'test_hash', "
+        "indexer_version = 'test_model' WHERE filename = 'private.txt'",
+        {"v": vec},
+    )
+    indexer_check = await rows(
+        db,
+        "SELECT embedding, embedded_hash, indexer_version FROM file "
+        "WHERE filename = 'private.txt'",
+    )
+    assert indexer_check[0]["embedded_hash"] == "test_hash"
+    assert indexer_check[0]["indexer_version"] == "test_model"
