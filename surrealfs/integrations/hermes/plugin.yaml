@@ -13,9 +13,11 @@ provides_tools:
   - surrealfs_ls
   - surrealfs_glob
   - surrealfs_cat
+  - surrealfs_head
   - surrealfs_read_bytes
   - surrealfs_tail
   - surrealfs_write_file
+  - surrealfs_append_file
   - surrealfs_write_bytes
   - surrealfs_edit
   - surrealfs_touch

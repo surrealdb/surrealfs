@@ -28,6 +28,7 @@ from surrealdb import RecordID
 from . import paths
 from .errors import (
     AlreadyExists,
+    ConflictError,
     DirectoryNotEmpty,
     InvalidPath,
     IsADirectory,
@@ -156,12 +157,28 @@ def raise_for_status(raw: Any) -> list[Any]:
     2.x, ``query()`` returned only the first statement's result and silently
     discarded later failures (``LET $x = 1; THROW 'boom'`` returned ``None``).
     """
+    if isinstance(raw, dict) and "error" in raw:
+        error = raw["error"]
+        msg = error.get("message") if isinstance(error, dict) else str(error)
+        raise QueryError(f"Database error: {msg}")
     results = raw.get("result", raw) if isinstance(raw, dict) else raw
     if not isinstance(results, list):
         return [results]
     for statement in results:
         if isinstance(statement, dict) and statement.get("status") == "ERR":
             message = str(statement.get("result", "unknown query error"))
+            if "sfs:conflict" in message or "sfs:denied_or_conflict" in message:
+                raise ConflictError(message)
+            if "sfs:not_found" in message:
+                raise NotFound(message)
+            if "sfs:not_empty" in message:
+                raise DirectoryNotEmpty(message)
+            if "sfs:exists" in message:
+                raise AlreadyExists(message)
+            if "sfs:locked" in message:
+                raise ConflictError(message)
+            if "sfs:denied" in message or "sfs:denied_or_missing" in message:
+                raise PermissionDenied(message)
             # The kind sits at the top level on some versions and under
             # `details` on others, so check both.
             kind = statement.get("kind") or (statement.get("details") or {}).get("kind")
@@ -176,8 +193,8 @@ def raise_for_status(raw: Any) -> list[Any]:
     ]
 
 
-def _written(rows: Any, path: str) -> Any:
-    """The single row a write returns, or `PermissionDenied` if it returned none.
+def _written(rows: Any, path: str, *, if_generation: int | None = None) -> Any:
+    """The single row a write returns, or `PermissionDenied` / `ConflictError`.
 
     A write the table's PERMISSIONS clause rejects is not reported as an error:
     SurrealDB returns an empty result. Only record auth can produce that -- a
@@ -188,6 +205,8 @@ def _written(rows: Any, path: str) -> Any:
     """
     row = (rows[0] if rows else None) if isinstance(rows, list) else rows
     if not row:
+        if if_generation is not None:
+            raise ConflictError(f"Conflict: generation mismatch on {path}")
         raise PermissionDenied(f"Permission denied: {path}")
     return row
 
@@ -454,6 +473,12 @@ class SurrealFs:
             return entry.data
         return (entry.content or "").encode("utf-8")
 
+    async def head(self, path: str, n: int = 10) -> str:
+        """First ``n`` lines of a text file."""
+        if n <= 0:
+            raise ValueError("n must be positive")
+        return "\n".join((await self.read_text(path)).splitlines()[:n])
+
     async def tail(self, path: str, n: int = 10) -> str:
         """Last ``n`` lines of a text file."""
         if n <= 0:
@@ -537,7 +562,12 @@ class SurrealFs:
     # ------------------------------------------------------------------- write
 
     async def mkdir(
-        self, path: str, *, parents: bool = False, mode: int | None = None
+        self,
+        path: str,
+        *,
+        parents: bool = False,
+        exist_ok: bool = False,
+        mode: int | None = None,
     ) -> FileEntry:
         """Create a folder. With ``parents``, create missing ancestors too.
 
@@ -561,6 +591,8 @@ class SurrealFs:
                 if not existing.is_folder:
                     raise AlreadyExists(f"Not a directory: {partial}")
                 if is_last:
+                    if exist_ok:
+                        return existing
                     raise AlreadyExists(f"File exists: {partial}")
                 # Descending through it, so we need to be able to traverse it;
                 # the write bit is checked on whichever folder we create in.
@@ -652,6 +684,7 @@ class SurrealFs:
         *,
         content_type: str | None = None,
         create_parents: bool = True,
+        if_generation: int | None = None,
     ) -> FileEntry:
         """Create or replace a text file. Returns the stored entry."""
         normalized = paths.normalize(path)
@@ -665,17 +698,32 @@ class SurrealFs:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
             self._check(existing, WRITE, "write to")
+            if if_generation is not None and existing.generation != if_generation:
+                raise ConflictError(
+                    f"Generation mismatch on {normalized}: "
+                    f"expected {if_generation}, got {existing.generation}"
+                )
             rows = await self._query(
                 f"UPDATE $id SET content = $content, file = NONE, "
-                f"content_type = $content_type RETURN {_FIELDS}",
+                f"content_type = $content_type "
+                f"WHERE $if_gen IS NONE OR generation = $if_gen "
+                f"RETURN {_FIELDS}",
                 {
                     "id": existing.id,
                     "content": content,
                     "content_type": resolved_type,
+                    "if_gen": if_generation,
                 },
             )
-            return FileEntry.from_row(_written(rows, normalized))
+            row = _written(rows, normalized, if_generation=if_generation)
+            if isinstance(row, dict) and not row.get("path"):
+                row = {**row, "path": normalized}
+            return FileEntry.from_row(row)
 
+        if if_generation is not None:
+            raise ConflictError(
+                f"Generation mismatch on {normalized}: file does not exist"
+            )
         parent_id = await self._ensure_parent(normalized, create=create_parents)
         return await self._create(
             filename, parent_id, resolved_type, path=normalized, content=content
@@ -688,6 +736,7 @@ class SurrealFs:
         *,
         content_type: str = "application/octet-stream",
         create_parents: bool = True,
+        if_generation: int | None = None,
     ) -> FileEntry:
         """Create or replace a binary file."""
         normalized = paths.normalize(path)
@@ -700,13 +749,32 @@ class SurrealFs:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
             self._check(existing, WRITE, "write to")
+            if if_generation is not None and existing.generation != if_generation:
+                raise ConflictError(
+                    f"Generation mismatch on {normalized}: "
+                    f"expected {if_generation}, got {existing.generation}"
+                )
             rows = await self._query(
                 f"UPDATE $id SET file = $data, content = NONE, "
-                f"content_type = $content_type RETURN {_FIELDS}",
-                {"id": existing.id, "data": data, "content_type": content_type},
+                f"content_type = $content_type "
+                f"WHERE $if_gen IS NONE OR generation = $if_gen "
+                f"RETURN {_FIELDS}",
+                {
+                    "id": existing.id,
+                    "data": data,
+                    "content_type": content_type,
+                    "if_gen": if_generation,
+                },
             )
-            return FileEntry.from_row(_written(rows, normalized))
+            row = _written(rows, normalized, if_generation=if_generation)
+            if isinstance(row, dict) and not row.get("path"):
+                row = {**row, "path": normalized}
+            return FileEntry.from_row(row)
 
+        if if_generation is not None:
+            raise ConflictError(
+                f"Generation mismatch on {normalized}: file does not exist"
+            )
         parent_id = await self._ensure_parent(normalized, create=create_parents)
         return await self._create(
             filename, parent_id, content_type, path=normalized, data=data
@@ -726,8 +794,39 @@ class SurrealFs:
             path, "", content_type="text/plain", create_parents=create_parents
         )
 
+    async def append_text(
+        self, path: str, suffix: str, *, if_generation: int | None = None
+    ) -> FileEntry:
+        """Atomically append text to a file."""
+        entry = await self._require_file(
+            path, fields=_FIELDS_WITH_CONTENT, need=WRITE, verb="append to"
+        )
+        if entry.content is None:
+            raise NotATextFile(f"Not a text file ({entry.content_type}): {entry.path}")
+        if if_generation is not None and entry.generation != if_generation:
+            raise ConflictError(
+                f"Generation mismatch on {entry.path}: "
+                f"expected {if_generation}, got {entry.generation}"
+            )
+        rows = await self._query(
+            f"UPDATE $id SET content = (content ?? '') + $suffix "
+            f"WHERE $if_gen IS NONE OR generation = $if_gen "
+            f"RETURN {_FIELDS}",
+            {"id": entry.id, "suffix": suffix, "if_gen": if_generation},
+        )
+        row = _written(rows, entry.path, if_generation=if_generation)
+        if isinstance(row, dict) and not row.get("path"):
+            row = {**row, "path": entry.path}
+        return FileEntry.from_row(row)
+
     async def edit(
-        self, path: str, old: str, new: str, *, replace_all: bool = False
+        self,
+        path: str,
+        old: str,
+        new: str,
+        *,
+        replace_all: bool = False,
+        if_generation: int | None = None,
     ) -> str:
         """Replace text in a file and return a unified diff of the change."""
         entry = await self._require_file(
@@ -737,6 +836,11 @@ class SurrealFs:
             raise NotATextFile(f"Not a text file ({entry.content_type}): {entry.path}")
         if old == "":
             raise ValueError("`old` must not be empty")
+        if if_generation is not None and entry.generation != if_generation:
+            raise ConflictError(
+                f"Generation mismatch on {entry.path}: "
+                f"expected {if_generation}, got {entry.generation}"
+            )
         current = entry.content
         if old not in current:
             raise NotFound(f"Text not found in {entry.path}: {old!r}")
@@ -744,13 +848,14 @@ class SurrealFs:
             current.replace(old, new) if replace_all else current.replace(old, new, 1)
         )
         rows = await self._query(
-            "UPDATE $id SET content = $content RETURN id",
-            {"id": entry.id, "content": updated},
+            "UPDATE $id SET content = $content "
+            "WHERE $if_gen IS NONE OR generation = $if_gen RETURN id",
+            {"id": entry.id, "content": updated, "if_gen": if_generation},
         )
         # Or the diff below describes a change that did not happen; see
         # `_written`. `RETURN id` rather than the full field list: nothing here
         # needs the row back, only proof that one was written.
-        _written(rows, entry.path)
+        _written(rows, entry.path, if_generation=if_generation)
         return _unified_diff(current, updated, entry.path)
 
     # ------------------------------------------------------------ move / delete
@@ -1200,14 +1305,25 @@ _EXTENSION_TYPES = {
     "htm": "text/html",
     "json": "application/json",
     "csv": "text/csv",
+    "tsv": "text/tab-separated-values",
     "yaml": "application/yaml",
     "yml": "application/yaml",
     "py": "text/x-python",
     "rs": "text/x-rust",
     "js": "text/javascript",
     "ts": "text/typescript",
+    "jsx": "text/javascript",
+    "tsx": "text/typescript",
     "toml": "application/toml",
     "surql": "text/x-surrealql",
+    "sql": "text/x-sql",
+    "sh": "text/x-shellscript",
+    "bash": "text/x-shellscript",
+    "zsh": "text/x-shellscript",
+    "xml": "application/xml",
+    "css": "text/css",
+    "diff": "text/x-diff",
+    "patch": "text/x-diff",
 }
 
 
@@ -1216,8 +1332,19 @@ def _sniff_content_type(filename: str, content: str) -> str:
     _, _, extension = filename.rpartition(".")
     if extension and extension.lower() in _EXTENSION_TYPES:
         return _EXTENSION_TYPES[extension.lower()]
-    if content[:64].strip().lower().startswith(("<html", "<!doctype html")):
+    stripped = content[:256].strip()
+    if stripped.lower().startswith(("<html", "<!doctype html")):
         return "text/html"
+    if stripped.startswith(("{", "[")):
+        try:
+            import json
+
+            json.loads(content)
+            return "application/json"
+        except Exception:
+            pass
+    if stripped.startswith("<?xml"):
+        return "application/xml"
     return "text/markdown"
 
 

@@ -10,11 +10,13 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "AppendArgs",
     "CatArgs",
     "ChmodArgs",
     "CpArgs",
     "EditArgs",
     "GlobArgs",
+    "HeadArgs",
     "LsArgs",
     "MkdirArgs",
     "MvArgs",
@@ -48,6 +50,11 @@ class CatArgs(_Args):
     path: str = Field(..., description="Text file to read", min_length=1)
 
 
+class HeadArgs(_Args):
+    path: str = Field(..., description="Text file to read", min_length=1)
+    n: int = Field(10, description="Number of leading lines", ge=1, le=10_000)
+
+
 class ReadBytesArgs(_Args):
     path: str = Field(..., description="Binary file to read", min_length=1)
 
@@ -62,6 +69,17 @@ class WriteFileArgs(_Args):
     content: str = Field(..., description="Full text content to write")
     content_type: str | None = Field(
         None, description="Media type; inferred from the extension when omitted"
+    )
+    if_generation: int | None = Field(
+        None, description="Expected generation counter for optimistic concurrency"
+    )
+
+
+class AppendArgs(_Args):
+    path: str = Field(..., description="Destination path", min_length=1)
+    content: str = Field(..., description="Text content to append")
+    if_generation: int | None = Field(
+        None, description="Expected generation counter for optimistic concurrency"
     )
 
 
@@ -80,6 +98,9 @@ class EditArgs(_Args):
     replace_all: bool = Field(
         False, description="Replace every occurrence instead of only the first"
     )
+    if_generation: int | None = Field(
+        None, description="Expected generation counter for optimistic concurrency"
+    )
 
 
 class TouchArgs(_Args):
@@ -89,6 +110,7 @@ class TouchArgs(_Args):
 class MkdirArgs(_Args):
     path: str = Field(..., description="Folder to create", min_length=1)
     parents: bool = Field(False, description="Create missing parent folders")
+    exist_ok: bool = Field(False, description="Do not error if folder already exists")
 
 
 class CpArgs(_Args):

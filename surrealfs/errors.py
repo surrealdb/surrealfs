@@ -15,6 +15,7 @@ from __future__ import annotations
 
 __all__ = [
     "AlreadyExists",
+    "ConflictError",
     "DirectoryNotEmpty",
     "InvalidPath",
     "IsADirectory",
@@ -37,6 +38,10 @@ class NotFound(SurrealFsError, FileNotFoundError):
 
 class AlreadyExists(SurrealFsError, FileExistsError):
     """Something already exists at the destination path."""
+
+
+class ConflictError(SurrealFsError, OSError):
+    """The file was modified concurrently or a generation mismatch occurred."""
 
 
 class IsADirectory(SurrealFsError, IsADirectoryError):

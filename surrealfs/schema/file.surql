@@ -554,6 +554,261 @@ DEFINE FUNCTION OVERWRITE fn::sfs_hybrid_search(
     END;
 };
 
+-- =============================================================================
+-- Extended Tables & Subsystems
+-- =============================================================================
+
+-- Content Chunking: file_chunk
+DEFINE TABLE OVERWRITE file_chunk SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+        FOR create, update, delete WHERE $access = 'indexer';
+DEFINE FIELD OVERWRITE file         ON file_chunk TYPE record<file>;
+DEFINE FIELD OVERWRITE chunk_index  ON file_chunk TYPE int;
+DEFINE FIELD OVERWRITE byte_offset  ON file_chunk TYPE int;
+DEFINE FIELD OVERWRITE byte_length  ON file_chunk TYPE int;
+DEFINE FIELD OVERWRITE text         ON file_chunk TYPE string;
+DEFINE FIELD OVERWRITE embedding    ON file_chunk TYPE option<array<float, 1536>>;
+DEFINE FIELD OVERWRITE hash         ON file_chunk TYPE string;
+DEFINE INDEX OVERWRITE idx_chunk_file_order ON file_chunk FIELDS file, chunk_index UNIQUE;
+DEFINE INDEX OVERWRITE idx_hnsw_chunk_embedding ON file_chunk FIELDS embedding
+    HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+
+-- Version History: file_version
+DEFINE TABLE OVERWRITE file_version SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+        FOR create, update, delete WHERE false; -- Written strictly by EVENT triggers
+DEFINE FIELD OVERWRITE file        ON file_version TYPE record<file>;
+DEFINE FIELD OVERWRITE generation  ON file_version TYPE int;
+DEFINE FIELD OVERWRITE path        ON file_version TYPE option<string>;
+DEFINE FIELD OVERWRITE content     ON file_version TYPE option<string>;
+DEFINE FIELD OVERWRITE file_bytes  ON file_version TYPE option<bytes>;
+DEFINE FIELD OVERWRITE content_type ON file_version TYPE string;
+DEFINE FIELD OVERWRITE hash        ON file_version TYPE string;
+DEFINE FIELD OVERWRITE author      ON file_version TYPE string;
+DEFINE FIELD OVERWRITE created_at  ON file_version TYPE datetime;
+DEFINE INDEX OVERWRITE idx_version_file_gen ON file_version FIELDS file, generation UNIQUE;
+
+-- Snapshot previous generation to file_version when generation changes
+DEFINE EVENT OVERWRITE evt_file_version ON file
+    WHEN $event = 'UPDATE' AND $before.generation != $after.generation
+    THEN {
+        LET $p = (SELECT VALUE path FROM ONLY $after.id);
+        CREATE file_version CONTENT {
+            file: $after.id,
+            generation: $before.generation,
+            path: $p,
+            content: $before.content,
+            file_bytes: $before.file,
+            content_type: $before.content_type,
+            hash: $before.hash,
+            author: $before.owner,
+            created_at: time::now()
+        };
+    };
+
+-- Swarm Advisory Leases: file_lock
+DEFINE TABLE OVERWRITE file_lock SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+        FOR create WHERE holder = fn::sfs_me()
+                     AND fn::sfs_can_write(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+        FOR update, delete WHERE holder = fn::sfs_me() OR expires_at < time::now();
+DEFINE FIELD OVERWRITE file        ON file_lock TYPE record<file>;
+DEFINE FIELD OVERWRITE path        ON file_lock TYPE string;
+DEFINE FIELD OVERWRITE holder      ON file_lock TYPE string;
+DEFINE FIELD OVERWRITE reason      ON file_lock TYPE string;
+DEFINE FIELD OVERWRITE expires_at  ON file_lock TYPE datetime;
+DEFINE INDEX OVERWRITE idx_lock_file ON file_lock FIELDS file UNIQUE;
+
+-- Workspaces: workspace
+DEFINE TABLE OVERWRITE workspace SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE owner = fn::sfs_me() OR is_public = true
+        FOR create WHERE owner = fn::sfs_me()
+        FOR update, delete WHERE owner = fn::sfs_me();
+DEFINE FIELD OVERWRITE name        ON workspace TYPE string;
+DEFINE FIELD OVERWRITE owner       ON workspace TYPE string;
+DEFINE FIELD OVERWRITE is_public   ON workspace TYPE bool DEFAULT false;
+DEFINE FIELD OVERWRITE created_at  ON workspace TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_workspace_owner_name ON workspace FIELDS owner, name UNIQUE;
+
+-- Branch Tracking: file_branch
+DEFINE TABLE OVERWRITE file_branch SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(base_file.parent), base_file.owner, base_file.mode, fn::sfs_me())
+        FOR create, update, delete WHERE workspace.owner = fn::sfs_me();
+DEFINE FIELD OVERWRITE workspace   ON file_branch TYPE record<workspace>;
+DEFINE FIELD OVERWRITE base_file   ON file_branch TYPE record<file>;
+DEFINE FIELD OVERWRITE path        ON file_branch TYPE string;
+DEFINE FIELD OVERWRITE branched_at ON file_branch TYPE datetime DEFAULT time::now();
+DEFINE FIELD OVERWRITE base_gen    ON file_branch TYPE int DEFAULT 1;
+DEFINE FIELD OVERWRITE current_file ON file_branch TYPE option<record<file>>;
+DEFINE INDEX OVERWRITE idx_branch_ws_path ON file_branch FIELDS workspace, path UNIQUE;
+
+-- =============================================================================
+-- In-Database Core & Atomic Operations
+-- =============================================================================
+
+-- Walk path segments against parent_key index
+DEFINE FUNCTION OVERWRITE fn::sfs_resolve_seg($parent_key: string, $segments: array<string>) {
+    IF array::len($segments) = 0 {
+        RETURN NONE;
+    };
+    LET $head = $segments[0];
+    LET $tail = array::slice($segments, 1);
+    LET $found = (SELECT VALUE id FROM ONLY file WHERE parent_key = $parent_key AND filename = $head LIMIT 1);
+    IF $found IS NONE {
+        RETURN NONE;
+    };
+    IF array::len($tail) = 0 {
+        RETURN $found;
+    };
+    RETURN fn::sfs_resolve_seg(<string>$found, $tail);
+};
+
+-- Resolve path to record<file>, or NONE
+DEFINE FUNCTION OVERWRITE fn::sfs_resolve($path: string) {
+    LET $raw = string::split($path, '/');
+    LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+    IF array::len($segments) = 0 {
+        RETURN NONE;
+    };
+    RETURN fn::sfs_resolve_seg('root', $segments);
+};
+
+-- Stat a file or directory path, returning metadata row or throwing sfs:not_found
+DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
+    IF $path = '/' {
+        RETURN {
+            id: file:root,
+            filename: '',
+            path: '/',
+            content_type: 'inode/directory',
+            is_folder: true,
+            owner: 'root',
+            mode: 493,
+            size: 0,
+            generation: 1
+        };
+    };
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $row = (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+                       hash, generation, created_at, updated_at,
+                       IF content IS NOT NONE THEN string::len(content)
+                       ELSE IF file IS NOT NONE THEN bytes::len(file)
+                       ELSE 0 END AS size
+                FROM ONLY $id);
+    IF $row IS NONE {
+        THROW 'sfs:not_found';
+    };
+    RETURN $row;
+};
+
+-- List children of a folder path
+DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
+    IF $path = '/' {
+        RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+                       hash, generation, created_at, updated_at,
+                       IF content IS NOT NONE THEN string::len(content)
+                       ELSE IF file IS NOT NONE THEN bytes::len(file)
+                       ELSE 0 END AS size
+                FROM file
+                WHERE parent_key = 'root'
+                ORDER BY filename ASC);
+    };
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+                   hash, generation, created_at, updated_at,
+                   IF content IS NOT NONE THEN string::len(content)
+                   ELSE IF file IS NOT NONE THEN bytes::len(file)
+                   ELSE 0 END AS size
+            FROM file
+            WHERE parent_key = <string>$id
+            ORDER BY filename ASC);
+};
+
+-- Atomic append to a text file
+DEFINE FUNCTION OVERWRITE fn::sfs_append(
+    $id: record<file>, $suffix: string, $if_generation: option<int>
+) {
+    LET $r = UPDATE $id SET content = (content ?? '') + $suffix
+        WHERE $if_generation IS NONE OR generation = $if_generation;
+    IF array::len($r) = 0 { THROW 'sfs:denied_or_conflict' };
+    RETURN (SELECT id, filename, path, content, content_type, is_folder, owner, mode, gate,
+                   hash, generation, created_at, updated_at,
+                   IF content IS NOT NONE THEN string::len(content)
+                   ELSE IF file IS NOT NONE THEN bytes::len(file)
+                   ELSE 0 END AS size
+            FROM ONLY $id);
+};
+
+-- Acquire lease on a file path
+DEFINE FUNCTION OVERWRITE fn::sfs_acquire_lock(
+    $path: string, $holder: option<string>, $ttl_seconds: option<int>, $reason: option<string>
+) {
+    LET $file_id = fn::sfs_resolve($path);
+    IF $file_id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $who = fn::sfs_me() ?? $holder ?? 'root';
+    LET $ttl = $ttl_seconds ?? 60;
+    LET $exp = time::now() + duration::from_secs($ttl);
+    LET $existing = (SELECT * FROM ONLY file_lock WHERE file = $file_id);
+    IF $existing IS NOT NONE AND $existing.expires_at > time::now() AND $existing.holder != $who {
+        THROW 'sfs:locked';
+    };
+    LET $res = UPSERT file_lock SET
+        file = $file_id,
+        path = $path,
+        holder = $who,
+        reason = $reason ?? 'advisory lease',
+        expires_at = $exp
+        WHERE file = $file_id;
+    IF array::len($res) = 0 {
+        THROW 'sfs:denied_or_conflict';
+    };
+    RETURN $res[0];
+};
+
+-- Release lease on a file path
+DEFINE FUNCTION OVERWRITE fn::sfs_release_lock($path: string, $holder: option<string>) {
+    LET $file_id = fn::sfs_resolve($path);
+    IF $file_id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $who = fn::sfs_me() ?? $holder ?? 'root';
+    LET $existing = (SELECT * FROM ONLY file_lock WHERE file = $file_id);
+    IF $existing IS NONE {
+        RETURN true;
+    };
+    IF $existing.holder != $who AND $existing.expires_at > time::now() {
+        THROW 'sfs:locked';
+    };
+    DELETE file_lock WHERE file = $file_id;
+    RETURN true;
+};
+
+-- Atomic chmod
+DEFINE FUNCTION OVERWRITE fn::sfs_chmod($path: string, $mode: int) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $r = UPDATE $id SET mode = $mode;
+    IF array::len($r) = 0 {
+        THROW 'sfs:denied';
+    };
+    RETURN true;
+};
+
 -- Seed: /home
 --
 -- `/home` has to exist and belong to root *before* anyone creates a home

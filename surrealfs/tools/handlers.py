@@ -16,11 +16,13 @@ from ..errors import SurrealFsError
 from ..fs import SurrealFs
 from ..models import FileEntry
 from .args import (
+    AppendArgs,
     CatArgs,
     ChmodArgs,
     CpArgs,
     EditArgs,
     GlobArgs,
+    HeadArgs,
     LsArgs,
     MkdirArgs,
     MvArgs,
@@ -96,6 +98,10 @@ async def cat(ctx: ToolContext, args: CatArgs) -> str:
     return content if content else "(empty file)"
 
 
+async def head(ctx: ToolContext, args: HeadArgs) -> str:
+    return await ctx.fs.head(args.path, args.n) or "(empty file)"
+
+
 async def read_bytes(ctx: ToolContext, args: ReadBytesArgs) -> str:
     data = await ctx.fs.read_bytes(args.path)
     return base64.b64encode(data).decode("ascii")
@@ -107,9 +113,19 @@ async def tail(ctx: ToolContext, args: TailArgs) -> str:
 
 async def write_file(ctx: ToolContext, args: WriteFileArgs) -> str:
     entry = await ctx.fs.write_text(
-        args.path, args.content, content_type=args.content_type
+        args.path,
+        args.content,
+        content_type=args.content_type,
+        if_generation=args.if_generation,
     )
     return f"Wrote {entry.size} bytes to {entry.path}"
+
+
+async def append_file(ctx: ToolContext, args: AppendArgs) -> str:
+    entry = await ctx.fs.append_text(
+        args.path, args.content, if_generation=args.if_generation
+    )
+    return f"Appended to {entry.path} (now {entry.size} bytes, gen {entry.generation})"
 
 
 async def write_bytes(ctx: ToolContext, args: WriteBytesArgs) -> str:
@@ -123,7 +139,11 @@ async def write_bytes(ctx: ToolContext, args: WriteBytesArgs) -> str:
 
 async def edit(ctx: ToolContext, args: EditArgs) -> str:
     diff = await ctx.fs.edit(
-        args.path, args.old, args.new, replace_all=args.replace_all
+        args.path,
+        args.old,
+        args.new,
+        replace_all=args.replace_all,
+        if_generation=args.if_generation,
     )
     return f"Edited {args.path}\n\n{diff}"
 
@@ -134,7 +154,7 @@ async def touch(ctx: ToolContext, args: TouchArgs) -> str:
 
 
 async def mkdir(ctx: ToolContext, args: MkdirArgs) -> str:
-    entry = await ctx.fs.mkdir(args.path, parents=args.parents)
+    entry = await ctx.fs.mkdir(args.path, parents=args.parents, exist_ok=args.exist_ok)
     return f"Created folder {entry.path}"
 
 

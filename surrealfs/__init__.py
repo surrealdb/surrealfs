@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from .errors import (
     AlreadyExists,
+    ConflictError,
     DirectoryNotEmpty,
     InvalidPath,
     IsADirectory,
@@ -51,6 +52,7 @@ __version__ = "0.2.0"
 __all__ = [
     "FOLDER_CONTENT_TYPE",
     "AlreadyExists",
+    "ConflictError",
     "DirectoryNotEmpty",
     "FileEntry",
     "InvalidPath",
