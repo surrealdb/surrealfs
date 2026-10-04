@@ -30,3 +30,7 @@ node_modules/
 # Swift / macOS
 .build/
 *.xcodeproj
+
+# Rust / Cargo
+target/
+
