@@ -97,6 +97,7 @@ dev = [
     "mcp>=2.1",
     "httpx>=0.27",
     "python-dotenv>=1",
+    "hypothesis>=6.100",
 ]
 
 [build-system]
