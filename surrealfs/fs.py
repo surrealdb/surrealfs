@@ -39,6 +39,7 @@ from .errors import (
     PermissionDenied,
     QueryError,
 )
+from .frontmatter import extract_markdown_links, parse_frontmatter, resolve_link
 from .models import (
     FOLDER_CONTENT_TYPE,
     FileEntry,
@@ -144,12 +145,29 @@ def default_owner(path: str, *, is_folder: bool, creator: str) -> str:
     return home_owner(path, is_folder=is_folder) or creator
 
 
+def _matches_meta(
+    entry_meta: dict[str, Any] | None, filter_meta: dict[str, Any]
+) -> bool:
+    if not entry_meta:
+        return False
+    for k, v in filter_meta.items():
+        if k not in entry_meta:
+            return False
+        actual = entry_meta[k]
+        if isinstance(actual, (list, tuple, set)):
+            if v not in actual and actual != v:
+                return False
+        elif actual != v:
+            return False
+    return True
+
+
 # Every field the model layer needs. `path`, `is_folder` and `gate` are
 # COMPUTED, so selecting them costs a parent-chain walk per row -- worth it, and
 # the only way to get a path or an ancestry check at all.
 _FIELDS = (
     "id, filename, path, content_type, is_folder, owner, mode, gate, "
-    "hash, generation, created_at, updated_at, "
+    "hash, generation, created_at, updated_at, meta, "
     "IF content IS NOT NONE THEN string::len(content) "
     "ELSE IF file IS NOT NONE THEN bytes::len(file) "
     "ELSE 0 END AS size"
@@ -579,12 +597,19 @@ class SurrealFs:
         out.sort(key=lambda e: e.path)
         return out
 
-    async def glob(self, pattern: str) -> list[FileEntry]:
+    async def glob(
+        self,
+        pattern: str,
+        *,
+        meta: dict[str, Any] | None = None,
+    ) -> list[FileEntry]:
         """Find files whose path matches a shell-style glob.
 
         Narrows to the pattern's literal directory prefix server-side, then
         applies the full pattern in Python -- the computed ``path`` field cannot
         be indexed, so the prefix is the only available filter.
+
+        Optional ``meta`` filter matches against structured frontmatter fields.
         """
         prefix = paths.literal_prefix(pattern)
         regex = paths.glob_to_regex(pattern)
@@ -594,7 +619,10 @@ class SurrealFs:
             {"prefix": prefix, **extra},
         )
         matches = [FileEntry.from_row(row) for row in (rows or [])]
-        return [e for e in matches if regex.match(e.path)]
+        res = [e for e in matches if regex.match(e.path)]
+        if meta:
+            res = [e for e in res if _matches_meta(e.meta, meta)]
+        return res
 
     async def tree(self, path: str = "/", *, max_depth: int = 3) -> str:
         """Render an ASCII tree of the directory hierarchy up to ``max_depth``."""
@@ -701,6 +729,7 @@ class SurrealFs:
         content: str | None = None,
         data: bytes | None = None,
         mode: int | None = None,
+        meta: dict[str, Any] | None = None,
     ) -> FileEntry:
         """Insert one row, stamped with this user and a default mode.
 
@@ -728,6 +757,8 @@ class SurrealFs:
             payload["content"] = content
         if data is not None:
             payload["file"] = data
+        if meta is not None:
+            payload["meta"] = meta
         rows = await self._query(
             f"CREATE {self.table} CONTENT $payload RETURN {_FIELDS}",
             {"payload": payload},
@@ -766,6 +797,7 @@ class SurrealFs:
         if not filename:
             raise InvalidPath("cannot write to the root directory")
         resolved_type = content_type or _sniff_content_type(filename, content)
+        meta, _ = parse_frontmatter(content)
 
         existing = await self._resolve_reachable(normalized)
         if existing is not None:
@@ -779,29 +811,47 @@ class SurrealFs:
                 )
             rows = await self._query(
                 f"UPDATE $id SET content = $content, file = NONE, "
-                f"content_type = $content_type "
+                f"content_type = $content_type, meta = $meta "
                 f"WHERE $if_gen IS NONE OR generation = $if_gen "
                 f"RETURN {_FIELDS}",
                 {
                     "id": existing.id,
                     "content": content,
                     "content_type": resolved_type,
+                    "meta": meta,
                     "if_gen": if_generation,
                 },
             )
             row = _written(rows, normalized, if_generation=if_generation)
             if isinstance(row, dict) and not row.get("path"):
                 row = {**row, "path": normalized}
-            return FileEntry.from_row(row)
-
-        if if_generation is not None:
-            raise ConflictError(
-                f"Generation mismatch on {normalized}: file does not exist"
+            entry = FileEntry.from_row(row)
+        else:
+            if if_generation is not None:
+                raise ConflictError(
+                    f"Generation mismatch on {normalized}: file does not exist"
+                )
+            parent_id = await self._ensure_parent(normalized, create=create_parents)
+            entry = await self._create(
+                filename,
+                parent_id,
+                resolved_type,
+                path=normalized,
+                content=content,
+                meta=meta,
             )
-        parent_id = await self._ensure_parent(normalized, create=create_parents)
-        return await self._create(
-            filename, parent_id, resolved_type, path=normalized, content=content
-        )
+
+        # Maintain links_to relations for markdown/text
+        links = extract_markdown_links(content)
+        if links:
+            for link in links:
+                target_path = resolve_link(normalized, link)
+                try:
+                    await self.relate(normalized, "links_to", target_path)
+                except Exception:
+                    pass
+
+        return entry
 
     async def write_bytes(
         self,
@@ -921,15 +971,31 @@ class SurrealFs:
         updated = (
             current.replace(old, new) if replace_all else current.replace(old, new, 1)
         )
+        meta, _ = parse_frontmatter(updated)
         rows = await self._query(
-            "UPDATE $id SET content = $content "
+            "UPDATE $id SET content = $content, meta = $meta "
             "WHERE $if_gen IS NONE OR generation = $if_gen RETURN id",
-            {"id": entry.id, "content": updated, "if_gen": if_generation},
+            {
+                "id": entry.id,
+                "content": updated,
+                "meta": meta,
+                "if_gen": if_generation,
+            },
         )
         # Or the diff below describes a change that did not happen; see
         # `_written`. `RETURN id` rather than the full field list: nothing here
         # needs the row back, only proof that one was written.
         _written(rows, entry.path, if_generation=if_generation)
+
+        links = extract_markdown_links(updated)
+        if links:
+            for link in links:
+                target_path = resolve_link(entry.path, link)
+                try:
+                    await self.relate(entry.path, "links_to", target_path)
+                except Exception:
+                    pass
+
         return _unified_diff(current, updated, entry.path)
 
     # ------------------------------------------------------------ move / delete
@@ -1630,6 +1696,23 @@ class SurrealFs:
             )
             for r in (rows or [])
         ]
+
+    async def find_broken_links(self, path_prefix: str = "/") -> list[dict[str, str]]:
+        """Find links in markdown files under `path_prefix` whose targets
+        do not exist.
+        """
+        clean = paths.normalize(path_prefix)
+        files = await self.glob(f"{clean}/**/*.md" if clean != "/" else "/**/*.md")
+        broken: list[dict[str, str]] = []
+        for f in files:
+            content = await self.read_text(f.path)
+            for link in extract_markdown_links(content):
+                target = resolve_link(f.path, link)
+                if not await self.exists(target):
+                    broken.append(
+                        {"source": f.path, "target": target, "raw_link": link}
+                    )
+        return broken
 
     async def acquire_lock(
         self, path: str, *, ttl_seconds: int = 60, reason: str = "advisory lease"

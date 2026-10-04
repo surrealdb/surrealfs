@@ -43,6 +43,7 @@ from .errors import (
     QueryError,
     SurrealFsError,
 )
+from .frontmatter import extract_markdown_links, parse_frontmatter, resolve_link
 from .fs import ROOT, SurrealFs, default_mode
 from .models import (
     FOLDER_CONTENT_TYPE,
@@ -82,6 +83,9 @@ __all__ = [
     "__version__",
     "apply_schema",
     "default_mode",
+    "extract_markdown_links",
     "format_mode",
+    "parse_frontmatter",
+    "resolve_link",
     "schema_sql",
 ]

@@ -63,6 +63,7 @@ class FileEntry:
     generation: int = 1
     content: str | None = None
     data: bytes | None = None
+    meta: dict[str, Any] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -101,6 +102,7 @@ class FileEntry:
             generation=int(row.get("generation") or 1),
             content=content,
             data=data,
+            meta=row.get("meta"),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
         )

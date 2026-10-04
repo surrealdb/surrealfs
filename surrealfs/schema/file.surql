@@ -286,6 +286,8 @@ DEFINE FIELD OVERWRITE symlink    ON TABLE file TYPE option<file> DEFAULT NONE
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE content_type ON TABLE file TYPE string
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE meta        ON TABLE file TYPE option<object> FLEXIBLE DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT ''
     PERMISSIONS FOR update WHERE false;
 
@@ -808,7 +810,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
         THROW 'sfs:not_found';
     };
     LET $row = (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-                       hash, generation, created_at, updated_at,
+                       hash, generation, created_at, updated_at, meta,
                        IF content IS NOT NONE THEN string::len(content)
                        ELSE IF file IS NOT NONE THEN bytes::len(file)
                        ELSE 0 END AS size
@@ -823,7 +825,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
 DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
     IF $path = '/' {
         RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-                       hash, generation, created_at, updated_at,
+                       hash, generation, created_at, updated_at, meta,
                        IF content IS NOT NONE THEN string::len(content)
                        ELSE IF file IS NOT NONE THEN bytes::len(file)
                        ELSE 0 END AS size
@@ -836,7 +838,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
         THROW 'sfs:not_found';
     };
     RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-                   hash, generation, created_at, updated_at,
+                   hash, generation, created_at, updated_at, meta,
                    IF content IS NOT NONE THEN string::len(content)
                    ELSE IF file IS NOT NONE THEN bytes::len(file)
                    ELSE 0 END AS size
@@ -853,7 +855,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_append(
         WHERE $if_generation IS NONE OR generation = $if_generation;
     IF array::len($r) = 0 { THROW 'sfs:denied_or_conflict' };
     RETURN (SELECT id, filename, path, content, content_type, is_folder, owner, mode, gate,
-                   hash, generation, created_at, updated_at,
+                   hash, generation, created_at, updated_at, meta,
                    IF content IS NOT NONE THEN string::len(content)
                    ELSE IF file IS NOT NONE THEN bytes::len(file)
                    ELSE 0 END AS size
