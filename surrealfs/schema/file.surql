@@ -554,6 +554,19 @@ DEFINE FUNCTION OVERWRITE fn::sfs_hybrid_search(
     END;
 };
 
+-- Exact or regex text search across readable files
+DEFINE FUNCTION OVERWRITE fn::sfs_grep(
+    $pattern: string, $path_prefix: option<string>, $me: option<string>
+) {
+    LET $who = fn::sfs_searcher($me);
+    RETURN SELECT id, filename, path, content
+        FROM file
+        WHERE content IS NOT NONE
+          AND ($who IS NONE OR fn::sfs_can_read(gate, owner, mode, $who))
+          AND ($path_prefix IS NONE OR string::starts_with(path, $path_prefix))
+          AND string::matches(content, $pattern);
+};
+
 -- =============================================================================
 -- Extended Tables & Subsystems
 -- =============================================================================

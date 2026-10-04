@@ -14,14 +14,28 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 
 from .fs import ROOT, SurrealFs
 
 EMBED_MODEL = "text-embedding-3-small"  # 1536 dimensions, matching the HNSW index
 INDEXER_VERSION = f"openai:{EMBED_MODEL}"
+
+
+def _load_env() -> None:
+    try:
+        from dotenv import find_dotenv, load_dotenv
+
+        env_file = find_dotenv(usecwd=True)
+        if env_file:
+            load_dotenv(env_file, override=False, interpolate=False)
+        user_config = Path.home() / ".config" / "surrealfs" / "env"
+        if user_config.is_file():
+            load_dotenv(user_config, override=False, interpolate=False)
+    except ImportError:
+        pass
 
 
 def make_embedder() -> Callable[[str], Awaitable[list[float]]]:
@@ -92,21 +106,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def _run(args: argparse.Namespace) -> None:
-    from surrealdb import AsyncSurreal
+    from .integrations._connect import connect
 
     embed = make_embedder()
-    db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
+    db = await connect()
     try:
-        await db.signin(
-            {
-                "username": os.environ.get("SURREALDB_USER", "root"),
-                "password": os.environ.get("SURREALDB_PASS", "root"),
-            }
-        )
-        await db.use(
-            os.environ.get("SURREALDB_NAMESPACE", "surrealfs"),
-            os.environ.get("SURREALDB_DATABASE", "demo"),
-        )
         await index_forever(
             # Root: the indexer has to read every file in order to embed it,
             # including the ones inside private homes.
@@ -121,6 +125,7 @@ async def _run(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    _load_env()
     args = _parse_args(argv)
     try:
         asyncio.run(_run(args))

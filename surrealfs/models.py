@@ -12,7 +12,7 @@ from typing import Any
 
 from surrealdb import RecordID
 
-__all__ = ["FileEntry", "SearchHit", "format_mode"]
+__all__ = ["FileEntry", "GrepMatch", "SearchHit", "format_mode"]
 
 FOLDER_CONTENT_TYPE = "inode/directory"
 
@@ -109,3 +109,12 @@ class SearchHit:
     @property
     def path(self) -> str:
         return self.entry.path
+
+
+@dataclass(frozen=True, slots=True)
+class GrepMatch:
+    """One line match from :meth:`SurrealFs.grep`."""
+
+    path: str
+    line_number: int
+    line: str

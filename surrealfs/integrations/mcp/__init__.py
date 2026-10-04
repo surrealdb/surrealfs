@@ -43,6 +43,7 @@ __all__ = [
     "RECALL_TOOL",
     "config_path",
     "main",
+    "read_resource",
     "run_tool",
     "selftest",
     "serve",
@@ -192,6 +193,16 @@ def _to_mirror(name: str, arguments: dict[str, Any], result: str) -> str | None:
     return None
 
 
+async def read_resource(ctx: ToolContext, uri: str) -> str:
+    """Read a resource by URI (surrealfs://{path})."""
+    prefix = "surrealfs://"
+    if not uri.startswith(prefix):
+        raise ValueError(f"Unsupported URI scheme: {uri}")
+    raw_path = uri[len(prefix) :]
+    path = "/" + raw_path.lstrip("/")
+    return await ctx.fs.read_text(path)
+
+
 async def serve() -> None:
     """Serve MCP over stdio until the client disconnects."""
     # The SDK, not this package: Python 3 has no implicit relative imports, so
@@ -263,6 +274,51 @@ async def serve() -> None:
         )
         return types.CallToolResult(content=[types.TextContent(type="text", text=text)])
 
+    async def on_list_resource_templates(
+        _ctx: Any, _params: Any = None
+    ) -> types.ListResourceTemplatesResult:
+        return types.ListResourceTemplatesResult(
+            resourceTemplates=[
+                types.ResourceTemplate(
+                    uriTemplate="surrealfs://{path}",
+                    name="SurrealFS File",
+                    description="Read-only access to files stored in SurrealFS",
+                    mimeType="text/plain",
+                )
+            ]
+        )
+
+    async def on_list_resources(
+        _ctx: Any, _params: Any = None
+    ) -> types.ListResourcesResult:
+        return types.ListResourcesResult(resources=[])
+
+    async def on_read_resource(
+        _ctx: Any, params: types.ReadResourceRequestParams
+    ) -> types.ReadResourceResult:
+        uri_str = str(params.uri)
+        try:
+            content = await read_resource(ctx, uri_str)
+            return types.ReadResourceResult(
+                contents=[
+                    types.TextResourceContents(
+                        uri=params.uri,
+                        mimeType="text/plain",
+                        text=content,
+                    )
+                ]
+            )
+        except Exception as exc:
+            return types.ReadResourceResult(
+                contents=[
+                    types.TextResourceContents(
+                        uri=params.uri,
+                        mimeType="text/plain",
+                        text=f"Error reading resource {uri_str}: {exc}",
+                    )
+                ]
+            )
+
     server = Server(
         SERVER_NAME,
         version=__version__,
@@ -274,6 +330,9 @@ async def serve() -> None:
         ),
         on_list_tools=on_list_tools,
         on_call_tool=on_call_tool,
+        on_list_resource_templates=on_list_resource_templates,
+        on_list_resources=on_list_resources,
+        on_read_resource=on_read_resource,
     )
     try:
         async with stdio_server() as (read, write):

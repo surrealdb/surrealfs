@@ -22,15 +22,18 @@ from .args import (
     CpArgs,
     EditArgs,
     GlobArgs,
+    GrepArgs,
     HeadArgs,
     LsArgs,
     MkdirArgs,
     MvArgs,
     ReadBytesArgs,
+    ReadRangeArgs,
     RmArgs,
     SearchArgs,
     TailArgs,
     TouchArgs,
+    TreeArgs,
     WriteBytesArgs,
     WriteFileArgs,
 )
@@ -190,3 +193,27 @@ async def search(ctx: ToolContext, args: SearchArgs, *, semantic: bool = False) 
     if not hits:
         return f"Nothing matches {args.query!r}"
     return "\n".join(f"{h.path}\n    {h.snippet}" for h in hits)
+
+
+async def read_range(ctx: ToolContext, args: ReadRangeArgs) -> str:
+    return await ctx.fs.read_range(
+        args.path, start=args.start, end=args.end, numbers=args.numbers
+    )
+
+
+async def grep(ctx: ToolContext, args: GrepArgs) -> str:
+    matches = await ctx.fs.grep(
+        args.pattern,
+        path_prefix=args.path,
+        glob=args.glob,
+        limit=args.limit,
+        is_regex=args.is_regex,
+        case_sensitive=args.case_sensitive,
+    )
+    if not matches:
+        return f"Nothing matches {args.pattern!r}"
+    return "\n".join(f"{m.path}:{m.line_number}:{m.line}" for m in matches)
+
+
+async def tree(ctx: ToolContext, args: TreeArgs) -> str:
+    return await ctx.fs.tree(args.path, max_depth=args.max_depth)

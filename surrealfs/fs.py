@@ -38,7 +38,7 @@ from .errors import (
     PermissionDenied,
     QueryError,
 )
-from .models import FOLDER_CONTENT_TYPE, FileEntry, SearchHit
+from .models import FOLDER_CONTENT_TYPE, FileEntry, GrepMatch, SearchHit
 
 __all__ = [
     "ROOT",
@@ -485,6 +485,34 @@ class SurrealFs:
             raise ValueError("n must be positive")
         return "\n".join((await self.read_text(path)).splitlines()[-n:])
 
+    async def read_range(
+        self, path: str, start: int = 1, end: int = -1, *, numbers: bool = False
+    ) -> str:
+        """Read lines ``start`` through ``end`` (1-indexed, inclusive) of a text file.
+
+        If ``end`` is -1 or exceeds the total line count, reads up to the end
+        of the file. If ``numbers`` is True, formats lines with line numbers.
+        """
+        if start < 1:
+            raise ValueError("start line must be >= 1")
+        if end != -1 and end < start:
+            raise ValueError("end line must be >= start line")
+        text = await self.read_text(path)
+        if not text:
+            return ""
+        lines = text.splitlines()
+        total = len(lines)
+        if start > total:
+            return ""
+        end_idx = total if (end == -1 or end > total) else end
+        selected = lines[start - 1 : end_idx]
+        if not numbers:
+            return "\n".join(selected)
+        width = len(str(end_idx))
+        return "\n".join(
+            f"{i + start:>{width}} | {line}" for i, line in enumerate(selected)
+        )
+
     async def exists(self, path: str) -> bool:
         """Whether ``path`` is there *and* reachable by this user.
 
@@ -558,6 +586,43 @@ class SurrealFs:
         )
         matches = [FileEntry.from_row(row) for row in (rows or [])]
         return [e for e in matches if regex.match(e.path)]
+
+    async def tree(self, path: str = "/", *, max_depth: int = 3) -> str:
+        """Render an ASCII tree of the directory hierarchy up to ``max_depth``."""
+        if max_depth < 1:
+            raise ValueError("max_depth must be at least 1")
+        normalized = paths.normalize(path)
+        root_entry = await self._resolve_reachable(normalized)
+        if root_entry is None:
+            raise NotFound(f"Not found: {normalized}")
+        if not root_entry.is_folder:
+            raise NotADirectory(f"Not a directory: {normalized}")
+        self._check(root_entry, EXEC, "enter")
+
+        lines = [normalized]
+
+        async def _walk(cur_path: str, prefix: str, depth: int) -> None:
+            if depth >= max_depth:
+                return
+            try:
+                entries = await self.ls(cur_path)
+            except Exception:
+                return
+            entries = sorted(
+                entries, key=lambda e: (not e.is_folder, e.filename.lower())
+            )
+            count = len(entries)
+            for idx, entry in enumerate(entries):
+                is_last = idx == count - 1
+                connector = "└── " if is_last else "├── "
+                suffix = "/" if entry.is_folder else ""
+                lines.append(f"{prefix}{connector}{entry.filename}{suffix}")
+                if entry.is_folder:
+                    sub_prefix = prefix + ("    " if is_last else "│   ")
+                    await _walk(entry.path, sub_prefix, depth + 1)
+
+        await _walk(normalized, "", 0)
+        return "\n".join(lines)
 
     # ------------------------------------------------------------------- write
 
@@ -1103,6 +1168,67 @@ class SurrealFs:
         return len(targets)
 
     # ------------------------------------------------------------------ search
+
+    async def grep(
+        self,
+        pattern: str,
+        *,
+        path_prefix: str | None = None,
+        glob: str | None = None,
+        limit: int = 100,
+        is_regex: bool = False,
+        case_sensitive: bool = True,
+    ) -> list[GrepMatch]:
+        """Search text files for lines matching ``pattern``."""
+        if not pattern:
+            return []
+        if limit <= 0:
+            return []
+
+        if is_regex:
+            raw_regex = pattern
+        else:
+            raw_regex = re.escape(pattern)
+
+        if not case_sensitive:
+            regex_str = f"(?i){raw_regex}"
+            compiled = re.compile(raw_regex, re.IGNORECASE)
+        else:
+            regex_str = raw_regex
+            compiled = re.compile(raw_regex)
+
+        normalized_prefix = paths.normalize(path_prefix) if path_prefix else None
+        if normalized_prefix == "/":
+            normalized_prefix = None
+
+        rows = await self._query(
+            "RETURN fn::sfs_grep($pattern, $prefix, $me)",
+            {
+                "pattern": regex_str,
+                "prefix": normalized_prefix,
+                "me": self.user,
+            },
+        )
+
+        glob_matcher = None
+        if glob:
+            glob_pat = glob if glob.startswith("/") else f"/**/{glob}"
+            glob_matcher = paths.glob_to_regex(glob_pat)
+
+        matches: list[GrepMatch] = []
+        for row in rows or []:
+            entry_path = row.get("path") or ""
+            if glob_matcher and not glob_matcher.match(entry_path):
+                continue
+            content = row.get("content") or ""
+            for idx, line in enumerate(content.splitlines()):
+                if compiled.search(line):
+                    matches.append(
+                        GrepMatch(path=entry_path, line_number=idx + 1, line=line)
+                    )
+                    if len(matches) >= limit:
+                        return matches
+        return matches
 
     async def search_text(
         self, query: str, *, limit: int = 20, match: MatchMode = "any"

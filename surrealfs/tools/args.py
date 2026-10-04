@@ -16,15 +16,18 @@ __all__ = [
     "CpArgs",
     "EditArgs",
     "GlobArgs",
+    "GrepArgs",
     "HeadArgs",
     "LsArgs",
     "MkdirArgs",
     "MvArgs",
     "ReadBytesArgs",
+    "ReadRangeArgs",
     "RmArgs",
     "SearchArgs",
     "TailArgs",
     "TouchArgs",
+    "TreeArgs",
     "WriteBytesArgs",
     "WriteFileArgs",
 ]
@@ -62,6 +65,16 @@ class ReadBytesArgs(_Args):
 class TailArgs(_Args):
     path: str = Field(..., description="Text file to read", min_length=1)
     n: int = Field(10, description="Number of trailing lines", ge=1, le=10_000)
+
+
+class ReadRangeArgs(_Args):
+    path: str = Field(..., description="Text file to read", min_length=1)
+    start: int = Field(1, description="1-indexed starting line number", ge=1)
+    end: int = Field(
+        -1,
+        description="1-indexed ending line number (inclusive), or -1 for end of file",
+    )
+    numbers: bool = Field(False, description="Include line numbers in output")
 
 
 class WriteFileArgs(_Args):
@@ -152,3 +165,29 @@ class SearchArgs(_Args):
         min_length=1,
     )
     limit: int = Field(20, description="Maximum results", ge=1, le=100)
+
+
+class GrepArgs(_Args):
+    pattern: str = Field(
+        ...,
+        description="Text pattern or regular expression to search for",
+        min_length=1,
+    )
+    path: str | None = Field(
+        None, description="Optional path prefix to restrict the search"
+    )
+    glob: str | None = Field(
+        None, description="Optional glob filter on file paths (e.g. *.py)"
+    )
+    limit: int = Field(
+        100, description="Maximum matching lines to return", ge=1, le=1000
+    )
+    is_regex: bool = Field(False, description="Treat pattern as a regular expression")
+    case_sensitive: bool = Field(True, description="Perform case-sensitive matching")
+
+
+class TreeArgs(_Args):
+    path: str = Field("/", description="Folder to visualize. Absolute, defaults to /")
+    max_depth: int = Field(
+        3, description="Maximum directory depth to traverse", ge=1, le=10
+    )

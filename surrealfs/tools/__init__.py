@@ -72,6 +72,9 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("rm", _args.RmArgs, _handlers.rm),
     ToolSpec("chmod", _args.ChmodArgs, _handlers.chmod),
     ToolSpec("search", _args.SearchArgs, _handlers.search),
+    ToolSpec("read_range", _args.ReadRangeArgs, _handlers.read_range),
+    ToolSpec("grep", _args.GrepArgs, _handlers.grep),
+    ToolSpec("tree", _args.TreeArgs, _handlers.tree),
 )
 
 # Same name, so the same `docs/search.md` describes both -- the description is
