@@ -71,6 +71,7 @@ demo = [
     "logfire>=4.20",
     "uvicorn>=0.30",
 ]
+crdt = ["pycrdt>=0.10.0"]
 
 [project.scripts]
 surrealfs-browser = "surrealfs.browser.__main__:main"
@@ -98,6 +99,7 @@ dev = [
     "httpx>=0.27",
     "python-dotenv>=1",
     "hypothesis>=6.100",
+    "pycrdt>=0.10.0",
 ]
 
 [build-system]

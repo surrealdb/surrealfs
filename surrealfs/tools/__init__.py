@@ -81,6 +81,11 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("undelete", _args.UndeleteArgs, _handlers.undelete),
     ToolSpec("relate", _args.RelateArgs, _handlers.relate),
     ToolSpec("backlinks", _args.BacklinksArgs, _handlers.backlinks),
+    ToolSpec("search_sections", _args.SearchSectionsArgs, _handlers.search_sections),
+    ToolSpec("acquire_lease", _args.AcquireLeaseArgs, _handlers.acquire_lease),
+    ToolSpec("release_lease", _args.ReleaseLeaseArgs, _handlers.release_lease),
+    ToolSpec("fork_workspace", _args.ForkWorkspaceArgs, _handlers.fork_workspace),
+    ToolSpec("merge_workspace", _args.MergeWorkspaceArgs, _handlers.merge_workspace),
 )
 
 # Same name, so the same `docs/search.md` describes both -- the description is

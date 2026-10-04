@@ -249,3 +249,48 @@ class BacklinksArgs(_Args):
     path: str = Field(
         ..., description="File path to find incoming references for", min_length=1
     )
+
+
+class SearchSectionsArgs(_Args):
+    query: str = Field(
+        ...,
+        description="Query terms or keywords to match within document sections",
+        min_length=1,
+    )
+    path: str | None = Field(
+        None,
+        description=("Optional path prefix or markdown file to scope section search"),
+    )
+    limit: int = Field(
+        10, description="Maximum number of sections to return", ge=1, le=50
+    )
+
+
+class AcquireLeaseArgs(_Args):
+    path: str = Field(..., description="File path to acquire a lease on", min_length=1)
+    ttl_seconds: int = Field(60, description="Lease duration in seconds", ge=1, le=3600)
+    reason: str | None = Field(
+        None, description="Reason or task description for acquiring the lease"
+    )
+
+
+class ReleaseLeaseArgs(_Args):
+    path: str = Field(
+        ..., description="File path to release the lease from", min_length=1
+    )
+
+
+class ForkWorkspaceArgs(_Args):
+    branch: str = Field(
+        ...,
+        description="Name for the new isolated workspace branch",
+        min_length=1,
+    )
+    source_branch: str = Field(
+        "main", description="Source branch or workspace to branch from"
+    )
+
+
+class MergeWorkspaceArgs(_Args):
+    branch: str = Field(..., description="Workspace branch to merge", min_length=1)
+    target_branch: str = Field("main", description="Target branch to merge into")

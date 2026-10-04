@@ -17,10 +17,12 @@ every path an agent has into the tree runs the checks below. See
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import difflib
 import re
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
 from dataclasses import replace
+from datetime import datetime
 from typing import Any, Literal
 
 from surrealdb import RecordID
@@ -48,6 +50,8 @@ from .models import (
     GrepMatch,
     SearchHit,
     SectionHit,
+    WatchEvent,
+    WorkspaceEntry,
 )
 
 __all__ = [
@@ -167,7 +171,7 @@ def _matches_meta(
 # the only way to get a path or an ancestry check at all.
 _FIELDS = (
     "id, filename, path, content_type, is_folder, owner, mode, gate, "
-    "hash, generation, created_at, updated_at, meta, "
+    "hash, generation, created_at, updated_at, meta, crdt, "
     "IF content IS NOT NONE THEN string::len(content) "
     "ELSE IF file IS NOT NONE THEN bytes::len(file) "
     "ELSE 0 END AS size"
@@ -809,6 +813,24 @@ class SurrealFs:
                     f"Generation mismatch on {normalized}: "
                     f"expected {if_generation}, got {existing.generation}"
                 )
+            if existing.crdt:
+                from . import crdt
+
+                doc, next_seq = await self._load_crdt_doc(existing.id)
+                delta, updated = crdt.apply_replace(doc, content)
+                await self._apply_crdt_mutation(
+                    existing.id, delta, updated, next_seq, existing.generation
+                )
+                if meta:
+                    await self._query(
+                        "UPDATE $id SET meta = $meta, content_type = $content_type",
+                        {
+                            "id": existing.id,
+                            "meta": meta,
+                            "content_type": resolved_type,
+                        },
+                    )
+                return await self.stat(normalized)
             rows = await self._query(
                 f"UPDATE $id SET content = $content, file = NONE, "
                 f"content_type = $content_type, meta = $meta "
@@ -932,6 +954,15 @@ class SurrealFs:
                 f"Generation mismatch on {entry.path}: "
                 f"expected {if_generation}, got {entry.generation}"
             )
+        if entry.crdt:
+            from . import crdt
+
+            doc, next_seq = await self._load_crdt_doc(entry.id)
+            delta, updated = crdt.apply_append(doc, suffix)
+            await self._apply_crdt_mutation(
+                entry.id, delta, updated, next_seq, entry.generation
+            )
+            return await self.stat(entry.path)
         rows = await self._query(
             f"UPDATE $id SET content = (content ?? '') + $suffix "
             f"WHERE $if_gen IS NONE OR generation = $if_gen "
@@ -968,6 +999,29 @@ class SurrealFs:
         current = entry.content
         if old not in current:
             raise NotFound(f"Text not found in {entry.path}: {old!r}")
+        if entry.crdt:
+            from . import crdt
+
+            doc, next_seq = await self._load_crdt_doc(entry.id)
+            delta, updated = crdt.apply_edit(doc, old, new)
+            await self._apply_crdt_mutation(
+                entry.id, delta, updated, next_seq, entry.generation
+            )
+            meta, _ = parse_frontmatter(updated)
+            if meta:
+                await self._query(
+                    "UPDATE $id SET meta = $meta",
+                    {"id": entry.id, "meta": meta},
+                )
+            links = extract_markdown_links(updated)
+            if links:
+                for link in links:
+                    target_path = resolve_link(entry.path, link)
+                    try:
+                        await self.relate(entry.path, "links_to", target_path)
+                    except Exception:
+                        pass
+            return _unified_diff(current, updated, entry.path)
         updated = (
             current.replace(old, new) if replace_all else current.replace(old, new, 1)
         )
@@ -1738,6 +1792,286 @@ class SurrealFs:
             {"path": clean, "holder": self.user},
         )
         return True
+
+    async def fork_workspace(
+        self, dst_branch: str, src_branch: str = "main"
+    ) -> dict[str, Any]:
+        """Fork a workspace into an isolated branch."""
+        row = await self._query(
+            "RETURN fn::sfs_fork_workspace($src, $dst, $owner);",
+            {"src": src_branch, "dst": dst_branch, "owner": self.user},
+        )
+        return row[0] if isinstance(row, list) and row else (row or {})
+
+    async def list_workspaces(self) -> list[WorkspaceEntry]:
+        """List available workspaces."""
+        rows = await self._query(
+            "SELECT id, name, owner, is_public, created_at FROM workspace "
+            "WHERE owner = $owner OR is_public = true "
+            "ORDER BY created_at DESC;",
+            {"owner": self.user},
+        )
+        return [WorkspaceEntry.from_row(r) for r in (rows or [])]
+
+    async def diff_workspace(self, branch: str) -> list[dict[str, Any]]:
+        """Compute the diff between a workspace branch and its target."""
+        rows = await self._query(
+            "RETURN fn::sfs_diff_workspace($branch, $owner);",
+            {"branch": branch, "owner": self.user},
+        )
+        return rows if isinstance(rows, list) else [rows]
+
+    async def write_workspace_text(
+        self, branch: str, path: str, content: str
+    ) -> FileEntry:
+        """Write or update a file within an isolated workspace branch."""
+        clean = paths.normalize(path)
+        ws_rows = await self._query(
+            "SELECT VALUE id FROM ONLY workspace "
+            "WHERE name = $branch AND owner = $owner LIMIT 1;",
+            {"branch": branch, "owner": self.user},
+        )
+        if not ws_rows:
+            raise NotFound(f"workspace not found: {branch}")
+        ws_id = ws_rows[0] if isinstance(ws_rows, list) else ws_rows
+
+        branch_path = f"/.workspaces/{branch}{clean}"
+        branch_file = await self.write_text(branch_path, content)
+
+        await self._query(
+            """
+            LET $existing = (SELECT * FROM ONLY file_branch
+                WHERE workspace = $ws AND path = $path LIMIT 1);
+            IF $existing IS NOT NONE {
+                UPDATE $existing.id SET current_file = $branch_file;
+            } ELSE {
+                CREATE file_branch CONTENT {
+                    workspace: $ws,
+                    base_file: $branch_file,
+                    path: $path,
+                    base_gen: 1,
+                    current_file: $branch_file
+                };
+            };
+            """,
+            {"ws": ws_id, "path": clean, "branch_file": branch_file.id},
+        )
+        return branch_file
+
+    async def merge_workspace(
+        self, branch: str, target: str = "main"
+    ) -> dict[str, Any]:
+        """Atomically merge a workspace branch back into the target."""
+        row = await self._query(
+            "RETURN fn::sfs_merge_workspace($branch, $target, $owner);",
+            {"branch": branch, "target": target, "owner": self.user},
+        )
+        ws_path = f"/.workspaces/{branch}"
+        if await self.exists(ws_path):
+            await self.rm(ws_path, recursive=True)
+        return row[0] if isinstance(row, list) and row else (row or {})
+
+    async def discard_workspace(self, branch: str) -> dict[str, Any]:
+        """Discard an isolated workspace branch and clean up its tracking rows."""
+        row = await self._query(
+            "RETURN fn::sfs_discard_workspace($branch, $owner);",
+            {"branch": branch, "owner": self.user},
+        )
+        ws_path = f"/.workspaces/{branch}"
+        if await self.exists(ws_path):
+            await self.rm(ws_path, recursive=True)
+        return row[0] if isinstance(row, list) and row else (row or {})
+
+    async def send_message(
+        self, agent_id: str, task_name: str, payload: str
+    ) -> FileEntry:
+        """Send a task message to an agent's actor mailbox."""
+        inbox_dir = f"/agents/{agent_id}/inbox"
+        await self.mkdir(inbox_dir, parents=True, exist_ok=True)
+        task_path = f"{inbox_dir}/{task_name}"
+        return await self.write_text(task_path, payload)
+
+    async def receive_messages(self, agent_id: str, limit: int = 10) -> list[FileEntry]:
+        """List pending messages in an agent's actor mailbox, ordered FIFO.
+
+        Ordered by created_at.
+        """
+        inbox_dir = f"/agents/{agent_id}/inbox"
+        if not await self.exists(inbox_dir):
+            return []
+        entries = await self.ls(inbox_dir)
+        messages = [
+            e for e in entries if not e.is_folder and not e.filename.startswith(".")
+        ]
+        messages.sort(key=lambda e: (e.created_at or datetime.min, str(e.id)))
+        return messages[:limit]
+
+    async def claim_message(
+        self, agent_id: str, task_name: str, consumer_id: str
+    ) -> FileEntry:
+        """Atomically claim a message by moving it to the consumer directory."""
+        inbox_path = f"/agents/{agent_id}/inbox/{task_name}"
+        claimed_dir = f"/agents/{agent_id}/inbox/.claimed/{consumer_id}"
+        await self.mkdir(claimed_dir, parents=True, exist_ok=True)
+        claimed_path = f"{claimed_dir}/{task_name}"
+        return await self.mv(inbox_path, claimed_path)
+
+    async def complete_message(
+        self, agent_id: str, task_name: str, consumer_id: str
+    ) -> None:
+        """Complete a claimed message by removing it."""
+        claimed_path = f"/agents/{agent_id}/inbox/.claimed/{consumer_id}/{task_name}"
+        await self.rm(claimed_path)
+
+    async def watch(self, path_pattern: str = "/*") -> AsyncGenerator[WatchEvent, None]:
+        """Watch for changes matching path_pattern via SurrealDB Live Query."""
+        regex = paths.glob_to_regex(path_pattern)
+        query_uuid = await self.db.live("file")
+        try:
+            subscription = await self.db.subscribe_live(query_uuid)
+            async for notification in subscription:
+                action = notification.get("action", "")
+                result = notification.get("result")
+                if not isinstance(result, dict):
+                    continue
+                path = result.get("path")
+                if not path or not regex.match(path):
+                    continue
+                entry = FileEntry.from_row(result) if action != "DELETE" else None
+                yield WatchEvent(action=action, path=path, entry=entry)
+        finally:
+            with contextlib.suppress(Exception):
+                await self.db.kill(query_uuid)
+
+    # ------------------------------------------------------------ CRDTs
+
+    async def enable_crdt(self, path: str) -> None:
+        """Enable collaborative Yjs CRDT mode on a text file."""
+        from . import crdt
+
+        entry = await self._require_file(
+            path, fields=_FIELDS_WITH_CONTENT, need=WRITE, verb="enable crdt on"
+        )
+        if entry.crdt:
+            return
+        content = entry.content or ""
+        doc, init_update = crdt.init_doc(content)
+        await self._query(
+            """
+            CREATE file_crdt_snapshot CONTENT {
+                file_id: $file_id,
+                upto: 1,
+                state: $state,
+                author: $author
+            };
+            CREATE file_crdt_update CONTENT {
+                file_id: $file_id,
+                seq: 1,
+                update_bytes: $state,
+                author: $author,
+                base_gen: $base_gen
+            };
+            UPDATE $file_id SET crdt = true;
+            """,
+            {
+                "file_id": entry.id,
+                "state": init_update,
+                "author": self.user,
+                "base_gen": entry.generation,
+            },
+        )
+
+    async def _load_crdt_doc(self, file_id: RecordID) -> tuple[Any, int]:
+        from . import crdt
+
+        snap_rows = await self._query(
+            "SELECT upto, state FROM ONLY file_crdt_snapshot "
+            "WHERE file_id = $file_id LIMIT 1;",
+            {"file_id": file_id},
+        )
+        snap = snap_rows[0] if isinstance(snap_rows, list) and snap_rows else snap_rows
+        upto = int(snap.get("upto", 0)) if isinstance(snap, dict) else 0
+        state = snap.get("state") if isinstance(snap, dict) else None
+
+        update_rows = await self._query(
+            "SELECT seq, update_bytes FROM file_crdt_update "
+            "WHERE file_id = $file_id AND seq > $upto ORDER BY seq ASC;",
+            {"file_id": file_id, "upto": upto},
+        )
+        updates = [
+            u.get("update_bytes")
+            for u in (update_rows if isinstance(update_rows, list) else [])
+            if isinstance(u, dict) and u.get("update_bytes")
+        ]
+        doc = crdt.load_doc(state, updates)
+        max_seq = max(
+            [upto]
+            + [
+                int(u.get("seq", 0))
+                for u in (update_rows if isinstance(update_rows, list) else [])
+                if isinstance(u, dict)
+            ]
+        )
+        return doc, max_seq + 1
+
+    async def _apply_crdt_mutation(
+        self,
+        file_id: RecordID,
+        delta_bytes: bytes,
+        new_content: str,
+        seq: int,
+        base_gen: int,
+    ) -> None:
+        await self._query(
+            """
+            CREATE file_crdt_update CONTENT {
+                file_id: $file_id,
+                seq: $seq,
+                update_bytes: $delta,
+                author: $author,
+                base_gen: $base_gen
+            };
+            UPDATE $file_id SET content = $content, updated_at = time::now();
+            """,
+            {
+                "file_id": file_id,
+                "seq": seq,
+                "delta": delta_bytes,
+                "author": self.user,
+                "base_gen": base_gen,
+                "content": new_content,
+            },
+        )
+
+    async def compact_crdt(self, path: str) -> None:
+        """Compact the CRDT update log into a new snapshot."""
+        from . import crdt
+
+        entry = await self._require_file(
+            path, fields=_FIELDS, need=WRITE, verb="compact crdt on"
+        )
+        if not entry.crdt:
+            return
+        doc, next_seq = await self._load_crdt_doc(entry.id)
+        upto = next_seq - 1
+        snapshot = crdt.get_snapshot(doc)
+        await self._query(
+            """
+            UPSERT file_crdt_snapshot CONTENT {
+                file_id: $file_id,
+                upto: $upto,
+                state: $snapshot,
+                author: $author
+            } WHERE file_id = $file_id;
+            DELETE file_crdt_update WHERE file_id = $file_id AND seq <= $upto;
+            """,
+            {
+                "file_id": entry.id,
+                "upto": upto,
+                "snapshot": snapshot,
+                "author": self.user,
+            },
+        )
 
 
 _EXTENSION_TYPES = {

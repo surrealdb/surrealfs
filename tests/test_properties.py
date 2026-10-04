@@ -212,3 +212,50 @@ def test_hypothesis_operation_sequence_consistency(ops) -> None:
     for p in ref_tree:
         assert p.startswith("/")
         assert not p.endswith("/")
+
+
+@given(
+    st.lists(
+        st.tuples(
+            st.text(
+                alphabet=st.characters(whitelist_categories=["Lu", "Ll", "Nd", "Zs"]),
+                min_size=1,
+                max_size=30,
+            ),
+            st.integers(min_value=0, max_value=2),
+        ),
+        min_size=2,
+        max_size=4,
+    )
+)
+def test_hypothesis_crdt_convergence_invariant(edits) -> None:
+    """Invariant: regardless of arrival order, any permutation of updates
+
+    produces identical text.
+    """
+    import itertools
+
+    from surrealfs import crdt
+
+    base_text = "Initial Base Document\nLine 1\nLine 2\nLine 3\n"
+    base_doc, base_update = crdt.init_doc(base_text)
+
+    # Generate independent updates from distinct replica clients
+    updates = []
+    for text_to_insert, line_idx in edits:
+        doc = crdt.load_doc(base_update, [])
+        sv = doc.get_state()
+        t = doc.get("text", type=crdt.pycrdt.Text)
+        pos = min(len(str(t)), line_idx * 7)
+        t[pos:pos] = f"[{text_to_insert}]"
+        delta = doc.get_update(sv)
+        updates.append(delta)
+
+    # Materialize across all permutations of arrival orders
+    results = set()
+    for perm in itertools.permutations(updates):
+        doc = crdt.load_doc(base_update, list(perm))
+        results.add(crdt.materialize(doc))
+
+    # All permutations must converge to the exact same text!
+    assert len(results) == 1

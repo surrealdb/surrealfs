@@ -53,6 +53,8 @@ from .models import (
     GrepMatch,
     SearchHit,
     SectionHit,
+    WatchEvent,
+    WorkspaceEntry,
     format_mode,
 )
 from .schema import apply_schema, schema_sql
@@ -80,6 +82,8 @@ __all__ = [
     "SectionHit",
     "SurrealFs",
     "SurrealFsError",
+    "WatchEvent",
+    "WorkspaceEntry",
     "__version__",
     "apply_schema",
     "default_mode",

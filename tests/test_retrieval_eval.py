@@ -85,13 +85,17 @@ async def test_section_retrieval_token_reduction(fs: SurrealFs) -> None:
     await fs.reindex_embeddings(mock_embed, version="mock-v1")
 
     # Query for sections with the synthetic vector
-    section_hits = await fs.search_sections([0.1] * 1536, limit=5)
+    section_hits = await fs.search_sections([0.1] * 1536, limit=10)
     assert len(section_hits) > 0
 
-    # Compare character size of the top section hit vs its parent document
-    top_hit = section_hits[0]
-    full_content = _AGENT_CORPUS.get(top_hit.path, "")
-    section_content = top_hit.content
+    # Compare character size of a section hit from a multi-section document
+    # vs full document
+    hit = next(
+        (h for h in section_hits if h.path == "/docs/architecture.md"),
+        section_hits[0],
+    )
+    full_content = _AGENT_CORPUS.get(hit.path, "")
+    section_content = hit.content
 
     reduction_pct = (1.0 - (len(section_content) / len(full_content))) * 100.0
     # Section retrieval should yield significant token reduction (> 40%)

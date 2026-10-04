@@ -19,6 +19,8 @@ __all__ = [
     "GrepMatch",
     "SearchHit",
     "SectionHit",
+    "WatchEvent",
+    "WorkspaceEntry",
     "format_mode",
 ]
 
@@ -64,6 +66,7 @@ class FileEntry:
     content: str | None = None
     data: bytes | None = None
     meta: dict[str, Any] | None = None
+    crdt: bool = False
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -103,6 +106,7 @@ class FileEntry:
             content=content,
             data=data,
             meta=row.get("meta"),
+            crdt=bool(row.get("crdt", False)),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
         )
@@ -214,4 +218,34 @@ class SectionHit:
             line_end=int(row.get("line_end") or 1),
             content=row.get("content") or "",
             score=float(row.get("score") or 0.0),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WatchEvent:
+    """A notification from a live query watch stream."""
+
+    action: str  # "CREATE", "UPDATE", "DELETE"
+    path: str
+    entry: FileEntry | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WorkspaceEntry:
+    """A row of the ``workspace`` table."""
+
+    id: RecordID
+    name: str
+    owner: str = "root"
+    is_public: bool = False
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> WorkspaceEntry:
+        return cls(
+            id=row["id"],
+            name=row.get("name") or "",
+            owner=row.get("owner") or "root",
+            is_public=bool(row.get("is_public") or False),
+            created_at=row.get("created_at"),
         )

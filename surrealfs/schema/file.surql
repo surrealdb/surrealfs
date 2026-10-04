@@ -288,6 +288,8 @@ DEFINE FIELD OVERWRITE content_type ON TABLE file TYPE string
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE meta        ON TABLE file TYPE option<object> FLEXIBLE DEFAULT NONE
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE crdt        ON TABLE file TYPE bool DEFAULT false
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT ''
     PERMISSIONS FOR update WHERE false;
 
@@ -759,6 +761,46 @@ DEFINE FIELD OVERWRITE base_gen    ON file_branch TYPE int DEFAULT 1;
 DEFINE FIELD OVERWRITE current_file ON file_branch TYPE option<record<file>>;
 DEFINE INDEX OVERWRITE idx_branch_ws_path ON file_branch FIELDS workspace, path UNIQUE;
 
+-- CRDT Peer State
+DEFINE TABLE OVERWRITE file_crdt SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR create, update, delete WHERE peer_owner = fn::sfs_me();
+DEFINE FIELD OVERWRITE file_id     ON file_crdt TYPE record<file>;
+DEFINE FIELD OVERWRITE peer_id     ON file_crdt TYPE string;
+DEFINE FIELD OVERWRITE peer_owner  ON file_crdt TYPE string;
+DEFINE FIELD OVERWRITE state_vec   ON file_crdt TYPE bytes;
+DEFINE FIELD OVERWRITE clock       ON file_crdt TYPE int;
+DEFINE FIELD OVERWRITE updated_at  ON file_crdt TYPE datetime VALUE time::now();
+DEFINE INDEX OVERWRITE idx_file_crdt ON file_crdt FIELDS file_id, peer_id UNIQUE;
+
+-- CRDT Update Log (append-only)
+DEFINE TABLE OVERWRITE file_crdt_update SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR create WHERE author = fn::sfs_me()
+                     AND fn::sfs_can_write(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR update, delete NONE;
+DEFINE FIELD OVERWRITE file_id      ON file_crdt_update TYPE record<file>;
+DEFINE FIELD OVERWRITE seq          ON file_crdt_update TYPE int;
+DEFINE FIELD OVERWRITE update_bytes ON file_crdt_update TYPE bytes;
+DEFINE FIELD OVERWRITE author       ON file_crdt_update TYPE string;
+DEFINE FIELD OVERWRITE base_gen   ON file_crdt_update TYPE int;
+DEFINE FIELD OVERWRITE created_at ON file_crdt_update TYPE datetime VALUE time::now();
+DEFINE INDEX OVERWRITE idx_crdt_seq ON file_crdt_update FIELDS file_id, seq UNIQUE;
+
+-- CRDT Snapshot
+DEFINE TABLE OVERWRITE file_crdt_snapshot SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR create, update, delete WHERE author = fn::sfs_me() OR fn::sfs_me() = 'root';
+DEFINE FIELD OVERWRITE file_id    ON file_crdt_snapshot TYPE record<file>;
+DEFINE FIELD OVERWRITE upto       ON file_crdt_snapshot TYPE int;
+DEFINE FIELD OVERWRITE state      ON file_crdt_snapshot TYPE bytes;
+DEFINE FIELD OVERWRITE author     ON file_crdt_snapshot TYPE string;
+DEFINE FIELD OVERWRITE created_at ON file_crdt_snapshot TYPE datetime VALUE time::now();
+DEFINE INDEX OVERWRITE idx_crdt_snap ON file_crdt_snapshot FIELDS file_id UNIQUE;
+
 -- =============================================================================
 -- In-Database Core & Atomic Operations
 -- =============================================================================
@@ -810,7 +852,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
         THROW 'sfs:not_found';
     };
     LET $row = (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-                       hash, generation, created_at, updated_at, meta,
+                       hash, generation, created_at, updated_at, meta, crdt,
                        IF content IS NOT NONE THEN string::len(content)
                        ELSE IF file IS NOT NONE THEN bytes::len(file)
                        ELSE 0 END AS size
@@ -825,7 +867,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
 DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
     IF $path = '/' {
         RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-                       hash, generation, created_at, updated_at, meta,
+                       hash, generation, created_at, updated_at, meta, crdt,
                        IF content IS NOT NONE THEN string::len(content)
                        ELSE IF file IS NOT NONE THEN bytes::len(file)
                        ELSE 0 END AS size
@@ -838,7 +880,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
         THROW 'sfs:not_found';
     };
     RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
-                   hash, generation, created_at, updated_at, meta,
+                   hash, generation, created_at, updated_at, meta, crdt,
                    IF content IS NOT NONE THEN string::len(content)
                    ELSE IF file IS NOT NONE THEN bytes::len(file)
                    ELSE 0 END AS size
@@ -855,7 +897,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_append(
         WHERE $if_generation IS NONE OR generation = $if_generation;
     IF array::len($r) = 0 { THROW 'sfs:denied_or_conflict' };
     RETURN (SELECT id, filename, path, content, content_type, is_folder, owner, mode, gate,
-                   hash, generation, created_at, updated_at, meta,
+                   hash, generation, created_at, updated_at, meta, crdt,
                    IF content IS NOT NONE THEN string::len(content)
                    ELSE IF file IS NOT NONE THEN bytes::len(file)
                    ELSE 0 END AS size
@@ -1002,6 +1044,101 @@ DEFINE FUNCTION OVERWRITE fn::sfs_neighbors($path: string, $relation: option<str
         (SELECT out.path AS target_path, out.filename AS target_name, 'links_to' AS relation FROM links_to WHERE in = $id)
     ELSE [] END;
     RETURN array::flatten([$r1, $r2, $r3, $r4, $r5]);
+};
+
+-- Workspace Branching Operations
+DEFINE FUNCTION OVERWRITE fn::sfs_fork_workspace($src: string, $dst: string, $owner: string) {
+    LET $existing = (SELECT VALUE id FROM ONLY workspace WHERE name = $dst AND owner = $owner LIMIT 1);
+    IF $existing IS NOT NONE {
+        THROW 'sfs:exists: workspace already exists';
+    };
+    LET $ws = (CREATE ONLY workspace CONTENT {
+        name: $dst,
+        owner: $owner
+    });
+    IF $src = 'main' {
+        LET $files = (SELECT id, path, generation FROM file WHERE deleted_at IS NONE AND is_folder = false);
+        FOR $f IN $files {
+            CREATE file_branch CONTENT {
+                workspace: $ws.id,
+                base_file: $f.id,
+                path: $f.path,
+                base_gen: $f.generation,
+                current_file: $f.id
+            };
+        };
+        RETURN { workspace: $dst, base_branch: $src, count: array::len($files) };
+    } ELSE {
+        LET $src_ws = (SELECT VALUE id FROM ONLY workspace WHERE name = $src AND owner = $owner LIMIT 1);
+        IF $src_ws IS NONE {
+            THROW 'sfs:not_found: source workspace not found';
+        };
+        LET $branches = (SELECT base_file, path, base_gen, current_file FROM file_branch WHERE workspace = $src_ws);
+        FOR $b IN $branches {
+            CREATE file_branch CONTENT {
+                workspace: $ws.id,
+                base_file: $b.base_file,
+                path: $b.path,
+                base_gen: $b.base_gen,
+                current_file: $b.current_file
+            };
+        };
+        RETURN { workspace: $dst, base_branch: $src, count: array::len($branches) };
+    };
+};
+
+DEFINE FUNCTION OVERWRITE fn::sfs_diff_workspace($branch: string, $owner: string) {
+    LET $ws = (SELECT VALUE id FROM ONLY workspace WHERE name = $branch AND owner = $owner LIMIT 1);
+    IF $ws IS NONE {
+        THROW 'sfs:not_found: workspace not found';
+    };
+    LET $records = (
+        SELECT 
+            path,
+            base_file,
+            base_gen,
+            base_file.generation AS current_base_gen,
+            current_file,
+            current_file.generation AS branch_gen,
+            current_file.content != base_file.content AS modified,
+            base_file.generation != base_gen AS conflict
+        FROM file_branch
+        WHERE workspace = $ws
+    );
+    RETURN $records;
+};
+
+DEFINE FUNCTION OVERWRITE fn::sfs_merge_workspace($branch: string, $target: string, $owner: string) {
+    LET $ws = (SELECT VALUE id FROM ONLY workspace WHERE name = $branch AND owner = $owner LIMIT 1);
+    IF $ws IS NONE {
+        THROW 'sfs:not_found: workspace not found';
+    };
+    LET $diffs = fn::sfs_diff_workspace($branch, $owner);
+    FOR $d IN $diffs {
+        IF $d.conflict = true {
+            THROW string::concat('sfs:conflict: concurrent change on ', $d.path);
+        };
+    };
+    FOR $d IN $diffs {
+        IF $d.modified = true {
+            LET $new_content = $d.current_file.content;
+            LET $target_id = $d.base_file;
+            UPDATE $target_id SET content = $new_content, updated_at = time::now();
+        };
+    };
+    DELETE file_branch WHERE workspace = $ws;
+    DELETE $ws;
+    RETURN { merged: $branch, into: $target, status: 'ok' };
+};
+
+DEFINE FUNCTION OVERWRITE fn::sfs_discard_workspace($branch: string, $owner: string) {
+    LET $ws = (SELECT VALUE id FROM ONLY workspace WHERE name = $branch AND owner = $owner LIMIT 1);
+    IF $ws IS NONE {
+        THROW 'sfs:not_found: workspace not found';
+    };
+    DELETE file_branch WHERE workspace = $ws;
+    DELETE $ws;
+    RETURN { discarded: $branch, status: 'ok' };
 };
 
 -- Seed: /home

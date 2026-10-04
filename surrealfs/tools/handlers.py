@@ -16,6 +16,7 @@ from ..errors import SurrealFsError
 from ..fs import SurrealFs
 from ..models import FileEntry
 from .args import (
+    AcquireLeaseArgs,
     AppendArgs,
     BacklinksArgs,
     CatArgs,
@@ -23,19 +24,23 @@ from .args import (
     CpArgs,
     DiffArgs,
     EditArgs,
+    ForkWorkspaceArgs,
     GlobArgs,
     GrepArgs,
     HeadArgs,
     HistoryArgs,
     LsArgs,
+    MergeWorkspaceArgs,
     MkdirArgs,
     MvArgs,
     ReadBytesArgs,
     ReadRangeArgs,
     RelateArgs,
+    ReleaseLeaseArgs,
     RestoreArgs,
     RmArgs,
     SearchArgs,
+    SearchSectionsArgs,
     TailArgs,
     TouchArgs,
     TreeArgs,
@@ -274,3 +279,49 @@ async def backlinks(ctx: ToolContext, args: BacklinksArgs) -> str:
     for rel in links:
         lines.append(f"  <-[{rel.relation}]- {rel.source_path}")
     return "\n".join(lines)
+
+
+async def search_sections(ctx: ToolContext, args: SearchSectionsArgs) -> str:
+    if ctx.embed is None:
+        return "Section search requires embedding to be configured."
+    qvec = await ctx.embed(args.query)
+    hits = await ctx.fs.search_sections(qvec, limit=args.limit)
+    if args.path:
+        hits = [
+            h
+            for h in hits
+            if h.path == args.path or h.path.startswith(args.path.rstrip("/") + "/")
+        ]
+    if not hits:
+        return f"No sections matching {args.query!r}"
+    lines = []
+    for h in hits:
+        lines.append(
+            f"### {h.path} #{h.heading} (score: {h.score:.3f}):\n{h.content.strip()}\n"
+        )
+    return "\n".join(lines)
+
+
+async def acquire_lease(ctx: ToolContext, args: AcquireLeaseArgs) -> str:
+    lock = await ctx.fs.acquire_lock(
+        args.path, ttl_seconds=args.ttl_seconds, reason=args.reason
+    )
+    return (
+        f"Acquired lease on {lock.path} for {lock.ttl_seconds}s "
+        f"(holder: {lock.holder}, expires: {lock.expires_at})"
+    )
+
+
+async def release_lease(ctx: ToolContext, args: ReleaseLeaseArgs) -> str:
+    await ctx.fs.release_lock(args.path)
+    return f"Released lease on {args.path}"
+
+
+async def fork_workspace(ctx: ToolContext, args: ForkWorkspaceArgs) -> str:
+    await ctx.fs.fork_workspace(args.branch, source=args.source_branch)
+    return f"Forked workspace branch {args.branch!r} from {args.source_branch!r}"
+
+
+async def merge_workspace(ctx: ToolContext, args: MergeWorkspaceArgs) -> str:
+    await ctx.fs.merge_workspace(args.branch, target=args.target_branch)
+    return f"Merged workspace branch {args.branch!r} into {args.target_branch!r}"
