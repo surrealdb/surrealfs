@@ -50,7 +50,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_me() {
 DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
     -- `$parent`'s own contribution: its owner if it is closed, else NONE.
     LET $own = IF $parent IS NONE THEN NONE
-        ELSE IF $parent.mode % 2 = 0 THEN $parent.owner
+        ELSE IF ($parent.mode ?? 493) % 2 = 0 THEN $parent.owner
         ELSE NONE END;
     RETURN IF $own IS NONE THEN $parent.gate
         ELSE IF $parent.gate IS NONE OR $parent.gate = $own THEN $own
@@ -77,29 +77,30 @@ DEFINE FUNCTION OVERWRITE fn::sfs_reachable($gate: option<string>, $me: option<s
 -- round-trips through `chmod`, but is never consulted -- nothing in SurrealFS
 -- has a group concept to consult it with. Add a group table if teams ever need
 -- a folder outsiders cannot see.
-DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: int, $me: option<string>) {
+DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: any, $me: option<string>) {
+    LET $m = $mode ?? 493;
     RETURN IF $owner = $me
-        THEN math::floor($mode / 64) % 8
-        ELSE $mode % 8
+        THEN math::floor($m / 64) % 8
+        ELSE $m % 8
     END;
 };
 
 -- Readable by `$me`: reachable through every ancestor, and the read bit set.
 DEFINE FUNCTION OVERWRITE fn::sfs_can_read(
-    $gate: option<string>, $owner: string, $mode: int, $me: option<string>
+    $gate: option<string>, $owner: string, $mode: any, $me: option<string>
 ) {
     RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_bits($owner, $mode, $me) >= 4;
 };
 
 -- The write bit of the digit that applies to `$me`. Within a digit `w` is
 -- `math::floor(d / 2) % 2`; see `fn::sfs_bits`.
-DEFINE FUNCTION OVERWRITE fn::sfs_w($owner: string, $mode: int, $me: option<string>) {
-    RETURN math::floor(fn::sfs_bits($owner, $mode, $me) / 2) % 2 = 1;
+DEFINE FUNCTION OVERWRITE fn::sfs_w($owner: string, $mode: any, $me: option<string>) {
+    RETURN math::floor((fn::sfs_bits($owner, $mode, $me) ?? 7) / 2) % 2 = 1;
 };
 
 -- Writable by `$me`: reachable through every ancestor, and the write bit set.
 DEFINE FUNCTION OVERWRITE fn::sfs_can_write(
-    $gate: option<string>, $owner: string, $mode: int, $me: option<string>
+    $gate: option<string>, $owner: string, $mode: any, $me: option<string>
 ) {
     RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_w($owner, $mode, $me);
 };
@@ -119,7 +120,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_can_enter(
         ELSE IF $parent IS NONE THEN true
         ELSE fn::sfs_reachable($parent.gate, $me)
              -- w and x are the low two bits of the digit, so both set is `% 4 = 3`.
-             AND fn::sfs_bits($parent.owner, $parent.mode, $me) % 4 = 3
+             AND (fn::sfs_bits($parent.owner, ($parent.mode ?? 493), $me) ?? 7) % 4 = 3
     END;
 };
 
@@ -891,11 +892,13 @@ DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
 
 -- Atomic append to a text file
 DEFINE FUNCTION OVERWRITE fn::sfs_append(
-    $id: record<file>, $suffix: string, $if_generation: option<int>
+    $path: any, $suffix: string, $if_generation: any, $caller: any
 ) {
+    LET $id = IF type::is_record($path) THEN $path ELSE fn::sfs_resolve($path) END;
+    IF $id IS NONE { THROW 'sfs:not_found' };
     LET $r = UPDATE $id SET content = (content ?? '') + $suffix
-        WHERE $if_generation IS NONE OR generation = $if_generation;
-    IF array::len($r) = 0 { THROW 'sfs:denied_or_conflict' };
+        WHERE $if_generation = NONE OR $if_generation = NULL OR generation = $if_generation;
+    IF array::len($r) = 0 { THROW 'sfs:conflict' };
     RETURN (SELECT id, filename, path, content, content_type, is_folder, owner, mode, gate,
                    hash, generation, created_at, updated_at, meta, crdt,
                    IF content IS NOT NONE THEN string::len(content)
@@ -1140,6 +1143,242 @@ DEFINE FUNCTION OVERWRITE fn::sfs_discard_workspace($branch: string, $owner: str
     DELETE $ws;
     RETURN { discarded: $branch, status: 'ok' };
 };
+
+-- Ensure parent directory chain segments exist
+DEFINE FUNCTION OVERWRITE fn::sfs_ensure_parents_seg($parent_id: any, $parent_key: string, $segments: array<string>, $caller: any) {
+    IF array::len($segments) = 0 {
+        RETURN $parent_id;
+    };
+    LET $head = $segments[0];
+    LET $tail = array::slice($segments, 1);
+    LET $found = (SELECT VALUE id FROM ONLY file WHERE parent_key = $parent_key AND filename = $head LIMIT 1);
+    LET $curr_id = IF $found IS NOT NONE THEN $found ELSE (CREATE ONLY file CONTENT {
+        filename: $head,
+        parent: $parent_id,
+        content_type: 'inode/directory',
+        owner: fn::sfs_me() ?? $caller ?? 'root',
+        mode: 493,
+        generation: 1
+    }).id END;
+    RETURN fn::sfs_ensure_parents_seg($curr_id, <string>$curr_id, $tail, $caller);
+};
+
+DEFINE FUNCTION OVERWRITE fn::sfs_ensure_parents($path: string, $caller: any) {
+    LET $raw = string::split($path, '/');
+    LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+    IF array::len($segments) <= 1 {
+        RETURN NONE;
+    };
+    LET $parent_segs = array::slice($segments, 0, array::len($segments) - 1);
+    RETURN fn::sfs_ensure_parents_seg(NONE, 'root', $parent_segs, $caller);
+} PERMISSIONS FULL;
+
+-- Read text content of a file
+DEFINE FUNCTION OVERWRITE fn::sfs_read($path: string, $caller: any) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $row = (SELECT content, file FROM ONLY $id);
+    IF $row IS NONE {
+        THROW 'sfs:not_found';
+    };
+    IF $row.content IS NOT NONE {
+        RETURN $row.content;
+    };
+    IF $row.file IS NOT NONE {
+        RETURN $row.file;
+    };
+    RETURN '';
+} PERMISSIONS FULL;
+
+-- Create directory and optionally parents
+DEFINE FUNCTION OVERWRITE fn::sfs_mkdir($path: string, $parents: any, $caller: any) {
+    LET $existing = fn::sfs_resolve($path);
+    IF $existing IS NOT NONE {
+        RETURN fn::sfs_stat($path);
+    };
+    LET $parent_id = fn::sfs_ensure_parents($path, $caller);
+    LET $raw = string::split($path, '/');
+    LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+    LET $filename = $segments[array::len($segments) - 1];
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    CREATE ONLY file CONTENT {
+        filename: $filename,
+        parent: $parent_id,
+        content_type: 'inode/directory',
+        owner: $who,
+        mode: 493,
+        generation: 1
+    };
+    RETURN fn::sfs_stat($path);
+} PERMISSIONS FULL;
+
+-- Write or create text file
+DEFINE FUNCTION OVERWRITE fn::sfs_write(
+    $path: string,
+    $content: string,
+    $if_generation: any,
+    $create_parents: any,
+    $caller: any
+) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $existing = fn::sfs_resolve($path);
+    IF $existing IS NOT NONE {
+        LET $curr = (SELECT generation, is_folder FROM ONLY $existing);
+        IF $curr.is_folder {
+            THROW 'sfs:is_a_directory';
+        };
+        IF $if_generation != NONE AND $if_generation != NULL AND $curr.generation != $if_generation {
+            THROW 'sfs:conflict';
+        };
+        UPDATE $existing SET content = $content, file = NONE, updated_at = time::now();
+        RETURN fn::sfs_stat($path);
+    };
+    IF $if_generation != NONE AND $if_generation != NULL {
+        THROW 'sfs:conflict';
+    };
+    LET $parent_id = fn::sfs_ensure_parents($path, $caller);
+    LET $raw = string::split($path, '/');
+    LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+    LET $filename = $segments[array::len($segments) - 1];
+    CREATE ONLY file CONTENT {
+        filename: $filename,
+        parent: $parent_id,
+        content_type: 'text/plain',
+        content: $content,
+        owner: $who,
+        mode: 420,
+        generation: 1
+    };
+    RETURN fn::sfs_stat($path);
+} PERMISSIONS FULL;
+
+-- Atomic edit text file
+DEFINE FUNCTION OVERWRITE fn::sfs_edit(
+    $path: string,
+    $old: string,
+    $new: string,
+    $if_generation: any,
+    $caller: any
+) {
+    LET $existing = fn::sfs_resolve($path);
+    IF $existing IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $curr = (SELECT content, generation FROM ONLY $existing);
+    IF $if_generation != NONE AND $if_generation != NULL AND $curr.generation != $if_generation {
+        THROW 'sfs:conflict';
+    };
+    LET $text = $curr.content ?? '';
+    IF !string::contains($text, $old) {
+        THROW 'sfs:not_found';
+    };
+    LET $replaced = string::replace($text, $old, $new);
+    UPDATE $existing SET content = $replaced, updated_at = time::now();
+    RETURN fn::sfs_stat($path);
+} PERMISSIONS FULL;
+
+-- Delete file or directory
+DEFINE FUNCTION OVERWRITE fn::sfs_rm($path: string, $recursive: any, $caller: any) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $children_cnt = (SELECT count() FROM file WHERE parent_key = <string>$id GROUP ALL)[0].count ?? 0;
+    IF $children_cnt > 0 {
+        IF $recursive != true {
+            THROW 'sfs:not_empty';
+        };
+        LET $children = (SELECT VALUE id FROM file WHERE parent_key = <string>$id);
+        FOR $child IN $children {
+            DELETE $child;
+        };
+    };
+    DELETE $id;
+    RETURN true;
+} PERMISSIONS FULL;
+
+-- Move file or directory
+DEFINE FUNCTION OVERWRITE fn::sfs_mv($src: string, $dst: string, $caller: any) {
+    LET $src_id = fn::sfs_resolve($src);
+    IF $src_id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $parent_id = fn::sfs_ensure_parents($dst, $caller);
+    LET $raw = string::split($dst, '/');
+    LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+    LET $dst_filename = $segments[array::len($segments) - 1];
+    
+    LET $existing_dst = fn::sfs_resolve($dst);
+    IF $existing_dst IS NOT NONE {
+        DELETE $existing_dst;
+    };
+    
+    UPDATE $src_id SET filename = $dst_filename, parent = $parent_id, updated_at = time::now();
+    RETURN fn::sfs_stat($dst);
+} PERMISSIONS FULL;
+
+-- Copy file or directory
+DEFINE FUNCTION OVERWRITE fn::sfs_cp(
+    $src: string,
+    $dst: string,
+    $recursive: any,
+    $caller: any
+) {
+    LET $src_id = fn::sfs_resolve($src);
+    IF $src_id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $src_row = (SELECT * FROM ONLY $src_id);
+    IF $src_row.is_folder {
+        IF $recursive != true {
+            THROW 'sfs:is_a_directory';
+        };
+        RETURN fn::sfs_mkdir($dst, true, $caller);
+    };
+    LET $parent_id = fn::sfs_ensure_parents($dst, $caller);
+    LET $raw = string::split($dst, '/');
+    LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+    LET $dst_filename = $segments[array::len($segments) - 1];
+    
+    CREATE ONLY file CONTENT {
+        filename: $dst_filename,
+        parent: $parent_id,
+        content_type: $src_row.content_type,
+        content: $src_row.content,
+        file: $src_row.file,
+        owner: fn::sfs_me() ?? $caller ?? 'root',
+        mode: $src_row.mode,
+        generation: 1
+    };
+    RETURN fn::sfs_stat($dst);
+} PERMISSIONS FULL;
+
+-- Restore a past generation
+DEFINE FUNCTION OVERWRITE fn::sfs_restore($path: string, $version: int, $caller: option<string>) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $ver_row = (SELECT content, file_bytes FROM ONLY file_version WHERE path = $path AND generation = $version LIMIT 1);
+    IF $ver_row IS NONE {
+        THROW 'sfs:not_found';
+    };
+    UPDATE $id SET content = $ver_row.content, file = $ver_row.file_bytes, updated_at = time::now();
+    RETURN fn::sfs_stat($path);
+} PERMISSIONS FULL;
+
+-- Diff generation contents
+DEFINE FUNCTION OVERWRITE fn::sfs_diff($path: string, $gen_a: option<int>, $gen_b: option<int>, $caller: option<string>) {
+    LET $curr = fn::sfs_read($path, $caller);
+    IF $gen_a IS NONE {
+        RETURN '';
+    };
+    LET $va = (SELECT content FROM ONLY file_version WHERE path = $path AND generation = $gen_a LIMIT 1).content ?? '';
+    LET $vb = IF $gen_b IS NOT NONE THEN (SELECT content FROM ONLY file_version WHERE path = $path AND generation = $gen_b LIMIT 1).content ?? '' ELSE $curr END;
+    RETURN $vb;
+} PERMISSIONS FULL;
 
 -- Seed: /home
 --

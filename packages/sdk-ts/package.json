@@ -1,0 +1,42 @@
+{
+  "name": "@surrealdb/fs",
+  "version": "0.2.0",
+  "description": "SurrealFS TypeScript SDK - Virtual agent filesystem on SurrealDB",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./ai": {
+      "types": "./dist/ai.d.ts",
+      "import": "./dist/ai.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "bun test"
+  },
+  "keywords": [
+    "surrealdb",
+    "filesystem",
+    "agents",
+    "ai",
+    "crdt",
+    "vector-search"
+  ],
+  "author": "SurrealDB",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "surrealdb": "^2.0.10"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "bun-types": "^1.2.0",
+    "typescript": "^5.9.0"
+  }
+}
