@@ -12,7 +12,14 @@ from typing import Any
 
 from surrealdb import RecordID
 
-__all__ = ["FileEntry", "GrepMatch", "SearchHit", "format_mode"]
+__all__ = [
+    "FileEntry",
+    "FileVersionEntry",
+    "GraphRelation",
+    "GrepMatch",
+    "SearchHit",
+    "format_mode",
+]
 
 FOLDER_CONTENT_TYPE = "inode/directory"
 
@@ -118,3 +125,63 @@ class GrepMatch:
     path: str
     line_number: int
     line: str
+
+
+@dataclass(frozen=True, slots=True)
+class FileVersionEntry:
+    """A historical snapshot of a file from ``file_version``."""
+
+    id: RecordID | str
+    file: RecordID | str
+    generation: int
+    path: str
+    content_type: str = "text/plain"
+    hash: str = ""
+    author: str = "root"
+    owner: str = "root"
+    mode: int = 0o666
+    op: str = "write"
+    size: int = 0
+    created_at: datetime | None = None
+
+    @property
+    def permissions(self) -> str:
+        return format_mode(self.mode, is_folder=False)
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> FileVersionEntry:
+        return cls(
+            id=row["id"],
+            file=row.get("file", ""),
+            generation=int(row.get("generation") or 1),
+            path=row.get("path", ""),
+            content_type=row.get("content_type", "text/plain"),
+            hash=row.get("hash") or "",
+            author=row.get("author") or "root",
+            owner=row.get("owner") or "root",
+            mode=int(row.get("mode") or 0o666),
+            op=row.get("op") or "write",
+            size=int(row.get("size") or 0),
+            created_at=row.get("created_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class GraphRelation:
+    """An edge between files in the knowledge graph."""
+
+    source_path: str
+    target_path: str
+    relation: str
+    source_name: str = ""
+    target_name: str = ""
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> GraphRelation:
+        return cls(
+            source_path=row.get("source_path") or "",
+            target_path=row.get("target_path") or "",
+            relation=row.get("relation") or "",
+            source_name=row.get("source_name") or "",
+            target_name=row.get("target_name") or "",
+        )

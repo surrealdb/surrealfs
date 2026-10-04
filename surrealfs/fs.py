@@ -38,7 +38,14 @@ from .errors import (
     PermissionDenied,
     QueryError,
 )
-from .models import FOLDER_CONTENT_TYPE, FileEntry, GrepMatch, SearchHit
+from .models import (
+    FOLDER_CONTENT_TYPE,
+    FileEntry,
+    FileVersionEntry,
+    GraphRelation,
+    GrepMatch,
+    SearchHit,
+)
 
 __all__ = [
     "ROOT",
@@ -1421,6 +1428,178 @@ class SurrealFs:
                     {"id": row["id"], "vector": list(vector), "version": version},
                 )
                 total += 1
+
+    async def history(self, path: str, *, limit: int = 20) -> list[FileVersionEntry]:
+        """List historical revisions of a file at `path`, newest first."""
+        clean = paths.normalize(path)
+        rows = await self._query(
+            "RETURN fn::sfs_history($path, $lim);",
+            {"path": clean, "lim": int(limit)},
+        )
+        return [FileVersionEntry.from_row(r) for r in (rows or [])]
+
+    async def diff(
+        self, path: str, from_generation: int, to_generation: int | None = None
+    ) -> str:
+        """Generate unified diff between two revisions or a revision and current."""
+        clean = paths.normalize(path)
+        from_row = await self._query(
+            "RETURN fn::sfs_version_content($path, $gen);",
+            {"path": clean, "gen": int(from_generation)},
+        )
+        if not from_row:
+            raise NotFound(f"Version {from_generation} of {clean} not found")
+        from_content = from_row.get("content") or ""
+
+        if to_generation is not None:
+            to_row = await self._query(
+                "RETURN fn::sfs_version_content($path, $gen);",
+                {"path": clean, "gen": int(to_generation)},
+            )
+            if not to_row:
+                raise NotFound(f"Version {to_generation} of {clean} not found")
+            to_content = to_row.get("content") or ""
+            to_label = f"gen {to_generation}"
+        else:
+            to_content = await self.read_text(clean)
+            to_label = "current"
+
+        from_lines = from_content.splitlines(keepends=True)
+        to_lines = to_content.splitlines(keepends=True)
+        diff_lines = list(
+            difflib.unified_diff(
+                from_lines,
+                to_lines,
+                fromfile=f"{clean} (gen {from_generation})",
+                tofile=f"{clean} ({to_label})",
+            )
+        )
+        return "".join(diff_lines)
+
+    async def restore(self, path: str, generation: int) -> FileEntry:
+        """Restore a historical version of a file as a new generation."""
+        clean = paths.normalize(path)
+        row = await self._query(
+            "RETURN fn::sfs_version_content($path, $gen);",
+            {"path": clean, "gen": int(generation)},
+        )
+        if not row:
+            raise NotFound(f"Version {generation} of {clean} not found")
+        content = row.get("content")
+        file_bytes = row.get("file_bytes")
+        if content is not None:
+            return await self.write_text(clean, content)
+        elif file_bytes is not None:
+            return await self.write_bytes(clean, file_bytes)
+        else:
+            return await self.write_text(clean, "")
+
+    async def undelete(self, path: str) -> FileEntry:
+        """Re-create the last deleted version of a file."""
+        clean = paths.normalize(path)
+        if await self.exists(clean):
+            raise AlreadyExists(f"File already exists: {clean}")
+        rows = await self._query(
+            "SELECT * FROM file_version WHERE path = $path "
+            "ORDER BY created_at DESC, generation DESC LIMIT 1;",
+            {"path": clean},
+        )
+        if not rows:
+            raise NotFound(f"No version history found to undelete: {clean}")
+        last = rows[0]
+        content = last.get("content")
+        file_bytes = last.get("file_bytes")
+        if content is not None:
+            return await self.write_text(clean, content)
+        elif file_bytes is not None:
+            return await self.write_bytes(clean, file_bytes)
+        else:
+            return await self.write_text(clean, "")
+
+    async def relate(self, from_path: str, relation: str, to_path: str) -> bool:
+        """Create a directional semantic relation edge between two files."""
+        valid_relations = {
+            "references",
+            "supersedes",
+            "derives_from",
+            "implements",
+            "links_to",
+        }
+        if relation not in valid_relations:
+            expected = sorted(valid_relations)
+            raise ValueError(
+                f"Invalid relation '{relation}'. Expected one of {expected}"
+            )
+        from_clean = paths.normalize(from_path)
+        to_clean = paths.normalize(to_path)
+        await self._query(
+            "RETURN fn::sfs_relate($from, $rel, $to);",
+            {"from": from_clean, "rel": relation, "to": to_clean},
+        )
+        return True
+
+    async def backlinks(self, path: str) -> list[GraphRelation]:
+        """List all inbound relations pointing to `path`."""
+        clean = paths.normalize(path)
+        rows = await self._query(
+            "RETURN fn::sfs_backlinks($path);",
+            {"path": clean},
+        )
+        return [
+            GraphRelation(
+                source_path=r.get("source_path", ""),
+                target_path=clean,
+                relation=r.get("relation", ""),
+                source_name=r.get("source_name", ""),
+                target_name=paths.basename(clean),
+            )
+            for r in (rows or [])
+        ]
+
+    async def get_neighbors(
+        self, path: str, *, relation: str | None = None
+    ) -> list[GraphRelation]:
+        """List all outbound relations from `path`."""
+        clean = paths.normalize(path)
+        rows = await self._query(
+            "RETURN fn::sfs_neighbors($path, $rel);",
+            {"path": clean, "rel": relation},
+        )
+        return [
+            GraphRelation(
+                source_path=clean,
+                target_path=r.get("target_path", ""),
+                relation=r.get("relation", ""),
+                source_name=paths.basename(clean),
+                target_name=r.get("target_name", ""),
+            )
+            for r in (rows or [])
+        ]
+
+    async def acquire_lock(
+        self, path: str, *, ttl_seconds: int = 60, reason: str = "advisory lease"
+    ) -> dict[str, Any]:
+        """Acquire or renew an advisory lease on a file."""
+        clean = paths.normalize(path)
+        row = await self._query(
+            "RETURN fn::sfs_acquire_lock($path, $holder, $ttl, $reason);",
+            {
+                "path": clean,
+                "holder": self.user,
+                "ttl": int(ttl_seconds),
+                "reason": reason,
+            },
+        )
+        return row if isinstance(row, dict) else {}
+
+    async def release_lock(self, path: str) -> bool:
+        """Release an advisory lease on a file."""
+        clean = paths.normalize(path)
+        await self._query(
+            "RETURN fn::sfs_release_lock($path, $holder);",
+            {"path": clean, "holder": self.user},
+        )
+        return True
 
 
 _EXTENSION_TYPES = {

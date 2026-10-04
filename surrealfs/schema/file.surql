@@ -587,10 +587,26 @@ DEFINE INDEX OVERWRITE idx_chunk_file_order ON file_chunk FIELDS file, chunk_ind
 DEFINE INDEX OVERWRITE idx_hnsw_chunk_embedding ON file_chunk FIELDS embedding
     HNSW DIMENSION 1536 DIST COSINE TYPE F32;
 
+-- Section-level AST / Markdown Chunking: file_section
+DEFINE TABLE OVERWRITE file_section SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
+DEFINE FIELD OVERWRITE file_id     ON file_section TYPE record<file>;
+DEFINE FIELD OVERWRITE section_idx ON file_section TYPE int;
+DEFINE FIELD OVERWRITE heading     ON file_section TYPE string;
+DEFINE FIELD OVERWRITE line_start  ON file_section TYPE int;
+DEFINE FIELD OVERWRITE line_end    ON file_section TYPE int;
+DEFINE FIELD OVERWRITE content     ON file_section TYPE string;
+DEFINE FIELD OVERWRITE embedding   ON file_section TYPE option<array<float, 1536>>;
+DEFINE FIELD OVERWRITE source_hash ON file_section TYPE string;
+DEFINE INDEX OVERWRITE idx_section_unique ON file_section FIELDS file_id, section_idx UNIQUE;
+DEFINE INDEX IF NOT EXISTS idx_section_hnsw ON file_section FIELDS embedding HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+
 -- Version History: file_version
 DEFINE TABLE OVERWRITE file_version SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read(gate, owner, mode, fn::sfs_me())
         FOR create, update, delete WHERE false; -- Written strictly by EVENT triggers
 DEFINE FIELD OVERWRITE file        ON file_version TYPE record<file>;
 DEFINE FIELD OVERWRITE generation  ON file_version TYPE int;
@@ -600,26 +616,86 @@ DEFINE FIELD OVERWRITE file_bytes  ON file_version TYPE option<bytes>;
 DEFINE FIELD OVERWRITE content_type ON file_version TYPE string;
 DEFINE FIELD OVERWRITE hash        ON file_version TYPE string;
 DEFINE FIELD OVERWRITE author      ON file_version TYPE string;
+DEFINE FIELD OVERWRITE owner       ON file_version TYPE string;
+DEFINE FIELD OVERWRITE mode        ON file_version TYPE int;
+DEFINE FIELD OVERWRITE gate        ON file_version TYPE option<string>;
+DEFINE FIELD OVERWRITE op          ON file_version TYPE string;
+DEFINE FIELD OVERWRITE size        ON file_version TYPE int;
 DEFINE FIELD OVERWRITE created_at  ON file_version TYPE datetime;
-DEFINE INDEX OVERWRITE idx_version_file_gen ON file_version FIELDS file, generation UNIQUE;
+DEFINE INDEX OVERWRITE idx_version_file_gen ON file_version FIELDS file, generation;
+DEFINE INDEX OVERWRITE idx_version_path ON file_version FIELDS path;
 
--- Snapshot previous generation to file_version when generation changes
+-- Snapshot previous generation to file_version when generation changes or is deleted
 DEFINE EVENT OVERWRITE evt_file_version ON file
-    WHEN $event = 'UPDATE' AND $before.generation != $after.generation
+    WHEN $event = 'DELETE'
+      OR ($event = 'UPDATE' AND (
+          $before.generation != $after.generation
+          OR $before.content != $after.content
+          OR $before.file != $after.file
+          OR $before.parent != $after.parent
+          OR $before.filename != $after.filename
+          OR $before.mode != $after.mode
+      ))
     THEN {
-        LET $p = (SELECT VALUE path FROM ONLY $after.id);
+        LET $row = IF $event = 'DELETE' THEN $before ELSE $after END;
+        LET $p = IF $event = 'DELETE' THEN (($before.parent.path || '') + '/' + <string>$before.filename)
+                 ELSE (SELECT VALUE path FROM ONLY $after.id)
+                 END;
         CREATE file_version CONTENT {
-            file: $after.id,
-            generation: $before.generation,
+            file: $row.id,
+            generation: $before.generation ?? 1,
             path: $p,
             content: $before.content,
             file_bytes: $before.file,
             content_type: $before.content_type,
-            hash: $before.hash,
-            author: $before.owner,
+            hash: $before.hash ?? '',
+            author: fn::sfs_me() ?? $before.owner,
+            owner: $before.owner,
+            mode: $before.mode,
+            gate: fn::sfs_gate($before.parent),
+            op: IF $event = 'DELETE' THEN 'delete'
+                ELSE IF $before.mode != $after.mode THEN 'chmod'
+                ELSE IF $before.filename != $after.filename OR $before.parent != $after.parent THEN 'rename'
+                ELSE 'write'
+                END,
+            size: IF $before.content IS NOT NONE THEN string::len($before.content)
+                  ELSE IF $before.file IS NOT NONE THEN bytes::len($before.file)
+                  ELSE 0 END,
             created_at: time::now()
         };
     };
+
+-- Knowledge Graph Relations
+DEFINE TABLE OVERWRITE references   SCHEMAFULL TYPE RELATION IN file OUT file
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
+                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
+        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+
+DEFINE TABLE OVERWRITE supersedes   SCHEMAFULL TYPE RELATION IN file OUT file
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
+                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
+        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+
+DEFINE TABLE OVERWRITE derives_from SCHEMAFULL TYPE RELATION IN file OUT file
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
+                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
+        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+
+DEFINE TABLE OVERWRITE implements   SCHEMAFULL TYPE RELATION IN file OUT file
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
+                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
+        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+
+DEFINE TABLE OVERWRITE links_to     SCHEMAFULL TYPE RELATION IN file OUT file
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
+                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
+        FOR create, update, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+
 
 -- Swarm Advisory Leases: file_lock
 DEFINE TABLE OVERWRITE file_lock SCHEMAFULL
@@ -820,6 +896,89 @@ DEFINE FUNCTION OVERWRITE fn::sfs_chmod($path: string, $mode: int) {
         THROW 'sfs:denied';
     };
     RETURN true;
+};
+
+-- Return version history for a path (newest first)
+DEFINE FUNCTION OVERWRITE fn::sfs_history($path: string, $limit: option<int>) {
+    LET $lim = $limit ?? 20;
+    RETURN (
+        SELECT id, file, generation, path, content_type, hash, author, owner, mode, op, size, created_at
+        FROM file_version
+        WHERE path = $path
+        ORDER BY created_at DESC, generation DESC
+        LIMIT $lim
+    );
+};
+
+-- Fetch content of a specific historical version
+DEFINE FUNCTION OVERWRITE fn::sfs_version_content($path: string, $generation: int) {
+    LET $v = (SELECT content, file_bytes FROM ONLY file_version
+              WHERE path = $path AND generation = $generation
+              LIMIT 1);
+    IF $v IS NONE {
+        THROW 'sfs:not_found';
+    };
+    RETURN $v;
+};
+
+-- Relate two files via a named relation edge
+DEFINE FUNCTION OVERWRITE fn::sfs_relate(
+    $from_path: string, $relation: string, $to_path: string
+) {
+    LET $from_id = fn::sfs_resolve($from_path);
+    IF $from_id IS NONE { THROW 'sfs:not_found' };
+    LET $to_id = fn::sfs_resolve($to_path);
+    IF $to_id IS NONE { THROW 'sfs:not_found' };
+
+    IF $relation = 'references' {
+        RELATE $from_id->references->$to_id;
+    } ELSE IF $relation = 'supersedes' {
+        RELATE $from_id->supersedes->$to_id;
+    } ELSE IF $relation = 'derives_from' {
+        RELATE $from_id->derives_from->$to_id;
+    } ELSE IF $relation = 'implements' {
+        RELATE $from_id->implements->$to_id;
+    } ELSE IF $relation = 'links_to' {
+        RELATE $from_id->links_to->$to_id;
+    } ELSE {
+        THROW 'sfs:invalid_relation';
+    };
+    RETURN true;
+};
+
+-- Backlinks pointing to a file
+DEFINE FUNCTION OVERWRITE fn::sfs_backlinks($path: string) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE { THROW 'sfs:not_found' };
+    LET $r1 = (SELECT in.path AS source_path, in.filename AS source_name, 'references' AS relation FROM references WHERE out = $id);
+    LET $r2 = (SELECT in.path AS source_path, in.filename AS source_name, 'supersedes' AS relation FROM supersedes WHERE out = $id);
+    LET $r3 = (SELECT in.path AS source_path, in.filename AS source_name, 'derives_from' AS relation FROM derives_from WHERE out = $id);
+    LET $r4 = (SELECT in.path AS source_path, in.filename AS source_name, 'implements' AS relation FROM implements WHERE out = $id);
+    LET $r5 = (SELECT in.path AS source_path, in.filename AS source_name, 'links_to' AS relation FROM links_to WHERE out = $id);
+    RETURN array::flatten([$r1, $r2, $r3, $r4, $r5]);
+};
+
+-- Forward relations from a file
+DEFINE FUNCTION OVERWRITE fn::sfs_neighbors($path: string, $relation: option<string>) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE { THROW 'sfs:not_found' };
+    LET $rel = $relation;
+    LET $r1 = IF $rel IS NONE OR $rel = 'references' THEN
+        (SELECT out.path AS target_path, out.filename AS target_name, 'references' AS relation FROM references WHERE in = $id)
+    ELSE [] END;
+    LET $r2 = IF $rel IS NONE OR $rel = 'supersedes' THEN
+        (SELECT out.path AS target_path, out.filename AS target_name, 'supersedes' AS relation FROM supersedes WHERE in = $id)
+    ELSE [] END;
+    LET $r3 = IF $rel IS NONE OR $rel = 'derives_from' THEN
+        (SELECT out.path AS target_path, out.filename AS target_name, 'derives_from' AS relation FROM derives_from WHERE in = $id)
+    ELSE [] END;
+    LET $r4 = IF $rel IS NONE OR $rel = 'implements' THEN
+        (SELECT out.path AS target_path, out.filename AS target_name, 'implements' AS relation FROM implements WHERE in = $id)
+    ELSE [] END;
+    LET $r5 = IF $rel IS NONE OR $rel = 'links_to' THEN
+        (SELECT out.path AS target_path, out.filename AS target_name, 'links_to' AS relation FROM links_to WHERE in = $id)
+    ELSE [] END;
+    RETURN array::flatten([$r1, $r2, $r3, $r4, $r5]);
 };
 
 -- Seed: /home

@@ -30,6 +30,12 @@ provides_tools:
   - surrealfs_read_range
   - surrealfs_grep
   - surrealfs_tree
+  - surrealfs_history
+  - surrealfs_diff
+  - surrealfs_restore
+  - surrealfs_undelete
+  - surrealfs_relate
+  - surrealfs_backlinks
 # Points the agent at the bundled `notes` skill on the first turn of a session.
 # Hermes lists plugin skills nowhere, so without this the skill is unreachable.
 provides_hooks:

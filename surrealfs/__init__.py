@@ -44,7 +44,15 @@ from .errors import (
     SurrealFsError,
 )
 from .fs import ROOT, SurrealFs, default_mode
-from .models import FOLDER_CONTENT_TYPE, FileEntry, GrepMatch, SearchHit, format_mode
+from .models import (
+    FOLDER_CONTENT_TYPE,
+    FileEntry,
+    FileVersionEntry,
+    GraphRelation,
+    GrepMatch,
+    SearchHit,
+    format_mode,
+)
 from .schema import apply_schema, schema_sql
 
 __version__ = "0.2.0"
@@ -55,6 +63,8 @@ __all__ = [
     "ConflictError",
     "DirectoryNotEmpty",
     "FileEntry",
+    "FileVersionEntry",
+    "GraphRelation",
     "GrepMatch",
     "InvalidPath",
     "IsADirectory",

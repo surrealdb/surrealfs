@@ -75,6 +75,12 @@ TOOLS: tuple[ToolSpec, ...] = (
     ToolSpec("read_range", _args.ReadRangeArgs, _handlers.read_range),
     ToolSpec("grep", _args.GrepArgs, _handlers.grep),
     ToolSpec("tree", _args.TreeArgs, _handlers.tree),
+    ToolSpec("history", _args.HistoryArgs, _handlers.history),
+    ToolSpec("diff", _args.DiffArgs, _handlers.diff),
+    ToolSpec("restore", _args.RestoreArgs, _handlers.restore),
+    ToolSpec("undelete", _args.UndeleteArgs, _handlers.undelete),
+    ToolSpec("relate", _args.RelateArgs, _handlers.relate),
+    ToolSpec("backlinks", _args.BacklinksArgs, _handlers.backlinks),
 )
 
 # Same name, so the same `docs/search.md` describes both -- the description is

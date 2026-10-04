@@ -17,23 +17,29 @@ from ..fs import SurrealFs
 from ..models import FileEntry
 from .args import (
     AppendArgs,
+    BacklinksArgs,
     CatArgs,
     ChmodArgs,
     CpArgs,
+    DiffArgs,
     EditArgs,
     GlobArgs,
     GrepArgs,
     HeadArgs,
+    HistoryArgs,
     LsArgs,
     MkdirArgs,
     MvArgs,
     ReadBytesArgs,
     ReadRangeArgs,
+    RelateArgs,
+    RestoreArgs,
     RmArgs,
     SearchArgs,
     TailArgs,
     TouchArgs,
     TreeArgs,
+    UndeleteArgs,
     WriteBytesArgs,
     WriteFileArgs,
 )
@@ -217,3 +223,54 @@ async def grep(ctx: ToolContext, args: GrepArgs) -> str:
 
 async def tree(ctx: ToolContext, args: TreeArgs) -> str:
     return await ctx.fs.tree(args.path, max_depth=args.max_depth)
+
+
+async def history(ctx: ToolContext, args: HistoryArgs) -> str:
+    versions = await ctx.fs.history(args.path, limit=args.limit)
+    if not versions:
+        return f"No revision history for {args.path}"
+    lines = [f"Revisions for {args.path}:"]
+    for v in versions:
+        dt = v.created_at.strftime("%Y-%m-%d %H:%M:%S") if v.created_at else "unknown"
+        lines.append(
+            f"  gen {v.generation:<3} | {v.op:<6} | {v.author:<10} | "
+            f"{v.size:<6} bytes | {dt}"
+        )
+    return "\n".join(lines)
+
+
+async def diff(ctx: ToolContext, args: DiffArgs) -> str:
+    d = await ctx.fs.diff(
+        args.path,
+        from_generation=args.from_generation,
+        to_generation=args.to_generation,
+    )
+    return d if d else f"No differences found for {args.path}"
+
+
+async def restore(ctx: ToolContext, args: RestoreArgs) -> str:
+    entry = await ctx.fs.restore(args.path, generation=args.generation)
+    return (
+        f"Restored {entry.path} to generation {args.generation} "
+        f"(new generation {entry.generation})"
+    )
+
+
+async def undelete(ctx: ToolContext, args: UndeleteArgs) -> str:
+    entry = await ctx.fs.undelete(args.path)
+    return f"Recovered deleted file {entry.path} (generation {entry.generation})"
+
+
+async def relate(ctx: ToolContext, args: RelateArgs) -> str:
+    await ctx.fs.relate(args.from_path, args.relation, args.to_path)
+    return f"Linked {args.from_path} -[{args.relation}]-> {args.to_path}"
+
+
+async def backlinks(ctx: ToolContext, args: BacklinksArgs) -> str:
+    links = await ctx.fs.backlinks(args.path)
+    if not links:
+        return f"No incoming links to {args.path}"
+    lines = [f"Backlinks to {args.path}:"]
+    for rel in links:
+        lines.append(f"  <-[{rel.relation}]- {rel.source_path}")
+    return "\n".join(lines)

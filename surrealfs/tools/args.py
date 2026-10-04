@@ -11,23 +11,29 @@ from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
     "AppendArgs",
+    "BacklinksArgs",
     "CatArgs",
     "ChmodArgs",
     "CpArgs",
+    "DiffArgs",
     "EditArgs",
     "GlobArgs",
     "GrepArgs",
     "HeadArgs",
+    "HistoryArgs",
     "LsArgs",
     "MkdirArgs",
     "MvArgs",
     "ReadBytesArgs",
     "ReadRangeArgs",
+    "RelateArgs",
+    "RestoreArgs",
     "RmArgs",
     "SearchArgs",
     "TailArgs",
     "TouchArgs",
     "TreeArgs",
+    "UndeleteArgs",
     "WriteBytesArgs",
     "WriteFileArgs",
 ]
@@ -190,4 +196,56 @@ class TreeArgs(_Args):
     path: str = Field("/", description="Folder to visualize. Absolute, defaults to /")
     max_depth: int = Field(
         3, description="Maximum directory depth to traverse", ge=1, le=10
+    )
+
+
+class HistoryArgs(_Args):
+    path: str = Field(
+        ..., description="File to inspect revision history for", min_length=1
+    )
+    limit: int = Field(
+        20, description="Maximum number of historical entries to return", ge=1, le=100
+    )
+
+
+class DiffArgs(_Args):
+    path: str = Field(..., description="File to diff", min_length=1)
+    from_generation: int = Field(
+        ..., description="Baseline generation number to compare from", ge=1
+    )
+    to_generation: int | None = Field(
+        None,
+        description="Target generation number to compare to (defaults to current)",
+    )
+
+
+class RestoreArgs(_Args):
+    path: str = Field(..., description="File to restore", min_length=1)
+    generation: int = Field(
+        ..., description="Historical generation number to restore", ge=1
+    )
+
+
+class UndeleteArgs(_Args):
+    path: str = Field(
+        ..., description="Path of the deleted file to recover", min_length=1
+    )
+
+
+class RelateArgs(_Args):
+    from_path: str = Field(..., description="Source file path", min_length=1)
+    relation: str = Field(
+        ...,
+        description=(
+            "Relation type: 'references', 'supersedes', 'derives_from', "
+            "'implements', or 'links_to'"
+        ),
+        pattern=r"^(references|supersedes|derives_from|implements|links_to)$",
+    )
+    to_path: str = Field(..., description="Target file path", min_length=1)
+
+
+class BacklinksArgs(_Args):
+    path: str = Field(
+        ..., description="File path to find incoming references for", min_length=1
     )
