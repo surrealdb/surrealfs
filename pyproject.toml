@@ -74,6 +74,7 @@ demo = [
 crdt = ["pycrdt>=0.10.0"]
 
 [project.scripts]
+surrealfs = "surrealfs.__main__:main"
 surrealfs-browser = "surrealfs.browser.__main__:main"
 # What an MCP client launches over stdio. See
 # `surrealfs/integrations/mcp/README.md`.

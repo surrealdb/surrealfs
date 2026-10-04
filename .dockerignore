@@ -1,0 +1,14 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.hypothesis
+apps/macos-menu/.build
+surrealfs/browser/ui/node_modules
+packages/sdk-ts/node_modules
+packages/sdk-ts/dist
+tests
+demo-db

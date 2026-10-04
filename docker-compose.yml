@@ -1,0 +1,128 @@
+# SurrealFS Docker Compose Deployment & Sidecar Architecture (§18)
+# ==============================================================================
+# Demonstrates SurrealDB 3.x with:
+#  1. surrealdb: SurrealDB server
+#  2. surrealfs-init: One-shot initialization (schema application & user provisioning)
+#  3. surrealfs-browser: Web UI Studio (port 7933)
+#  4. surrealfs-embed: Background embedding indexer daemon
+#  5. surrealfs-mcp: Agent-native MCP server
+#  6. agent-worker: Agent runtime interacting with SurrealFS
+
+services:
+  # ----------------------------------------------------------------------------
+  # SurrealDB 3.x Database Server
+  # ----------------------------------------------------------------------------
+  surrealdb:
+    image: surrealdb/surrealdb:v3.0.0
+    container_name: surrealfs-db
+    restart: unless-stopped
+    command: start --allow-all -u root -p root --bind 0.0.0.0:8000 rocksdb:/var/lib/surrealdb/surrealfs.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - surrealdb-data:/var/lib/surrealdb
+    healthcheck:
+      test: ["CMD", "/surreal", "isready", "--url", "http://127.0.0.1:8000"]
+      interval: 3s
+      timeout: 2s
+      retries: 10
+
+  # ----------------------------------------------------------------------------
+  # One-Shot Schema Initialization & Account Provisioning
+  # ----------------------------------------------------------------------------
+  surrealfs-init:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: surrealfs-init
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    environment:
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
+      - SURREALDB_USER=root
+      - SURREALDB_PASS=root
+      - SURREALDB_NAMESPACE=surrealfs
+      - SURREALDB_DATABASE=demo
+      - SURREALDB_AUTH_LEVEL=root
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Applying SurrealFS schema with record auth..."
+        surrealfs schema apply --record-auth
+        echo "Provisioning initial record agent accounts..."
+        python -m surrealfs.users add agent-1 --password agent-secret || true
+        python -m surrealfs.users add indexer --password indexer-secret || true
+        echo "SurrealFS initialized successfully."
+
+  # ----------------------------------------------------------------------------
+  # SurrealFS Web Browser Studio
+  # ----------------------------------------------------------------------------
+  surrealfs-browser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: surrealfs-browser
+    restart: unless-stopped
+    depends_on:
+      surrealfs-init:
+        condition: service_completed_successfully
+    ports:
+      - "7933:7933"
+    environment:
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
+      - SURREALDB_NAMESPACE=surrealfs
+      - SURREALDB_DATABASE=demo
+      - SURREALDB_AUTH_LEVEL=record
+      - SURREALDB_USER=agent-1
+      - SURREALDB_PASS=agent-secret
+    command: ["browser", "--host", "0.0.0.0", "--port", "7933"]
+
+  # ----------------------------------------------------------------------------
+  # Embedding Indexer Daemon
+  # ----------------------------------------------------------------------------
+  surrealfs-embed:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: surrealfs-embed
+    restart: unless-stopped
+    depends_on:
+      surrealfs-init:
+        condition: service_completed_successfully
+    environment:
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
+      - SURREALDB_NAMESPACE=surrealfs
+      - SURREALDB_DATABASE=demo
+      - SURREALDB_AUTH_LEVEL=record
+      - SURREALDB_USER=indexer
+      - SURREALDB_PASS=indexer-secret
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    command: ["embed"]
+
+  # ----------------------------------------------------------------------------
+  # Model Context Protocol (MCP) Server
+  # ----------------------------------------------------------------------------
+  surrealfs-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: surrealfs-mcp
+    restart: unless-stopped
+    depends_on:
+      surrealfs-init:
+        condition: service_completed_successfully
+    environment:
+      - SURREALDB_URL=ws://surrealdb:8000/rpc
+      - SURREALDB_NAMESPACE=surrealfs
+      - SURREALDB_DATABASE=demo
+      - SURREALDB_AUTH_LEVEL=record
+      - SURREALDB_USER=agent-1
+      - SURREALDB_PASS=agent-secret
+    command: ["mcp"]
+
+volumes:
+  surrealdb-data:
+    driver: local
+  brain-mount:
+    driver: local
