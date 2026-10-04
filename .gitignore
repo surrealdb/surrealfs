@@ -26,3 +26,7 @@ node_modules/
 # Test caches
 .pytest_cache/
 .ruff_cache/
+
+# Swift / macOS
+.build/
+*.xcodeproj
