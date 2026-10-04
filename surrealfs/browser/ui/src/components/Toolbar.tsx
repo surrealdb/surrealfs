@@ -17,7 +17,9 @@ export function Toolbar({
     entries,
     mode,
     dirty,
+    view,
     onMode,
+    onViewChange,
     onSave,
     onRename,
     onDelete,
@@ -28,7 +30,9 @@ export function Toolbar({
     entries: Entry[];
     mode: Mode;
     dirty: boolean;
+    view: "editor" | "canvas";
     onMode: (mode: Mode) => void;
+    onViewChange: (view: "editor" | "canvas") => void;
     onSave: () => void;
     onRename: () => void;
     onDelete: () => void;
@@ -37,10 +41,19 @@ export function Toolbar({
 }) {
     if (!current)
         return (
-            <Group className="no-print" h={48} px="md" style={border}>
+            <Group className="no-print" h={48} px="md" justify="space-between" style={border}>
                 <Text c="dimmed" size="sm">
-                    Nothing open
+                    {view === "canvas" ? "Spatial Brain Studio Canvas" : "Nothing open"}
                 </Text>
+                <SegmentedControl
+                    size="xs"
+                    value={view}
+                    onChange={(val) => onViewChange(val as "editor" | "canvas")}
+                    data={[
+                        { label: "Document", value: "editor" },
+                        { label: "Brain Studio ✦", value: "canvas" },
+                    ]}
+                />
             </Group>
         );
 
@@ -60,8 +73,6 @@ export function Toolbar({
                             size="compact-sm"
                             disabled={!known.has(path) || path === current.path}
                             onClick={() => onOpen(path)}
-                            // Only the filename gives way when the path is long;
-                            // half a squashed folder name reads as a typo.
                             style={{ flexShrink: last ? 1 : 0 }}
                         >
                             {name}
@@ -81,7 +92,17 @@ export function Toolbar({
             </Text>
 
             <Group gap="xs" ml="auto" wrap="nowrap">
-                {!current.is_folder && hasPreview(ct) ? (
+                <SegmentedControl
+                    size="xs"
+                    value={view}
+                    onChange={(val) => onViewChange(val as "editor" | "canvas")}
+                    data={[
+                        { label: "Document", value: "editor" },
+                        { label: "Brain Studio ✦", value: "canvas" },
+                    ]}
+                />
+
+                {view === "editor" && !current.is_folder && hasPreview(ct) ? (
                     <SegmentedControl
                         size="xs"
                         value={mode}
@@ -93,7 +114,7 @@ export function Toolbar({
                     />
                 ) : null}
 
-                {ct === "text/markdown" ? (
+                {view === "editor" && ct === "text/markdown" ? (
                     <Tooltip label="Print / save as PDF">
                         <ActionIcon variant="light" color="obsidian" onClick={onPrint} aria-label="Print or save as PDF">
                             <Icon path={iconDownload} size="sm" />
@@ -101,7 +122,7 @@ export function Toolbar({
                     </Tooltip>
                 ) : null}
 
-                {!current.is_folder && isText(ct) ? (
+                {view === "editor" && !current.is_folder && isText(ct) ? (
                     <Tooltip label="Save (⌘S)">
                         <ActionIcon variant="surreal" disabled={!dirty} onClick={onSave} aria-label="Save">
                             <Icon path={iconFloppy} size="sm" />
@@ -109,17 +130,21 @@ export function Toolbar({
                     </Tooltip>
                 ) : null}
 
-                <Tooltip label="Rename or move">
-                    <ActionIcon variant="light" color="obsidian" onClick={onRename} aria-label="Rename or move">
-                        <Icon path={iconEdit} size="sm" />
-                    </ActionIcon>
-                </Tooltip>
+                {view === "editor" && (
+                    <Tooltip label="Rename or move">
+                        <ActionIcon variant="light" color="obsidian" onClick={onRename} aria-label="Rename or move">
+                            <Icon path={iconEdit} size="sm" />
+                        </ActionIcon>
+                    </Tooltip>
+                )}
 
-                <Tooltip label="Delete">
-                    <ActionIcon variant="light" color="red" onClick={onDelete} aria-label="Delete">
-                        <Icon path={iconTrash} size="sm" />
-                    </ActionIcon>
-                </Tooltip>
+                {view === "editor" && (
+                    <Tooltip label="Delete">
+                        <ActionIcon variant="light" color="red" onClick={onDelete} aria-label="Delete">
+                            <Icon path={iconTrash} size="sm" />
+                        </ActionIcon>
+                    </Tooltip>
+                )}
             </Group>
         </Group>
     );

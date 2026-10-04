@@ -20,3 +20,48 @@ export interface Bubble {
     /** Streaming text renders as plain text; a finished reply renders as markdown. */
     done?: boolean;
 }
+
+/** Graph Canvas Node and Edge structures for Spatial Brain Studio. */
+export interface GraphNode {
+    id: string;
+    label: string;
+    path: string;
+    is_folder: boolean;
+    size: number;
+    updated_at: string;
+    content_type: string;
+}
+
+export interface GraphEdge {
+    source: string;
+    target: string;
+    relation: string;
+}
+
+export interface GraphData {
+    nodes: GraphNode[];
+    edges: GraphEdge[];
+}
+
+/** Active Swarm Advisory Leases. */
+export interface FileLockInfo {
+    path: string;
+    holder: string;
+    expires_at: string;
+    reason?: string;
+}
+
+/** Time-Travel File Version History. */
+export interface FileVersionInfo {
+    path: string;
+    generation: number;
+    author: string;
+    op: string;
+    created_at: string;
+    reason?: string;
+}
+
+export interface ActivityData {
+    locks: FileLockInfo[];
+    recent_versions: FileVersionInfo[];
+}

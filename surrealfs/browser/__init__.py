@@ -22,6 +22,7 @@ and sending a message reports the missing key.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -246,6 +247,103 @@ class Browser:
         results = [{**_entry_json(hit.entry), "snippet": hit.snippet} for hit in hits]
         return JSONResponse({"hybrid": self.embed is not None, "results": results})
 
+    async def graph(self, request: Request) -> Response:
+        """Return nodes and edges for the Spatial Brain Studio canvas."""
+        entries = await self.fs.ls("/", recursive=True)
+        nodes = [
+            {
+                "id": e.path,
+                "label": e.filename or e.path,
+                "path": e.path,
+                "is_folder": e.is_folder,
+                "size": e.size,
+                "updated_at": str(e.updated_at or ""),
+                "content_type": e.content_type,
+            }
+            for e in entries
+        ]
+
+        rel_query = (
+            "LET $ref = (SELECT in.path AS source, out.path AS target, 'references' "
+            "AS relation FROM references WHERE in.path != NONE AND out.path != NONE);\n"
+            "LET $sup = (SELECT in.path AS source, out.path AS target, 'supersedes' "
+            "AS relation FROM supersedes WHERE in.path != NONE AND out.path != NONE);\n"
+            "LET $der = (SELECT in.path AS source, out.path AS target, "
+            "'derives_from' AS relation FROM derives_from "
+            "WHERE in.path != NONE AND out.path != NONE);\n"
+            "LET $imp = (SELECT in.path AS source, out.path AS target, 'implements' "
+            "AS relation FROM implements WHERE in.path != NONE AND out.path != NONE);\n"
+            "LET $lnk = (SELECT in.path AS source, out.path AS target, 'links_to' "
+            "AS relation FROM links_to WHERE in.path != NONE AND out.path != NONE);\n"
+            "RETURN array::flatten([$ref, $sup, $der, $imp, $lnk]);"
+        )
+        edges: list[dict[str, Any]] = []
+        with contextlib.suppress(Exception):
+            db_rels = await self.fs._query(rel_query)
+            if isinstance(db_rels, list):
+                edges.extend(db_rels)
+
+        node_ids = {n["id"] for n in nodes}
+        for e in entries:
+            parent = "/".join(e.path.rstrip("/").split("/")[:-1]) or "/"
+            if parent in node_ids and parent != e.path:
+                edges.append(
+                    {"source": parent, "target": e.path, "relation": "contains"}
+                )
+
+        return JSONResponse({"nodes": nodes, "edges": edges})
+
+    async def activity(self, request: Request) -> Response:
+        """Return active swarm advisory leases and recent file modifications."""
+        locks: list[dict[str, Any]] = []
+        recent_versions: list[dict[str, Any]] = []
+        with contextlib.suppress(Exception):
+            l_rows = await self.fs._query(
+                "SELECT path, holder, expires_at, reason FROM file_lock "
+                "WHERE expires_at > time::now();"
+            )
+            if isinstance(l_rows, list):
+                locks = l_rows
+
+        with contextlib.suppress(Exception):
+            v_rows = await self.fs._query(
+                "SELECT path, generation, author, op, created_at, reason "
+                "FROM file_version ORDER BY created_at DESC LIMIT 30;"
+            )
+            if isinstance(v_rows, list):
+                recent_versions = [
+                    {**v, "created_at": str(v.get("created_at") or "")} for v in v_rows
+                ]
+
+        return JSONResponse({"locks": locks, "recent_versions": recent_versions})
+
+    async def history(self, request: Request) -> Response:
+        """Return version history for a specific file path."""
+        path = _param(request, "path")
+        hist = await self.fs.history(path, limit=50)
+        return JSONResponse(
+            [
+                {
+                    "generation": h.generation,
+                    "author": h.author,
+                    "created_at": str(h.created_at or ""),
+                    "size": h.size,
+                    "op": getattr(h, "op", "write") or "write",
+                    "reason": getattr(h, "reason", "") or "",
+                }
+                for h in hist
+            ]
+        )
+
+    async def restore(self, request: Request) -> Response:
+        """Restore a file to an earlier generation."""
+        body = await request.json()
+        path = body["path"]
+        generation = int(body["generation"])
+        entry = await self.fs.restore(path, generation)
+        await self._reindex()
+        return JSONResponse(_entry_json(entry))
+
     async def chat(self, request: Request) -> Response:
         """Stream one agent turn as NDJSON: tool names, text deltas, then done.
 
@@ -380,6 +478,10 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
             Route("/api/file", b.save, methods=["PUT"]),
             Route("/api/file", b.create, methods=["POST"]),
             Route("/api/file", b.delete, methods=["DELETE"]),
+            Route("/api/graph", b.graph),
+            Route("/api/activity", b.activity),
+            Route("/api/history", b.history),
+            Route("/api/restore", b.restore, methods=["POST"]),
             # Everything vite emits alongside index.html: hashed js, css, fonts.
             # check_dir=False: `build_app` must work with no build output,
             # for tests and for the "run `just ui`" message in `serve`.

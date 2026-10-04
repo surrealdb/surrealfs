@@ -231,3 +231,54 @@ async def test_a_dropped_socket_is_reopened_and_the_query_retried(monkeypatch):
 
 async def _reopen_fake(db):
     db.socket = "live"
+
+
+@pytest.mark.asyncio
+async def test_browser_graph_activity_and_history(fs):
+    async with client(fs) as http:
+        # Create files
+        await http.post("/api/file", json={"path": "/brain/doc1.md", "folder": False})
+        await http.put(
+            "/api/file",
+            json={
+                "path": "/brain/doc1.md",
+                "content": "# Version 1 of doc1",
+            },
+        )
+        await http.put(
+            "/api/file",
+            json={
+                "path": "/brain/doc1.md",
+                "content": "# Version 2 of doc1",
+            },
+        )
+
+        # Graph API
+        g_resp = await http.get("/api/graph")
+        assert g_resp.status_code == 200
+        g_data = g_resp.json()
+        assert "nodes" in g_data and "edges" in g_data
+        node_ids = {n["id"] for n in g_data["nodes"]}
+        assert "/brain/doc1.md" in node_ids
+
+        # Activity API
+        act_resp = await http.get("/api/activity")
+        assert act_resp.status_code == 200
+        act_data = act_resp.json()
+        assert "locks" in act_data and "recent_versions" in act_data
+        assert isinstance(act_data["locks"], list)
+        assert isinstance(act_data["recent_versions"], list)
+
+        # History API
+        hist_resp = await http.get("/api/history?path=/brain/doc1.md")
+        assert hist_resp.status_code == 200
+        hist_data = hist_resp.json()
+        assert len(hist_data) >= 1
+        assert "generation" in hist_data[0]
+
+        # Restore API
+        restore_resp = await http.post(
+            "/api/restore", json={"path": "/brain/doc1.md", "generation": 1}
+        )
+        assert restore_resp.status_code == 200
+        assert restore_resp.json()["path"] == "/brain/doc1.md"

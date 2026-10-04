@@ -3,6 +3,7 @@ import { useHotkeys } from "@mantine/hooks";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, SESSIONS, api, hasPreview, json, send } from "./api";
+import { BrainStudio } from "./components/BrainStudio";
 import { Chat } from "./components/Chat";
 import { PathModal, type PathPrompt } from "./components/PathModal";
 import { Sidebar } from "./components/Sidebar";
@@ -19,6 +20,7 @@ export function App() {
 
     const [entries, setEntries] = useState<Entry[]>([]);
     const [current, setCurrent] = useState<Entry | null>(null);
+    const [view, setView] = useState<"editor" | "canvas">("editor");
     const [mode, setMode] = useState<Mode>("preview");
     const [dirty, setDirty] = useState(false);
     const [status, setStatus] = useState<Status>(null);
@@ -78,6 +80,7 @@ export function App() {
             if (!found) found = (await loadTree(false)).find((e) => e.path === path);
             if (!found) throw new ApiError(`Not found: ${path}`, 404);
             setCurrent(found);
+            setView("editor");
             setDirty(false);
             draft.current = null;
             setMode(hasPreview(found.content_type) ? "preview" : "source");
@@ -249,7 +252,9 @@ export function App() {
                     entries={entries}
                     mode={mode}
                     dirty={dirty}
+                    view={view}
                     onMode={guard(switchMode)}
+                    onViewChange={setView}
                     onSave={guard(save)}
                     onRename={() =>
                         current &&
@@ -265,22 +270,29 @@ export function App() {
                     onOpen={guard(openFile)}
                 />
 
-                <Viewer
-                    key={`${current?.path ?? ""}:${mode}:${reloadKey}`}
-                    entry={current}
-                    entries={entries}
-                    mode={mode}
-                    onEdit={(text) => {
-                        draft.current = text;
-                        setDirty(true);
-                    }}
-                    onReady={() => {
-                        if (!wantPrint.current) return;
-                        wantPrint.current = false;
-                        doPrint();
-                    }}
-                    onError={(message) => say(message, true)}
-                />
+                {view === "canvas" ? (
+                    <BrainStudio
+                        onOpen={guard(openFile)}
+                        onStatus={(msg, err) => say(msg, err)}
+                    />
+                ) : (
+                    <Viewer
+                        key={`${current?.path ?? ""}:${mode}:${reloadKey}`}
+                        entry={current}
+                        entries={entries}
+                        mode={mode}
+                        onEdit={(text) => {
+                            draft.current = text;
+                            setDirty(true);
+                        }}
+                        onReady={() => {
+                            if (!wantPrint.current) return;
+                            wantPrint.current = false;
+                            doPrint();
+                        }}
+                        onError={(message) => say(message, true)}
+                    />
+                )}
 
                 {status?.text ? (
                     <Alert
