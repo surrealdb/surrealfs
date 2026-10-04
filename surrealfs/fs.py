@@ -26,6 +26,7 @@ from typing import Any, Literal
 from surrealdb import RecordID
 
 from . import paths
+from .chunking import chunk_text
 from .errors import (
     AlreadyExists,
     ConflictError,
@@ -45,6 +46,7 @@ from .models import (
     GraphRelation,
     GrepMatch,
     SearchHit,
+    SectionHit,
 )
 
 __all__ = [
@@ -1403,7 +1405,7 @@ class SurrealFs:
         seen: set[Any] = set()
         while True:
             rows = await self._query(
-                f"SELECT id, content FROM {self.table} "
+                f"SELECT id, filename, content_type, content FROM {self.table} "
                 "WHERE content IS NOT NONE AND content != '' AND ("
                 "  embedded_hash IS NONE"
                 "  OR embedded_hash != crypto::md5(content)"
@@ -1427,7 +1429,60 @@ class SurrealFs:
                     "indexer_version = $version",
                     {"id": row["id"], "vector": list(vector), "version": version},
                 )
+                sections = chunk_text(
+                    row["content"],
+                    filename=row.get("filename") or "",
+                    content_type=row.get("content_type") or "",
+                )
+                await self._query(
+                    "DELETE file_section WHERE file_id = $file_id "
+                    "AND section_idx >= $count;",
+                    {"file_id": row["id"], "count": len(sections)},
+                )
+                for s in sections:
+                    s_vec = (
+                        vector
+                        if len(sections) == 1 and s.content == row["content"]
+                        else await embed(s.content)
+                    )
+                    await self._query(
+                        "UPSERT file_section CONTENT {"
+                        "  file_id: $file_id,"
+                        "  section_idx: $idx,"
+                        "  heading: $heading,"
+                        "  line_start: $line_start,"
+                        "  line_end: $line_end,"
+                        "  content: $content,"
+                        "  embedding: $embedding,"
+                        "  source_hash: $source_hash"
+                        "};",
+                        {
+                            "file_id": row["id"],
+                            "idx": s.section_idx,
+                            "heading": s.heading,
+                            "line_start": s.line_start,
+                            "line_end": s.line_end,
+                            "content": s.content,
+                            "embedding": list(s_vec),
+                            "source_hash": s.source_hash,
+                        },
+                    )
                 total += 1
+
+    async def search_sections(
+        self,
+        vector: Sequence[float],
+        *,
+        limit: int = 20,
+    ) -> list[SectionHit]:
+        """Semantic search over fine-grained file sections."""
+        if int(limit) <= 0:
+            raise ValueError("limit must be positive")
+        rows = await self._query(
+            "RETURN fn::sfs_search_sections($qvec, $k, $me);",
+            {"qvec": list(vector), "k": int(limit), "me": self.user},
+        )
+        return [SectionHit.from_row(r) for r in (rows or [])]
 
     async def history(self, path: str, *, limit: int = 20) -> list[FileVersionEntry]:
         """List historical revisions of a file at `path`, newest first."""

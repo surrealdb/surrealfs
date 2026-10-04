@@ -514,6 +514,27 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_semantic(
         LIMIT $k ?? 20;
 };
 
+-- Semantic search over fine-grained file sections
+DEFINE FUNCTION OVERWRITE fn::sfs_search_sections(
+    $qvec: array<float>, $k: option<int>, $me: option<string>
+) {
+    LET $who = fn::sfs_searcher($me);
+    LET $lim = $k ?? 20;
+    RETURN SELECT
+            file_id.path AS path,
+            heading,
+            line_start,
+            line_end,
+            content,
+            vector::distance::knn() AS distance
+        FROM file_section
+        WHERE embedding <|80,160|> $qvec
+          AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who))
+        ORDER BY distance ASC
+        LIMIT $lim;
+};
+
+
 -- Both arms, fused by rank. `SurrealFs.search`, for the database.
 --
 -- Calls the two functions above rather than restating their queries: they

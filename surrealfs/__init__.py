@@ -51,6 +51,7 @@ from .models import (
     GraphRelation,
     GrepMatch,
     SearchHit,
+    SectionHit,
     format_mode,
 )
 from .schema import apply_schema, schema_sql
@@ -70,11 +71,12 @@ __all__ = [
     "IsADirectory",
     "NotADirectory",
     "NotATextFile",
-    "ROOT",
     "NotFound",
     "PermissionDenied",
     "QueryError",
+    "ROOT",
     "SearchHit",
+    "SectionHit",
     "SurrealFs",
     "SurrealFsError",
     "__version__",

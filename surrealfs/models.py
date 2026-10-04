@@ -18,6 +18,7 @@ __all__ = [
     "GraphRelation",
     "GrepMatch",
     "SearchHit",
+    "SectionHit",
     "format_mode",
 ]
 
@@ -184,4 +185,31 @@ class GraphRelation:
             relation=row.get("relation") or "",
             source_name=row.get("source_name") or "",
             target_name=row.get("target_name") or "",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SectionHit:
+    """A search hit targeting a specific section of a file."""
+
+    path: str
+    heading: str
+    line_start: int
+    line_end: int
+    content: str
+    score: float
+
+    @property
+    def lines(self) -> str:
+        return f"{self.line_start}-{self.line_end}"
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> SectionHit:
+        return cls(
+            path=row.get("path") or "",
+            heading=row.get("heading") or "",
+            line_start=int(row.get("line_start") or 1),
+            line_end=int(row.get("line_end") or 1),
+            content=row.get("content") or "",
+            score=float(row.get("score") or 0.0),
         )
