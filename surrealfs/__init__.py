@@ -44,7 +44,7 @@ from .errors import (
     SurrealFsError,
 )
 from .frontmatter import extract_markdown_links, parse_frontmatter, resolve_link
-from .fs import ROOT, SurrealFs, default_mode
+from .fs import ROOT, SurrealFs, WorkspaceSandbox, default_mode
 from .models import (
     FOLDER_CONTENT_TYPE,
     FileEntry,
@@ -84,6 +84,7 @@ __all__ = [
     "SurrealFsError",
     "WatchEvent",
     "WorkspaceEntry",
+    "WorkspaceSandbox",
     "__version__",
     "apply_schema",
     "default_mode",

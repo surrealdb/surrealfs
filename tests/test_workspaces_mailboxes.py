@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from surrealfs import NotFound, SurrealFs
+from surrealfs import ConflictError, NotFound, SurrealFs
 
 
 @pytest.mark.asyncio
@@ -152,3 +152,53 @@ async def test_workspace_merge_conflict(fs: SurrealFs) -> None:
     with pytest.raises(Exception) as exc_info:
         await fs.merge_workspace("concurrent-worker")
     assert "conflict" in str(exc_info.value).lower()
+
+
+@pytest.mark.asyncio
+async def test_lease_context_manager(db) -> None:
+    fs_alice = SurrealFs(db, user="alice")
+    fs_bob = SurrealFs(db, user="bob")
+    path = "/projects/acme.md"
+    await fs_alice.write_text(path, "# Acme Corp")
+
+    async with fs_alice.lease(path, ttl=60, reason="Editing spec") as lock:
+        assert lock.get("holder") == "alice"
+        # Bob cannot acquire while Alice holds it
+        with pytest.raises(ConflictError):
+            await fs_bob.acquire_lock(path, ttl_seconds=30)
+
+    # After exiting context manager, lease is automatically released
+    bob_lease = await fs_bob.acquire_lock(path, ttl_seconds=30)
+    assert bob_lease.get("holder") == "bob"
+    await fs_bob.release_lock(path)
+
+
+@pytest.mark.asyncio
+async def test_sandbox_context_manager_clean_merge(fs: SurrealFs) -> None:
+    await fs.write_text("/src/model.py", "def run(): return 1\n")
+
+    async with fs.sandbox(branch="agent-experiment") as sandbox_fs:
+        await sandbox_fs.write_text("/src/model.py", "def run(): return 2\n")
+        assert await sandbox_fs.read_text("/src/model.py") == "def run(): return 2\n"
+        diff = await sandbox_fs.diff()
+        assert len(diff) == 1
+        assert diff[0]["modified"] is True
+        await sandbox_fs.merge()
+
+    # After clean merge, main branch reflects the change
+    assert await fs.read_text("/src/model.py") == "def run(): return 2\n"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_context_manager_auto_discard_on_failure(fs: SurrealFs) -> None:
+    await fs.write_text("/src/stable.py", "stable_val = 42\n")
+
+    with pytest.raises(ValueError):
+        async with fs.sandbox(branch="failing-agent") as sandbox_fs:
+            await sandbox_fs.write_text("/src/stable.py", "corrupted\n")
+            raise ValueError("agent validation failed!")
+
+    # Workspace should be auto-discarded; main file preserved
+    assert await fs.read_text("/src/stable.py") == "stable_val = 42\n"
+    workspaces = await fs.list_workspaces()
+    assert not any(ws.name == "failing-agent" for ws in workspaces)

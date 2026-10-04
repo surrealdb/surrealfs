@@ -57,6 +57,7 @@ from .models import (
 __all__ = [
     "ROOT",
     "SurrealFs",
+    "WorkspaceSandbox",
     "default_mode",
     "default_owner",
     "home_owner",
@@ -1793,6 +1794,18 @@ class SurrealFs:
         )
         return True
 
+    @contextlib.asynccontextmanager
+    async def lease(
+        self, path: str, ttl: int = 60, reason: str = "advisory lease"
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        """Context manager to acquire an advisory lease and release it on exit."""
+        lock = await self.acquire_lock(path, ttl_seconds=ttl, reason=reason)
+        try:
+            yield lock
+        finally:
+            with contextlib.suppress(Exception):
+                await self.release_lock(path)
+
     async def fork_workspace(
         self, dst_branch: str, src_branch: str = "main"
     ) -> dict[str, Any]:
@@ -1881,6 +1894,20 @@ class SurrealFs:
         if await self.exists(ws_path):
             await self.rm(ws_path, recursive=True)
         return row[0] if isinstance(row, list) and row else (row or {})
+
+    @contextlib.asynccontextmanager
+    async def sandbox(
+        self, branch: str, base_branch: str = "main"
+    ) -> AsyncGenerator[WorkspaceSandbox, None]:
+        """Fork an isolated workspace sandbox and discard on failure."""
+        await self.fork_workspace(dst_branch=branch, src_branch=base_branch)
+        ws = WorkspaceSandbox(self, branch=branch, base_branch=base_branch)
+        try:
+            yield ws
+        finally:
+            if not ws._merged:
+                with contextlib.suppress(Exception):
+                    await self.discard_workspace(branch)
 
     async def send_message(
         self, agent_id: str, task_name: str, payload: str
@@ -2072,6 +2099,44 @@ class SurrealFs:
                 "author": self.user,
             },
         )
+
+
+class WorkspaceSandbox:
+    """An isolated copy-on-write workspace environment for agent task execution."""
+
+    def __init__(self, fs: SurrealFs, branch: str, base_branch: str = "main") -> None:
+        self.fs = fs
+        self.branch = branch
+        self.base_branch = base_branch
+        self._merged = False
+
+    async def write_text(self, path: str, content: str) -> FileEntry:
+        """Write or update a file within the isolated sandbox."""
+        return await self.fs.write_workspace_text(self.branch, path, content)
+
+    async def read_text(self, path: str) -> str:
+        """Read a file from workspace if modified, or fallback to base branch."""
+        clean = paths.normalize(path)
+        branch_path = f"/.workspaces/{self.branch}{clean}"
+        if await self.fs.exists(branch_path):
+            return await self.fs.read_text(branch_path)
+        return await self.fs.read_text(clean)
+
+    async def diff(self) -> list[dict[str, Any]]:
+        """Return the changes made inside this sandbox relative to base."""
+        return await self.fs.diff_workspace(self.branch)
+
+    async def merge(self, strategy: str = "3way") -> dict[str, Any]:
+        """Merge modifications back into the base branch."""
+        res = await self.fs.merge_workspace(self.branch, target=self.base_branch)
+        self._merged = True
+        return res
+
+    async def discard(self) -> dict[str, Any]:
+        """Discard modifications and delete the sandbox branch."""
+        res = await self.fs.discard_workspace(self.branch)
+        self._merged = True
+        return res
 
 
 _EXTENSION_TYPES = {
