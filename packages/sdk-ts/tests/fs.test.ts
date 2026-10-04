@@ -278,5 +278,25 @@ describe("SurrealFS TypeScript SDK", () => {
       const lsRes = await tools.ls.execute({ path: "/ai" });
       expect(lsRes.some((e: any) => e.filename === "test.txt")).toBe(true);
     });
+
+    test("grep searches lines by text pattern and regex", async () => {
+      await fs.writeText("/code/app.ts", "const port = 8080;\nconst host = 'localhost';\nconsole.log(port);");
+      await fs.writeText("/code/server.py", "port = 8080\nhost = '0.0.0.0'\nprint(port)");
+
+      const matches = await fs.grep("8080", { pathPrefix: "/code" });
+      expect(matches.length).toBe(2);
+      expect(matches.some((m) => m.path === "/code/app.ts" && m.lineNumber === 1)).toBe(true);
+      expect(matches.some((m) => m.path === "/code/server.py" && m.lineNumber === 1)).toBe(true);
+
+      const tsOnly = await fs.grep("port", { glob: "*.ts" });
+      expect(tsOnly.length).toBe(2);
+      expect(tsOnly.every((m) => m.path.endsWith(".ts"))).toBe(true);
+
+      const tools = createSurrealFsTools(fs);
+      expect(tools.grep).toBeDefined();
+      const toolHits = await tools.grep.execute({ pattern: "localhost" });
+      expect(toolHits.length).toBe(1);
+      expect(toolHits[0].path).toBe("/code/app.ts");
+    });
   });
 });

@@ -40,6 +40,12 @@ export interface SearchHit {
   updatedAt: string | Date | null;
 }
 
+export interface GrepMatch {
+  path: string;
+  lineNumber: number;
+  line: string;
+}
+
 export interface SectionHit {
   path: string;
   heading: string;

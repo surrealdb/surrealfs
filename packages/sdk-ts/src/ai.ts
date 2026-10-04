@@ -124,6 +124,45 @@ export function createSurrealFsTools(fs: SurrealFs): Record<string, ToolDefiniti
       },
     },
 
+    grep: {
+      description: "Search text files for lines matching pattern or regex (path:line:text)",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Search pattern or regular expression" },
+          path_prefix: { type: "string", description: "Optional path prefix filter" },
+          glob: { type: "string", description: "Optional glob file pattern filter (e.g. *.md)" },
+          limit: { type: "number", description: "Maximum number of matching lines" },
+          is_regex: { type: "boolean", description: "Whether pattern is a regular expression" },
+          case_sensitive: { type: "boolean", description: "Whether match is case-sensitive" },
+        },
+        required: ["pattern"],
+      },
+      execute: async ({
+        pattern,
+        path_prefix,
+        glob,
+        limit,
+        is_regex,
+        case_sensitive,
+      }: {
+        pattern: string;
+        path_prefix?: string;
+        glob?: string;
+        limit?: number;
+        is_regex?: boolean;
+        case_sensitive?: boolean;
+      }) => {
+        return await fs.grep(pattern, {
+          pathPrefix: path_prefix,
+          glob,
+          limit,
+          isRegex: is_regex,
+          caseSensitive: case_sensitive,
+        });
+      },
+    },
+
     search_sections: {
       description: "Perform semantic vector search over document sections",
       parameters: {

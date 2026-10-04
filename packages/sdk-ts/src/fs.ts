@@ -13,6 +13,7 @@ import {
   type FileEntry,
   type FileVersionEntry,
   type GraphRelation,
+  type GrepMatch,
   type LockInfo,
   parseFileEntry,
   type SearchHit,
@@ -369,6 +370,68 @@ export class SurrealFs {
         generation: Number(r.generation ?? 1),
         updatedAt: r.updated_at ?? null,
       }));
+    } catch (err) {
+      throw mapSurrealError(err);
+    }
+  }
+
+  async grep(
+    pattern: string,
+    options: {
+      pathPrefix?: string;
+      glob?: string;
+      limit?: number;
+      isRegex?: boolean;
+      caseSensitive?: boolean;
+    } = {}
+  ): Promise<GrepMatch[]> {
+    if (!pattern) return [];
+    const limit = options.limit ?? 100;
+    if (limit <= 0) return [];
+
+    const isRegex = options.isRegex ?? false;
+    const caseSensitive = options.caseSensitive ?? true;
+
+    const rawRegex = isRegex ? pattern : pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const compiled = new RegExp(rawRegex, caseSensitive ? "" : "i");
+
+    const normPrefix = options.pathPrefix ? normalize(options.pathPrefix) : undefined;
+    const cleanPrefix = normPrefix === "/" ? undefined : normPrefix;
+
+    const globMatcher = options.glob
+      ? globToRegex(options.glob.startsWith("/") ? options.glob : `/**/${options.glob}`)
+      : null;
+
+    try {
+      const rows = await this.queryRaw<any[]>(
+        "RETURN fn::sfs_grep($pattern, $prefix, $me);",
+        {
+          pattern: rawRegex,
+          prefix: cleanPrefix,
+          me: this.user,
+        }
+      );
+      if (!Array.isArray(rows)) return [];
+
+      const matches: GrepMatch[] = [];
+      for (const row of rows) {
+        const entryPath = String(row.path ?? "");
+        if (globMatcher && !globMatcher.test(entryPath)) continue;
+        const content = String(row.content ?? "");
+        const lines = content.split(/\r?\n/);
+        for (let idx = 0; idx < lines.length; idx++) {
+          const line = lines[idx];
+          if (compiled.test(line)) {
+            matches.push({
+              path: entryPath,
+              lineNumber: idx + 1,
+              line,
+            });
+            if (matches.length >= limit) return matches;
+          }
+        }
+      }
+      return matches;
     } catch (err) {
       throw mapSurrealError(err);
     }
