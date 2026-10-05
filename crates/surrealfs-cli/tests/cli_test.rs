@@ -1,7 +1,7 @@
 mod common;
 
 use common::{create_test_fs, get_server_url};
-use surrealfs_cli::{run_cli, Cli, Commands, LockCommands, LsArgs};
+use surrealfs_cli::{run_cli, Cli, Commands, CrdtCommands, LockCommands, LsArgs};
 
 fn make_cli(url: &str, ns: &str, db: &str, cmd: Commands) -> Cli {
     Cli {
@@ -258,4 +258,95 @@ async fn test_cli_grep_and_lock() {
     assert!(mount_out.contains("Mounting SurrealFS"));
     assert!(mount_out.contains(".surrealfs"));
     let _ = std::fs::remove_dir_all(&tmp_mount);
+}
+
+#[tokio::test]
+async fn test_cli_crdt_and_chunk() {
+    let (_fs, ns, db) = create_test_fs().await;
+    let url = get_server_url().await;
+
+    // Write a markdown document
+    let md = "# Title\n\n## Section 1\nContent 1\n\n## Section 2\nContent 2\n";
+    run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Write {
+            path: "/docs/spec.md".to_string(),
+            content: md.to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    // Chunk command
+    let chunk_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Chunk {
+            path: "/docs/spec.md".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(chunk_out.contains("Title > Section 1"));
+    assert!(chunk_out.contains("Title > Section 2"));
+
+    // Enable CRDT
+    let crdt_enable = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Crdt {
+            action: CrdtCommands::Enable {
+                path: "/docs/spec.md".to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(crdt_enable.contains("Enabled CRDT on /docs/spec.md"));
+
+    // Write update under CRDT
+    let updated_md = "# Title\n\n## Section 1\nUpdated Content 1\n\n## Section 2\nContent 2\n";
+    run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Write {
+            path: "/docs/spec.md".to_string(),
+            content: updated_md.to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    // Verify cat reads back new CRDT content
+    let cat_res = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Cat {
+            path: "/docs/spec.md".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert_eq!(cat_res, updated_md);
+
+    // Compact CRDT
+    let crdt_compact = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Crdt {
+            action: CrdtCommands::Compact {
+                path: "/docs/spec.md".to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(crdt_compact.contains("Compacted CRDT on /docs/spec.md"));
 }

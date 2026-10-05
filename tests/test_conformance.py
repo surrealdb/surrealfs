@@ -303,3 +303,58 @@ console.log('HIST_LEN_' + hist.length);
     # 6. Python verifies restored content
     content = await fs.read_text(path)
     assert content == "Generation One Draft"
+
+
+@pytest.mark.asyncio
+async def test_cross_language_crdt_collaboration_and_chunking(
+    fs, surreal_url, namespace
+):
+    """Verify Yjs CRDT collaborative edits and chunking across Python, Rust, and TS."""
+    path = "/collab/shared.md"
+    initial_text = "# Project Spec\n\n## Overview\nInitial content\n"
+
+    # 1. Python writes initial doc and enables CRDT
+    await fs.write_text(path, initial_text)
+    await fs.enable_crdt(path)
+    stat = await fs.stat(path)
+    assert stat.crdt is True
+
+    # 2. Rust CLI chunks the file
+    chunk_out = run_rust_cli(["chunk", path], surreal_url, namespace)
+    assert "Project Spec > Overview" in chunk_out
+
+    # 3. Rust CLI appends to CRDT doc
+    rust_text = (
+        "# Project Spec\n\n## Overview\nInitial content\n\n"
+        "## Section Rust\nAdded by Rust\n"
+    )
+    run_rust_cli(["write", path, rust_text], surreal_url, namespace)
+
+    # 4. TS SDK appends another line
+    ts_append = f"""
+await fs.appendText('{path}', '## Section TS\\nAdded by TypeScript\\n');
+console.log('TS_CRDT_APPEND_OK');
+"""
+    ts_out = run_ts_code(ts_append, surreal_url, namespace)
+    assert "TS_CRDT_APPEND_OK" in ts_out
+
+    # 5. Python reads back converged document
+    merged = await fs.read_text(path)
+    assert "Added by Rust" in merged
+    assert "Added by TypeScript" in merged
+
+    # 6. Rust CLI compacts CRDT log
+    compact_out = run_rust_cli(["crdt", "compact", path], surreal_url, namespace)
+    assert "Compacted CRDT" in compact_out
+
+    # 7. TS reads back after compaction
+    ts_verify = f"""
+const content = await fs.readText('{path}');
+if (!content.includes('Added by Rust') || !content.includes('Added by TypeScript')) {{
+    throw new Error('Compaction lost data: ' + content);
+}}
+console.log('TS_CRDT_VERIFIED');
+"""
+    ts_verify_out = run_ts_code(ts_verify, surreal_url, namespace)
+    assert "TS_CRDT_VERIFIED" in ts_verify_out
+

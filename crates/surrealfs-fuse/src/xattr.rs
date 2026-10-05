@@ -145,6 +145,7 @@ mod tests {
             branch: "main".into(),
             generation: 3,
             parent_key: Some("root".into()),
+            crdt: false,
             created_at: None,
             updated_at: None,
         }

@@ -32,7 +32,8 @@
   "author": "SurrealDB",
   "license": "Apache-2.0",
   "dependencies": {
-    "surrealdb": "^2.0.10"
+    "surrealdb": "^2.0.10",
+    "yjs": "^13.6.33"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

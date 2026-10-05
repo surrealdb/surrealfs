@@ -141,6 +141,21 @@ export class SurrealFs {
       return await this.writeWorkspaceText(this.branch, path, content);
     }
     const clean = normalize(path);
+    const existing = await this.stat(clean).catch(() => null);
+    if (existing?.crdt) {
+      const { doc, nextSeq, baseGen } = await this.loadCrdtDoc(clean);
+      const text = doc.getText("text");
+      const current = text.toString();
+      let delta = new Uint8Array(0);
+      doc.on("update", (update: Uint8Array) => {
+        delta = new Uint8Array(update);
+      });
+      doc.transact(() => {
+        text.delete(0, current.length);
+        text.insert(0, content);
+      });
+      return await this.applyCrdtMutation(clean, delta, text.toString(), nextSeq, baseGen);
+    }
     try {
       const res = await this.queryRaw<unknown>(
         "RETURN fn::sfs_write($path, $content, $if_gen, $parents, $caller);",
@@ -164,6 +179,19 @@ export class SurrealFs {
     options: { ifGeneration?: number } = {}
   ): Promise<FileEntry> {
     const clean = normalize(path);
+    const existing = await this.stat(clean).catch(() => null);
+    if (existing?.crdt) {
+      const { doc, nextSeq, baseGen } = await this.loadCrdtDoc(clean);
+      const text = doc.getText("text");
+      let delta = new Uint8Array(0);
+      doc.on("update", (update: Uint8Array) => {
+        delta = new Uint8Array(update);
+      });
+      doc.transact(() => {
+        text.insert(text.length, suffix);
+      });
+      return await this.applyCrdtMutation(clean, delta, text.toString(), nextSeq, baseGen);
+    }
     try {
       const res = await this.queryRaw<unknown>(
         "RETURN fn::sfs_append($path, $suffix, $if_gen, $caller);",
@@ -187,6 +215,25 @@ export class SurrealFs {
     options: { ifGeneration?: number } = {}
   ): Promise<FileEntry> {
     const clean = normalize(path);
+    const existing = await this.stat(clean).catch(() => null);
+    if (existing?.crdt) {
+      const { doc, nextSeq, baseGen } = await this.loadCrdtDoc(clean);
+      const text = doc.getText("text");
+      const str = text.toString();
+      const idx = str.indexOf(oldText);
+      if (idx === -1) {
+        throw new ConflictError(`Pattern not found in file: ${oldText}`);
+      }
+      let delta = new Uint8Array(0);
+      doc.on("update", (update: Uint8Array) => {
+        delta = new Uint8Array(update);
+      });
+      doc.transact(() => {
+        text.delete(idx, oldText.length);
+        text.insert(idx, newText);
+      });
+      return await this.applyCrdtMutation(clean, delta, text.toString(), nextSeq, baseGen);
+    }
     try {
       const res = await this.queryRaw<unknown>(
         "RETURN fn::sfs_edit($path, $old, $new, $if_gen, $caller);",
@@ -861,5 +908,176 @@ export class SurrealFs {
         await sub.kill();
       },
     };
+  }
+
+  async enableCrdt(path: string): Promise<void> {
+    const clean = normalize(path);
+    const existing = await this.stat(clean);
+    if (!existing) {
+      throw new NotFoundError(clean);
+    }
+    if (existing.crdt) return;
+    const content = (await this.readText(clean)) ?? "";
+    const Y = await import("yjs");
+    const doc = new Y.Doc();
+    const text = doc.getText("text");
+    if (content.length > 0) {
+      text.insert(0, content);
+    }
+    const update = Y.encodeStateAsUpdate(doc);
+
+    const sql = `
+      RETURN {
+        LET $file_id = fn::sfs_resolve($path);
+        IF $file_id IS NONE { THROW 'sfs:not_found' };
+        CREATE file_crdt_snapshot CONTENT {
+          file_id: $file_id,
+          upto: 1,
+          state: <bytes>$state,
+          author: $author
+        };
+        CREATE file_crdt_update CONTENT {
+          file_id: $file_id,
+          seq: 1,
+          update_bytes: <bytes>$state,
+          author: $author,
+          base_gen: $base_gen
+        };
+        UPDATE $file_id SET crdt = true;
+        RETURN true;
+      };
+    `;
+    await this.queryRaw(sql, {
+      path: clean,
+      state: update,
+      author: this.user,
+      base_gen: existing.generation ?? 1,
+    });
+  }
+
+  async compactCrdt(path: string): Promise<void> {
+    const clean = normalize(path);
+    const existing = await this.stat(clean);
+    if (!existing) {
+      throw new NotFoundError(clean);
+    }
+    if (!existing.crdt) return;
+
+    const Y = await import("yjs");
+    const { doc, nextSeq } = await this.loadCrdtDoc(clean);
+    const upto = nextSeq - 1;
+    const snapshot = Y.encodeStateAsUpdate(doc);
+
+    const sqlCompact = `
+      RETURN {
+        LET $file_id = fn::sfs_resolve($path);
+        IF $file_id IS NONE { THROW 'sfs:not_found' };
+        UPSERT file_crdt_snapshot CONTENT {
+          file_id: $file_id,
+          upto: $upto,
+          state: <bytes>$snapshot,
+          author: $author
+        } WHERE file_id = $file_id;
+        DELETE file_crdt_update WHERE file_id = $file_id AND seq <= $upto;
+        RETURN true;
+      };
+    `;
+    await this.queryRaw(sqlCompact, {
+      path: clean,
+      upto,
+      snapshot,
+      author: this.user,
+    });
+  }
+
+  private async loadCrdtDoc(
+    path: string
+  ): Promise<{ doc: any; nextSeq: number; baseGen: number }> {
+    const clean = normalize(path);
+    const sql = `
+      RETURN {
+        LET $file_id = fn::sfs_resolve($path);
+        IF $file_id IS NONE { THROW 'sfs:not_found' };
+        LET $stat = (SELECT generation, content FROM ONLY $file_id);
+        LET $snap = (SELECT upto, state FROM ONLY file_crdt_snapshot WHERE file_id = $file_id LIMIT 1);
+        LET $upto = IF $snap.upto IS NOT NONE { $snap.upto } ELSE { 0 };
+        LET $updates = (
+          SELECT seq, update_bytes FROM file_crdt_update 
+          WHERE file_id = $file_id AND seq > $upto 
+          ORDER BY seq ASC
+        );
+        RETURN {
+          gen: $stat.generation,
+          content: $stat.content,
+          upto: $upto,
+          snap_state: $snap.state,
+          updates: $updates
+        };
+      };
+    `;
+    const res = await this.queryRaw<any>(sql, { path: clean });
+    const Y = await import("yjs");
+    const doc = new Y.Doc();
+    const toUint8Array = (val: any): Uint8Array | null => {
+      if (!val) return null;
+      if (val instanceof Uint8Array) return val;
+      if (val instanceof ArrayBuffer) return new Uint8Array(val);
+      if (ArrayBuffer.isView(val)) return new Uint8Array(val.buffer, val.byteOffset, val.byteLength);
+      if (Array.isArray(val)) return new Uint8Array(val);
+      return null;
+    };
+
+    const snapBytes = toUint8Array(res.snap_state);
+    if (snapBytes && snapBytes.byteLength > 0) {
+      Y.applyUpdate(doc, snapBytes);
+    }
+    let maxSeq = Number(res.upto ?? 0);
+    if (Array.isArray(res.updates)) {
+      for (const u of res.updates) {
+        if (Number(u.seq) > maxSeq) {
+          maxSeq = Number(u.seq);
+        }
+        const uBytes = toUint8Array(u.update_bytes);
+        if (uBytes && uBytes.byteLength > 0) {
+          Y.applyUpdate(doc, uBytes);
+        }
+      }
+    }
+    const baseGen = Number(res.gen ?? 1);
+    return { doc, nextSeq: maxSeq + 1, baseGen };
+  }
+
+  private async applyCrdtMutation(
+    path: string,
+    delta: Uint8Array,
+    newContent: string,
+    seq: number,
+    baseGen: number
+  ): Promise<FileEntry> {
+    const clean = normalize(path);
+    const sql = `
+      RETURN {
+        LET $file_id = fn::sfs_resolve($path);
+        IF $file_id IS NONE { THROW 'sfs:not_found' };
+        CREATE file_crdt_update CONTENT {
+          file_id: $file_id,
+          seq: $seq,
+          update_bytes: <bytes>$delta,
+          author: $author,
+          base_gen: $base_gen
+        };
+        UPDATE $file_id SET content = $content, updated_at = time::now();
+        RETURN fn::sfs_stat($path);
+      };
+    `;
+    const res = await this.queryRaw<Record<string, unknown>>(sql, {
+      path: clean,
+      delta,
+      seq,
+      author: this.user,
+      base_gen: baseGen,
+      content: newContent,
+    });
+    return parseFileEntry(res);
   }
 }

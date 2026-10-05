@@ -80,22 +80,44 @@ pub async fn create_test_fs() -> (SurrealFs, String, String) {
         caller: None,
     };
 
-    let fs = SurrealFs::connect(opts)
-        .await
-        .expect("Failed to connect to test server");
+    let mut fs = None;
+    for attempt in 0..5 {
+        match SurrealFs::connect(opts.clone()).await {
+            Ok(f) => {
+                fs = Some(f);
+                break;
+            }
+            Err(_) if attempt < 4 => {
+                tokio::time::sleep(Duration::from_millis(50 * (attempt + 1))).await;
+            }
+            Err(e) => panic!("Failed to connect to test server: {:?}", e),
+        }
+    }
+    let fs = fs.unwrap();
 
     // Apply schema
     let schema_file = include_str!("../../../../surrealfs/schema/file.surql");
     let schema_auth = include_str!("../../../../surrealfs/schema/record_auth.surql");
 
-    fs.client()
-        .query(schema_file)
-        .await
-        .expect("Failed to apply file.surql schema");
-    fs.client()
-        .query(schema_auth)
-        .await
-        .expect("Failed to apply record_auth.surql schema");
+    for attempt in 0..5 {
+        match fs.client().query(schema_file).await {
+            Ok(_) => break,
+            Err(e) if attempt < 4 && e.to_string().contains("conflict") => {
+                tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
+            }
+            Err(e) => panic!("Failed to apply file.surql schema: {:?}", e),
+        }
+    }
+
+    for attempt in 0..5 {
+        match fs.client().query(schema_auth).await {
+            Ok(_) => break,
+            Err(e) if attempt < 4 && e.to_string().contains("conflict") => {
+                tokio::time::sleep(Duration::from_millis(100 * (attempt + 1))).await;
+            }
+            Err(e) => panic!("Failed to apply record_auth.surql schema: {:?}", e),
+        }
+    }
 
     (fs, ns, db)
 }

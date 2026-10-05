@@ -28,6 +28,8 @@ pub struct FileEntry {
     #[serde(default)]
     pub parent_key: Option<String>,
     #[serde(default)]
+    pub crdt: bool,
+    #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
@@ -85,6 +87,16 @@ pub struct SearchHit {
     pub entry: FileEntry,
     pub score: f64,
     pub snippet: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SectionHit {
+    pub path: String,
+    pub heading: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub content: String,
+    pub score: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

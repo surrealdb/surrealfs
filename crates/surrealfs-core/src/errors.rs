@@ -64,3 +64,9 @@ impl From<surrealdb::Error> for SurrealFsError {
         }
     }
 }
+
+impl From<anyhow::Error> for SurrealFsError {
+    fn from(err: anyhow::Error) -> Self {
+        SurrealFsError::Other(err.to_string())
+    }
+}

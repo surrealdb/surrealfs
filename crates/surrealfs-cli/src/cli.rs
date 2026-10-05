@@ -124,6 +124,15 @@ pub enum Commands {
         #[arg(short, long, default_value = "main")]
         branch: String,
     },
+
+    /// Manage collaborative CRDT document mode
+    Crdt {
+        #[command(subcommand)]
+        action: CrdtCommands,
+    },
+
+    /// Split file into AST / markdown sections and print chunks
+    Chunk { path: String },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -148,6 +157,14 @@ pub enum LockCommands {
     Release { path: String },
     /// List active locks
     List,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CrdtCommands {
+    /// Enable collaborative CRDT mode on a file
+    Enable { path: String },
+    /// Compact CRDT updates into a single snapshot
+    Compact { path: String },
 }
 
 impl Cli {
@@ -337,6 +354,27 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                 "Mounting SurrealFS on '{}' (branch: '{}', caller: '{}')\nControl plane active at '{}/.surrealfs'\n",
                 mountpoint, branch, caller, mountpoint
             ));
+        }
+        Commands::Crdt { action } => {
+            let fs = cli.connect_fs().await?;
+            match action {
+                CrdtCommands::Enable { path } => {
+                    fs.enable_crdt(path).await?;
+                    output.push_str(&format!("Enabled CRDT on {}\n", path));
+                }
+                CrdtCommands::Compact { path } => {
+                    fs.compact_crdt(path).await?;
+                    output.push_str(&format!("Compacted CRDT on {}\n", path));
+                }
+            }
+        }
+        Commands::Chunk { path } => {
+            let fs = cli.connect_fs().await?;
+            let content = fs.read_text(path).await?;
+            let sections = surrealfs_core::chunk_text(&content, path);
+            let json = serde_json::to_string_pretty(&sections)?;
+            output.push_str(&json);
+            output.push('\n');
         }
     }
     Ok(output)

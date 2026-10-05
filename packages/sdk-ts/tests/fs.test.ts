@@ -298,5 +298,28 @@ describe("SurrealFS TypeScript SDK", () => {
       expect(toolHits.length).toBe(1);
       expect(toolHits[0].path).toBe("/code/app.ts");
     });
+
+    test("transparent CRDT collaboration and compaction", async () => {
+      await fs.writeText("/collab/notes.md", "# Meeting Notes\n\n- Point 1\n");
+      await fs.enableCrdt("/collab/notes.md");
+
+      const stat1 = await fs.stat("/collab/notes.md");
+      expect(stat1.crdt).toBe(true);
+
+      // Append text under CRDT
+      await fs.appendText("/collab/notes.md", "- Point 2\n");
+      const read1 = await fs.readText("/collab/notes.md");
+      expect(read1).toBe("# Meeting Notes\n\n- Point 1\n- Point 2\n");
+
+      // Edit text under CRDT
+      await fs.editText("/collab/notes.md", "- Point 1", "- Item 1 (Approved)");
+      const read2 = await fs.readText("/collab/notes.md");
+      expect(read2).toBe("# Meeting Notes\n\n- Item 1 (Approved)\n- Point 2\n");
+
+      // Compact CRDT
+      await fs.compactCrdt("/collab/notes.md");
+      const read3 = await fs.readText("/collab/notes.md");
+      expect(read3).toBe("# Meeting Notes\n\n- Item 1 (Approved)\n- Point 2\n");
+    });
   });
 });
