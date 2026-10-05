@@ -1,61 +1,58 @@
-use std::net::TcpListener;
-use std::process::{Child, Command};
-use std::sync::Mutex;
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
-use surrealdb::engine::remote::ws::Ws;
-use surrealdb::Surreal;
 use surrealfs_core::{ConnectOptions, SurrealFs};
 use tokio::sync::OnceCell;
 
 static SERVER_URL: OnceCell<String> = OnceCell::const_new();
-static SERVER_PROC: Mutex<Option<Child>> = Mutex::new(None);
-
-fn get_free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind free port");
-    listener.local_addr().unwrap().port()
-}
+static mut SERVER_GUARD: Option<Child> = None;
 
 pub async fn get_server_url() -> &'static str {
     SERVER_URL
         .get_or_init(|| async {
-            if let Ok(u) = std::env::var("SURREALFS_TEST_URL") {
-                return u;
+            if let Ok(url) = std::env::var("SURREALFS_TEST_URL") {
+                return url;
             }
 
-            let port = get_free_port();
-            let proc = Command::new("surreal")
+            let port = 18450;
+            let url = format!("ws://127.0.0.1:{}", port);
+
+            let child = Command::new("surreal")
                 .args([
                     "start",
-                    "--allow-all",
-                    "-u",
+                    "--user",
                     "root",
-                    "-p",
+                    "--pass",
                     "root",
                     "--bind",
                     &format!("127.0.0.1:{}", port),
                     "memory",
                 ])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .spawn()
-                .expect("Failed to start surreal process. Ensure `surreal` binary is on PATH.");
+                .expect("Failed to spawn surreal test server. Is surreal installed?");
 
-            {
-                let mut lock = SERVER_PROC.lock().unwrap();
-                *lock = Some(proc);
+            unsafe {
+                SERVER_GUARD = Some(child);
             }
 
-            let url = format!("127.0.0.1:{}/rpc", port);
-
-            // Wait until surrealdb accepts WS connections
             let mut ready = false;
-            for _ in 0..100 {
+            for _ in 0..50 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                if Surreal::new::<Ws>(&url).await.is_ok() {
+                let opts = ConnectOptions {
+                    url: url.clone(),
+                    user: Some("root".to_string()),
+                    pass: Some("root".to_string()),
+                    ns: "test".to_string(),
+                    db: "test".to_string(),
+                    caller: None,
+                };
+                if SurrealFs::connect(opts).await.is_ok() {
                     ready = true;
                     break;
                 }
             }
+
             if !ready {
                 panic!("SurrealDB server failed to become ready on {}", url);
             }
@@ -66,17 +63,17 @@ pub async fn get_server_url() -> &'static str {
         .as_str()
 }
 
-pub async fn create_test_fs() -> (SurrealFs, String, String) {
+pub async fn create_test_fs() -> SurrealFs {
     let url = get_server_url().await;
-    let ns = format!("test_cli_{}", rand_id());
+    let ns = format!("test_{}", rand_id());
     let db = "test".to_string();
 
     let opts = ConnectOptions {
         url: url.to_string(),
         user: Some("root".to_string()),
         pass: Some("root".to_string()),
-        ns: ns.clone(),
-        db: db.clone(),
+        ns,
+        db,
         caller: None,
     };
 
@@ -97,10 +94,10 @@ pub async fn create_test_fs() -> (SurrealFs, String, String) {
         .await
         .expect("Failed to apply record_auth.surql schema");
 
-    (fs, ns, db)
+    fs
 }
 
-pub fn rand_id() -> String {
+fn rand_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

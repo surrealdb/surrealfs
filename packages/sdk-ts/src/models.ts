@@ -80,6 +80,7 @@ export interface WorkspaceDiff {
 }
 
 export interface LockInfo {
+  path?: string;
   holder: string;
   expiresAt: string | Date;
   reason?: string;

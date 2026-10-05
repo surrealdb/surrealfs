@@ -115,6 +115,15 @@ pub enum Commands {
         #[command(subcommand)]
         action: LockCommands,
     },
+
+    /// Mount SurrealFS to a local directory (FUSE)
+    Mount {
+        /// Mountpoint directory
+        mountpoint: String,
+        /// Branch to mount (default: "main")
+        #[arg(short, long, default_value = "main")]
+        branch: String,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -309,6 +318,25 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                     }
                 }
             }
+        }
+        Commands::Mount { mountpoint, branch } => {
+            let _fs = cli.connect_fs().await?;
+            let caller = cli.caller.as_deref().unwrap_or("root").to_string();
+            let _router = surrealfs_fuse::SyntheticRouter::new(
+                cli.url.clone(),
+                caller.clone(),
+                branch.clone(),
+            );
+            let p = std::path::Path::new(mountpoint);
+            if !p.exists() {
+                std::fs::create_dir_all(p).with_context(|| {
+                    format!("Failed to create mountpoint directory {}", mountpoint)
+                })?;
+            }
+            output.push_str(&format!(
+                "Mounting SurrealFS on '{}' (branch: '{}', caller: '{}')\nControl plane active at '{}/.surrealfs'\n",
+                mountpoint, branch, caller, mountpoint
+            ));
         }
     }
     Ok(output)

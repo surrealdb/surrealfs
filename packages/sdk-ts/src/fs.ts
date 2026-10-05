@@ -26,15 +26,22 @@ import { globToRegex, normalize, parentPath } from "./paths.js";
 
 export interface SurrealFsOptions {
   user?: string;
+  branch?: string;
 }
 
 export class SurrealFs {
   readonly db: Surreal;
   readonly user: string;
+  branch: string;
 
   constructor(db: Surreal, options: SurrealFsOptions = {}) {
     this.db = db;
     this.user = options.user ?? "root";
+    this.branch = options.branch ?? "main";
+  }
+
+  setBranch(branch: string): void {
+    this.branch = branch;
   }
 
   private async queryRaw<T = unknown>(
@@ -130,6 +137,9 @@ export class SurrealFs {
     content: string,
     options: { ifGeneration?: number; createParents?: boolean } = {}
   ): Promise<FileEntry> {
+    if (this.branch !== "main" && !path.startsWith("/.workspaces/")) {
+      return await this.writeWorkspaceText(this.branch, path, content);
+    }
     const clean = normalize(path);
     try {
       const res = await this.queryRaw<unknown>(
@@ -545,6 +555,23 @@ export class SurrealFs {
     }
   }
 
+  async listLocks(): Promise<Array<LockInfo & { path: string }>> {
+    try {
+      const res = await this.queryRaw<any[]>(
+        "SELECT * FROM file_lock WHERE expires_at > time::now();"
+      );
+      if (!Array.isArray(res)) return [];
+      return res.map((r) => ({
+        path: String(r.path ?? ""),
+        holder: String(r.holder ?? ""),
+        expiresAt: r.expires_at ?? new Date(),
+        reason: r.reason ? String(r.reason) : undefined,
+      }));
+    } catch (err) {
+      throw mapSurrealError(err);
+    }
+  }
+
   async forkWorkspace(
     dstBranch: string,
     srcBranch: string = "main"
@@ -729,6 +756,84 @@ export class SurrealFs {
     if (await this.exists(claimedPath)) {
       await this.rm(claimedPath);
     }
+  }
+
+  async postMailbox(
+    agentId: string,
+    op: string,
+    payload: Record<string, unknown>,
+    priority: number = 0
+  ): Promise<string> {
+    const res = await this.queryRaw<any>(
+      `CREATE file_mailbox CONTENT {
+        agent_id: $agent_id,
+        op: $op,
+        payload: $payload,
+        priority: $priority,
+        state: 'pending',
+        created_at: time::now()
+      };`,
+      {
+        agent_id: agentId,
+        op,
+        payload,
+        priority,
+      }
+    );
+    const id = Array.isArray(res) && res.length > 0 ? res[0]?.id : res?.id;
+    return String(id ?? "");
+  }
+
+  async claimMailbox(
+    agentId: string,
+    workerId: string = "default",
+    leaseSeconds: number = 60
+  ): Promise<any | null> {
+    const sql = `
+      LET $target = (
+        SELECT id FROM file_mailbox 
+        WHERE agent_id = $agent 
+          AND (state = 'pending' OR (state = 'processing' AND lease_expires_at < time::now()))
+        ORDER BY priority DESC, created_at ASC 
+        LIMIT 1
+      )[0].id;
+
+      IF $target != NONE {
+        UPDATE $target SET 
+          state = 'processing',
+          worker_id = $worker,
+          claimed_at = time::now(),
+          lease_expires_at = time::now() + type::duration(string::concat($ttl, 's'));
+        SELECT * FROM ONLY $target;
+      } ELSE {
+        RETURN NONE;
+      };
+    `;
+    const res = await this.db.query<any[]>(sql, {
+      agent: agentId,
+      worker: workerId,
+      ttl: leaseSeconds,
+    });
+    if (Array.isArray(res) && res.length >= 2) {
+      return res[1] ?? null;
+    }
+    return null;
+  }
+
+  async completeMailbox(
+    messageId: string,
+    result: Record<string, unknown>
+  ): Promise<void> {
+    await this.db.query(
+      `UPDATE type::record($msg_id) SET 
+        state = 'completed',
+        completed_at = time::now(),
+        result = $res;`,
+      {
+        msg_id: messageId,
+        res: result,
+      }
+    );
   }
 
   async watch(

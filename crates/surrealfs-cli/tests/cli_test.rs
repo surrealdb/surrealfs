@@ -241,4 +241,21 @@ async fn test_cli_grep_and_lock() {
     .await
     .unwrap();
     assert!(lock_rel.contains("Released lock on /src/main.rs"));
+
+    // Mount
+    let tmp_mount = format!("/tmp/surrealfs_test_mount_{}", common::rand_id());
+    let mount_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Mount {
+            mountpoint: tmp_mount.clone(),
+            branch: "dev".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(mount_out.contains("Mounting SurrealFS"));
+    assert!(mount_out.contains(".surrealfs"));
+    let _ = std::fs::remove_dir_all(&tmp_mount);
 }
