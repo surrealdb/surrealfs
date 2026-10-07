@@ -295,6 +295,14 @@ DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT ''
     PERMISSIONS FOR update WHERE false;
 DEFINE FIELD OVERWRITE size       ON TABLE file TYPE option<int> DEFAULT NONE
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE language   ON TABLE file TYPE option<string> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
+DEFINE FIELD OVERWRITE encoding   ON TABLE file TYPE option<string> DEFAULT 'utf-8'
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
+DEFINE FIELD OVERWRITE is_generated ON TABLE file TYPE bool DEFAULT false
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
+DEFINE FIELD OVERWRITE digest     ON TABLE file TYPE option<string> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
 
 -- Timestamps
 DEFINE FIELD OVERWRITE created_at ON TABLE file TYPE datetime VALUE time::now() READONLY;
@@ -323,6 +331,39 @@ DEFINE EVENT OVERWRITE evt_file_hash ON file
                                     ELSE IF $after.file IS NOT NONE THEN crypto::md5(encoding::base64::encode($after.file))
                                     ELSE '' END
 );
+
+-- Enqueue jobs for automatic understanding pipeline (detection, chunking, symbols)
+DEFINE EVENT OVERWRITE evt_file_jobs ON file
+    WHEN $event != "DELETE" AND ($before.content != $after.content OR $before.file != $after.file)
+    THEN {
+        LET $fid_str = type::string($after.id);
+        LET $h = IF $after.content IS NOT NONE THEN crypto::md5($after.content)
+                 ELSE IF $after.file IS NOT NONE THEN crypto::md5(encoding::base64::encode($after.file))
+                 ELSE '' END;
+        IF string::len($h) > 0 {
+            UPSERT type::record('sfs_job', [$fid_str, 'detect']) MERGE {
+                file_id: $after.id,
+                kind: 'detect',
+                source_hash: $h,
+                status: 'pending',
+                attempts: 0
+            };
+            UPSERT type::record('sfs_job', [$fid_str, 'chunk']) MERGE {
+                file_id: $after.id,
+                kind: 'chunk',
+                source_hash: $h,
+                status: 'pending',
+                attempts: 0
+            };
+            UPSERT type::record('sfs_job', [$fid_str, 'symbols']) MERGE {
+                file_id: $after.id,
+                kind: 'symbols',
+                source_hash: $h,
+                status: 'pending',
+                attempts: 0
+            };
+        };
+    };
 
 
 -- Vector embedding
@@ -380,6 +421,30 @@ DEFINE INDEX IF NOT EXISTS idx_file_content ON file
     FIELDS content
     FULLTEXT ANALYZER fts_simple
     BM25(1.2,0.75);
+
+-- Multilingual & Code Full-Text Analyzers (§21.1)
+DEFINE ANALYZER IF NOT EXISTS sfs_de   TOKENIZERS blank, class FILTERS lowercase, snowball(german);
+DEFINE ANALYZER IF NOT EXISTS sfs_fr   TOKENIZERS blank, class FILTERS lowercase, snowball(french);
+DEFINE ANALYZER IF NOT EXISTS sfs_es   TOKENIZERS blank, class FILTERS lowercase, snowball(spanish);
+DEFINE ANALYZER IF NOT EXISTS sfs_cjk  TOKENIZERS blank FILTERS ngram(1,2);
+DEFINE ANALYZER IF NOT EXISTS sfs_code TOKENIZERS class, camel FILTERS lowercase;
+
+DEFINE FIELD OVERWRITE text_de ON file TYPE option<string>
+    VALUE IF $this.language = 'de' THEN $this.content ELSE NONE END;
+DEFINE FIELD OVERWRITE text_fr ON file TYPE option<string>
+    VALUE IF $this.language = 'fr' THEN $this.content ELSE NONE END;
+DEFINE FIELD OVERWRITE text_es ON file TYPE option<string>
+    VALUE IF $this.language = 'es' THEN $this.content ELSE NONE END;
+DEFINE FIELD OVERWRITE text_cjk ON file TYPE option<string>
+    VALUE IF $this.language IN ['ja', 'zh', 'ko'] THEN $this.content ELSE NONE END;
+DEFINE FIELD OVERWRITE text_code ON file TYPE option<string>
+    VALUE IF $this.language IN ['code', 'python', 'rust', 'typescript', 'javascript', 'go', 'c', 'cpp', 'html', 'css', 'json', 'yaml', 'toml', 'sql', 'surrealql', 'shell'] THEN $this.content ELSE NONE END;
+
+DEFINE INDEX IF NOT EXISTS idx_text_de ON file FIELDS text_de FULLTEXT ANALYZER sfs_de BM25;
+DEFINE INDEX IF NOT EXISTS idx_text_fr ON file FIELDS text_fr FULLTEXT ANALYZER sfs_fr BM25;
+DEFINE INDEX IF NOT EXISTS idx_text_es ON file FIELDS text_es FULLTEXT ANALYZER sfs_es BM25;
+DEFINE INDEX IF NOT EXISTS idx_text_cjk ON file FIELDS text_cjk FULLTEXT ANALYZER sfs_cjk BM25;
+DEFINE INDEX IF NOT EXISTS idx_text_code ON file FIELDS text_code FULLTEXT ANALYZER sfs_code BM25;
 
 -- Search API
 --
@@ -741,6 +806,56 @@ DEFINE EVENT OVERWRITE evt_file_version ON file
             created_at: time::now()
         };
     };
+
+-- Pipeline Job Queue: sfs_job
+DEFINE TABLE OVERWRITE sfs_job SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_me() = 'root' OR $access IN ['indexer', 'projector']
+        FOR create, update, delete WHERE fn::sfs_me() = 'root' OR $access IN ['indexer', 'projector'];
+DEFINE FIELD OVERWRITE file_id      ON sfs_job TYPE record<file>;
+DEFINE FIELD OVERWRITE kind         ON sfs_job TYPE string;
+DEFINE FIELD OVERWRITE source_hash  ON sfs_job TYPE string;
+DEFINE FIELD OVERWRITE status       ON sfs_job TYPE string DEFAULT 'pending';
+DEFINE FIELD OVERWRITE attempts     ON sfs_job TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE error        ON sfs_job TYPE option<string> DEFAULT NONE;
+DEFINE FIELD OVERWRITE locked_by    ON sfs_job TYPE option<string> DEFAULT NONE;
+DEFINE FIELD OVERWRITE locked_until ON sfs_job TYPE option<datetime> DEFAULT NONE;
+DEFINE FIELD OVERWRITE created_at   ON sfs_job TYPE datetime DEFAULT time::now() READONLY;
+DEFINE FIELD OVERWRITE updated_at   ON sfs_job TYPE datetime VALUE time::now();
+DEFINE INDEX OVERWRITE idx_job_status ON sfs_job FIELDS status, locked_until;
+
+-- Code Symbol Index: symbol
+DEFINE TABLE OVERWRITE symbol SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
+DEFINE FIELD OVERWRITE file_id    ON symbol TYPE record<file>;
+DEFINE FIELD OVERWRITE name       ON symbol TYPE string;
+DEFINE FIELD OVERWRITE qualified  ON symbol TYPE string;
+DEFINE FIELD OVERWRITE kind       ON symbol TYPE string;
+DEFINE FIELD OVERWRITE language   ON symbol TYPE string;
+DEFINE FIELD OVERWRITE signature  ON symbol TYPE null | none | string VALUE IF $value IS NULL THEN NONE ELSE $value END DEFAULT NONE;
+DEFINE FIELD OVERWRITE doc        ON symbol TYPE null | none | string VALUE IF $value IS NULL THEN NONE ELSE $value END DEFAULT NONE;
+DEFINE FIELD OVERWRITE line_start ON symbol TYPE int;
+DEFINE FIELD OVERWRITE line_end   ON symbol TYPE int;
+DEFINE INDEX OVERWRITE idx_symbol_file      ON symbol FIELDS file_id;
+DEFINE INDEX OVERWRITE idx_symbol_name      ON symbol FIELDS name;
+DEFINE INDEX OVERWRITE idx_symbol_qualified ON symbol FIELDS qualified;
+
+-- Hierarchical Folder Digests: folder_digest
+DEFINE TABLE OVERWRITE folder_digest SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(folder_id.parent), folder_id.owner, folder_id.mode, fn::sfs_me())
+        FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
+DEFINE FIELD OVERWRITE folder_id     ON folder_digest TYPE record<file>;
+DEFINE FIELD OVERWRITE path          ON folder_digest TYPE string;
+DEFINE FIELD OVERWRITE merkle_hash   ON folder_digest TYPE string;
+DEFINE FIELD OVERWRITE summary       ON folder_digest TYPE string;
+DEFINE FIELD OVERWRITE notable_files ON folder_digest TYPE array<string> DEFAULT [];
+DEFINE FIELD OVERWRITE private_count ON folder_digest TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE updated_at    ON folder_digest TYPE datetime VALUE time::now();
+DEFINE INDEX OVERWRITE idx_folder_digest_path   ON folder_digest FIELDS path UNIQUE;
+DEFINE INDEX OVERWRITE idx_folder_digest_folder ON folder_digest FIELDS folder_id UNIQUE;
 
 -- Knowledge Graph Relations
 DEFINE TABLE OVERWRITE references   SCHEMAFULL TYPE RELATION IN file OUT file
@@ -1677,6 +1792,205 @@ DEFINE FUNCTION OVERWRITE fn::sfs_du($path: string, $caller: any) {
         logical_bytes: $total_logical,
         stored_bytes: $total_stored
     };
+} PERMISSIONS FULL;
+
+-- Code Symbol Retrieval
+DEFINE FUNCTION OVERWRITE fn::sfs_symbols($path: string, $caller: any) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $fid = fn::sfs_resolve($path);
+    IF $fid IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $file = (SELECT id, parent, owner, mode, is_folder FROM ONLY $fid);
+    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($file.parent), $file.owner, $file.mode, $who) {
+        THROW 'sfs:denied_or_missing';
+    };
+    
+    IF $file.is_folder {
+        RETURN (
+            SELECT 
+                type::string(id) AS id,
+                type::string(file_id) AS file_id,
+                file_id.path AS path,
+                name,
+                qualified,
+                kind,
+                language,
+                signature,
+                doc,
+                line_start,
+                line_end
+            FROM symbol
+            WHERE string::starts_with(file_id.path, $path)
+              AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who))
+            ORDER BY file_id.path, line_start ASC
+        );
+    } ELSE {
+        RETURN (
+            SELECT 
+                type::string(id) AS id,
+                type::string(file_id) AS file_id,
+                name,
+                qualified,
+                kind,
+                language,
+                signature,
+                doc,
+                line_start,
+                line_end
+            FROM symbol
+            WHERE file_id = $fid
+            ORDER BY line_start ASC
+        );
+    };
+} PERMISSIONS FULL;
+
+-- Symbol Definition Lookup
+DEFINE FUNCTION OVERWRITE fn::sfs_definition($name: string, $caller: any) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    RETURN (
+        SELECT 
+            type::string(id) AS id,
+            type::string(file_id) AS file_id,
+            file_id.path AS path,
+            name,
+            qualified,
+            kind,
+            language,
+            signature,
+            doc,
+            line_start,
+            line_end
+        FROM symbol
+        WHERE (name = $name OR qualified = $name)
+          AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who))
+        ORDER BY line_start ASC
+        LIMIT 20
+    );
+} PERMISSIONS FULL;
+
+-- Hierarchical Folder Digest
+DEFINE FUNCTION OVERWRITE fn::sfs_digest($path: string, $caller: any) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $fid = fn::sfs_resolve($path);
+    IF $fid IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $folder = (SELECT id, parent, owner, mode, is_folder FROM ONLY $fid);
+    IF !$folder.is_folder {
+        THROW 'sfs:not_a_directory';
+    };
+    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($folder.parent), $folder.owner, $folder.mode, $who) {
+        THROW 'sfs:denied_or_missing';
+    };
+
+    LET $children = (SELECT id, filename, is_folder, size, owner, mode, gate, updated_at, hash, meta FROM file WHERE parent_key = <string>$fid);
+    LET $readable = array::filter($children, |$c| $who = 'root' OR fn::sfs_can_read(fn::sfs_gate($fid), $c.owner, $c.mode, $who));
+    LET $private_count = array::len($children) - array::len($readable);
+
+    LET $cached = (SELECT * FROM ONLY folder_digest WHERE folder_id = $fid LIMIT 1);
+    
+    LET $notable = array::map(
+        array::filter($readable, |$c| !$c.is_folder),
+        |$c| {
+            filename: $c.filename,
+            size: $c.size ?? 0,
+            hash: $c.hash,
+            updated_at: $c.updated_at,
+            summary: $c.meta.summary ?? NONE
+        }
+    );
+
+    LET $subfolders = array::map(
+        array::filter($readable, |$c| $c.is_folder),
+        |$c| $c.filename
+    );
+
+    RETURN {
+        path: $path,
+        folder_id: type::string($fid),
+        summary: $cached.summary ?? ('Folder ' + $path + ' containing ' + type::string(array::len($readable)) + ' items.'),
+        notable_files: $notable,
+        subfolders: $subfolders,
+        total_readable: array::len($readable),
+        private_unsummarised: $private_count,
+        updated_at: $cached.updated_at ?? time::now()
+    };
+} PERMISSIONS FULL;
+
+-- Context Packing Tool
+DEFINE FUNCTION OVERWRITE fn::sfs_pack(
+    $question: string,
+    $budget: int,
+    $scope: option<string>,
+    $caller: any
+) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $hits = fn::sfs_search_text($question, 30, 'any', $who);
+    
+    LET $scoped = IF $scope IS NOT NONE AND string::len($scope) > 0 {
+        array::filter($hits, |$h| string::starts_with($h.path, $scope))
+    } ELSE {
+        $hits
+    };
+
+    RETURN {
+        question: $question,
+        budget: $budget,
+        candidates: $scoped
+    };
+} PERMISSIONS FULL;
+
+-- Pipeline Job Lease
+DEFINE FUNCTION OVERWRITE fn::sfs_job_claim(
+    $worker_id: string,
+    $kinds: array<string>,
+    $limit: int
+) {
+    LET $now = time::now();
+    LET $jobs = (
+        SELECT id, file_id, file_id.path AS path, kind, source_hash, attempts, 'processing' AS status, created_at
+        FROM sfs_job
+        WHERE (status = 'pending' OR (status = 'processing' AND locked_until < $now))
+          AND (array::len($kinds) = 0 OR kind IN $kinds)
+        ORDER BY created_at ASC
+        LIMIT $limit
+    );
+
+    FOR $job IN $jobs {
+        UPDATE $job.id SET
+            status = 'processing',
+            locked_by = $worker_id,
+            locked_until = time::now() + 60s,
+            attempts += 1,
+            updated_at = time::now();
+    };
+
+    RETURN $jobs;
+} PERMISSIONS FULL;
+
+-- Pipeline Job Completion
+DEFINE FUNCTION OVERWRITE fn::sfs_job_complete(
+    $job_id: string,
+    $error: option<string>
+) {
+    LET $jrec = type::record($job_id);
+    IF $error IS NOT NONE {
+        UPDATE $jrec SET
+            status = 'failed',
+            error = $error,
+            locked_by = NONE,
+            locked_until = NONE,
+            updated_at = time::now();
+    } ELSE {
+        UPDATE $jrec SET
+            status = 'completed',
+            error = NONE,
+            locked_by = NONE,
+            locked_until = NONE,
+            updated_at = time::now();
+    };
+    RETURN true;
 } PERMISSIONS FULL;
 
 

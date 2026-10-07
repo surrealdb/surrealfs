@@ -151,6 +151,57 @@ pub enum Commands {
         #[arg(short, long, default_value = "86400")]
         max_age_secs: u64,
     },
+
+    /// List or index code symbols for a file or directory tree
+    Symbols {
+        path: String,
+        #[arg(short, long)]
+        index: bool,
+    },
+
+    /// Look up symbol definitions by exact or qualified name
+    Definition { name: String },
+
+    /// Display hierarchical folder digest
+    Digest {
+        #[arg(default_value = "/")]
+        path: String,
+    },
+
+    /// Pack relevant context for a question within a token budget
+    Pack {
+        question: String,
+        #[arg(short, long, default_value = "4000")]
+        budget: usize,
+        #[arg(short, long)]
+        scope: Option<String>,
+    },
+
+    /// Manage understanding pipeline jobs
+    Jobs {
+        #[command(subcommand)]
+        action: JobCommands,
+    },
+
+    /// Detect content type, language, and encoding for a file
+    Detect { path: String },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum JobCommands {
+    /// Claim pending/expired pipeline jobs
+    Claim {
+        #[arg(short, long, default_value = "cli-worker")]
+        worker: String,
+        #[arg(short, long, default_value = "10")]
+        limit: usize,
+    },
+    /// Complete a pipeline job
+    Complete {
+        job_id: String,
+        #[arg(short, long)]
+        error: Option<String>,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -419,6 +470,66 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
             let fs = cli.connect_fs().await?;
             let count = fs.gc_blobs(*max_age_secs).await?;
             output.push_str(&format!("Garbage collected {} unreferenced blobs\n", count));
+        }
+        Commands::Symbols { path, index } => {
+            let fs = cli.connect_fs().await?;
+            if *index {
+                let count = fs.index_file_symbols(path).await?;
+                output.push_str(&format!("Indexed {} symbols in '{}'\n", count, path));
+            }
+            let symbols = fs.symbols(path).await?;
+            let json = serde_json::to_string_pretty(&symbols)?;
+            output.push_str(&json);
+            output.push('\n');
+        }
+        Commands::Definition { name } => {
+            let fs = cli.connect_fs().await?;
+            let defs = fs.definition(name).await?;
+            let json = serde_json::to_string_pretty(&defs)?;
+            output.push_str(&json);
+            output.push('\n');
+        }
+        Commands::Digest { path } => {
+            let fs = cli.connect_fs().await?;
+            let digest = fs.digest(path).await?;
+            let json = serde_json::to_string_pretty(&digest)?;
+            output.push_str(&json);
+            output.push('\n');
+        }
+        Commands::Pack {
+            question,
+            budget,
+            scope,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let result = fs.pack(question, *budget, scope.as_deref()).await?;
+            output.push_str(&result.formatted);
+            output.push('\n');
+        }
+        Commands::Jobs { action } => {
+            let fs = cli.connect_fs().await?;
+            match action {
+                JobCommands::Claim { worker, limit } => {
+                    let jobs = fs
+                        .claim_jobs(worker, &["detect", "chunk", "symbols"], *limit)
+                        .await?;
+                    let json = serde_json::to_string_pretty(&jobs)?;
+                    output.push_str(&json);
+                    output.push('\n');
+                }
+                JobCommands::Complete { job_id, error } => {
+                    fs.complete_job(job_id, error.as_deref()).await?;
+                    output.push_str(&format!("Completed job {}\n", job_id));
+                }
+            }
+        }
+        Commands::Detect { path } => {
+            let fs = cli.connect_fs().await?;
+            let bytes = fs.read_bytes(path).await?;
+            let meta = surrealfs_core::understanding::detect_type_and_language(path, &bytes);
+            let json = serde_json::to_string_pretty(&meta)?;
+            output.push_str(&json);
+            output.push('\n');
         }
     }
     Ok(output)

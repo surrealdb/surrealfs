@@ -357,4 +357,3 @@ console.log('TS_CRDT_VERIFIED');
 """
     ts_verify_out = run_ts_code(ts_verify, surreal_url, namespace)
     assert "TS_CRDT_VERIFIED" in ts_verify_out
-

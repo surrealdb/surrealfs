@@ -350,3 +350,110 @@ async fn test_cli_crdt_and_chunk() {
     .unwrap();
     assert!(crdt_compact.contains("Compacted CRDT on /docs/spec.md"));
 }
+
+#[tokio::test]
+async fn test_cli_understanding_pipeline() {
+    let (_fs, ns, db) = create_test_fs().await;
+    let url = get_server_url().await;
+
+    let py_code = "def authenticate_user(token: str):\n    \"\"\"Authenticate user from auth header.\"\"\"\n    return token == 'valid'\n";
+
+    // 1. Write file
+    run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Write {
+            path: "/src/auth.py".to_string(),
+            content: py_code.to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    // 2. Detect
+    let detect_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Detect {
+            path: "/src/auth.py".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(detect_out.contains("python"));
+    assert!(detect_out.contains("text/x-python"));
+
+    // 3. Symbols index
+    let sym_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Symbols {
+            path: "/src/auth.py".to_string(),
+            index: true,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(sym_out.contains("authenticate_user"));
+
+    // 4. Definition
+    let def_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Definition {
+            name: "authenticate_user".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(def_out.contains("authenticate_user"));
+    assert!(def_out.contains("function"));
+
+    // 5. Digest
+    let dig_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Digest {
+            path: "/src".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(dig_out.contains("/src"));
+
+    // 6. Pack
+    let pack_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Pack {
+            question: "How is a user authenticated?".to_string(),
+            budget: 2000,
+            scope: Some("/src".to_string()),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(pack_out.contains("Context for: How is a user authenticated?"));
+
+    // 7. Jobs claim and complete
+    let claim_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Jobs {
+            action: surrealfs_cli::JobCommands::Claim {
+                worker: "test-cli-worker".to_string(),
+                limit: 5,
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(claim_out.contains("detect") || claim_out.contains("symbols"));
+}

@@ -122,11 +122,14 @@ pub async fn create_test_fs() -> (SurrealFs, String, String) {
     (fs, ns, db)
 }
 
+static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub fn rand_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    format!("{:x}", nanos)
+    let count = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("{:x}_{}", nanos, count)
 }

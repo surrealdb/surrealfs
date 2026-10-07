@@ -7,7 +7,7 @@ pub struct FileEntry {
     pub path: String,
     #[serde(default)]
     pub filename: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub is_folder: bool,
     #[serde(default)]
     pub size: u64,
@@ -27,12 +27,20 @@ pub struct FileEntry {
     pub generation: u64,
     #[serde(default)]
     pub parent_key: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_false")]
     pub crdt: bool,
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+fn deserialize_null_as_false<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<bool>::deserialize(deserializer)?;
+    Ok(opt.unwrap_or(false))
 }
 
 fn default_content_type() -> String {
@@ -165,4 +173,91 @@ pub struct UsageStats {
     pub files: u64,
     pub logical_bytes: u64,
     pub stored_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeSymbol {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub file_id: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    pub name: String,
+    pub qualified: String,
+    pub kind: String,
+    pub language: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc: Option<String>,
+    pub line_start: usize,
+    pub line_end: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DigestNotableFile {
+    pub filename: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FolderDigest {
+    pub path: String,
+    #[serde(default)]
+    pub folder_id: Option<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub notable_files: Vec<DigestNotableFile>,
+    #[serde(default)]
+    pub subfolders: Vec<String>,
+    #[serde(default)]
+    pub total_readable: usize,
+    #[serde(default)]
+    pub private_unsummarised: usize,
+    #[serde(default)]
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackedBlock {
+    pub path: String,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub content: String,
+    pub tokens: usize,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PackResult {
+    pub question: String,
+    pub budget: usize,
+    pub used_tokens: usize,
+    pub blocks: Vec<PackedBlock>,
+    pub formatted: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineJob {
+    pub id: String,
+    pub file_id: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    pub kind: String,
+    pub source_hash: String,
+    #[serde(default)]
+    pub status: String,
+    pub attempts: i64,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
 }

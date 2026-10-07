@@ -4,8 +4,9 @@ use crate::chunking::{chunk_data, decompress_chunk, FastCdcConfig};
 use crate::crdt::CrdtDoc;
 use crate::errors::{Result, SurrealFsError};
 use crate::models::{
-    FileEntry, FileLock, FileVersion, GrepMatch, MailboxMessage, SearchHit, SectionHit,
-    UploadSession, UsageStats, WorkspaceDiff,
+    CodeSymbol, FileEntry, FileLock, FileVersion, FolderDigest, GrepMatch, MailboxMessage,
+    PackResult, PackedBlock, PipelineJob, SearchHit, SectionHit, UploadSession, UsageStats,
+    WorkspaceDiff,
 };
 use crate::paths::normalize_path;
 use serde::de::DeserializeOwned;
@@ -1039,5 +1040,189 @@ impl SurrealFs {
             .await?;
         let count: Option<i64> = res.take(0usize)?;
         Ok(count.unwrap_or(0) as usize)
+    }
+
+    /// Return symbols for a file or folder subtree.
+    pub async fn symbols(&self, path: &str) -> Result<Vec<CodeSymbol>> {
+        let norm = normalize_path(path);
+        let sql = "RETURN fn::sfs_symbols($path, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("caller", self.caller.as_deref().unwrap_or("root")))
+            .await?;
+        let rows: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(value_to_serde(r)?);
+        }
+        Ok(out)
+    }
+
+    /// Look up symbol definitions by exact or qualified name.
+    pub async fn definition(&self, name: &str) -> Result<Vec<CodeSymbol>> {
+        let sql = "RETURN fn::sfs_definition($name, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("name", name.to_string()))
+            .bind(("caller", self.caller.as_deref().unwrap_or("root")))
+            .await?;
+        let rows: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(value_to_serde(r)?);
+        }
+        Ok(out)
+    }
+
+    /// Get hierarchical folder digest for a directory.
+    pub async fn digest(&self, path: &str) -> Result<FolderDigest> {
+        let norm = normalize_path(path);
+        let sql = "RETURN fn::sfs_digest($path, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let val: Option<SValue> = res.take(0usize)?;
+        let s_val = val.ok_or_else(|| {
+            SurrealFsError::NotFound(format!("Path not found for digest: {}", path))
+        })?;
+        value_to_serde(s_val)
+    }
+
+    /// Context packing tool for questions within a token budget (§20.6).
+    pub async fn pack(
+        &self,
+        question: &str,
+        budget: usize,
+        scope: Option<&str>,
+    ) -> Result<PackResult> {
+        let norm_scope = scope.map(normalize_path);
+        let sql = "RETURN fn::sfs_pack($question, $budget, $scope, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("question", question.to_string()))
+            .bind(("budget", budget as i64))
+            .bind(("scope", norm_scope))
+            .bind(("caller", self.caller.as_deref().unwrap_or("root")))
+            .await?;
+        let val: Option<SValue> = res.take(0usize)?;
+        let s_val = val.ok_or_else(|| {
+            SurrealFsError::Database("Empty response from fn::sfs_pack".to_string())
+        })?;
+        let json_val: Value = value_to_serde(s_val)?;
+        let candidates_arr = json_val
+            .get("candidates")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let mut blocks = Vec::new();
+        for c in candidates_arr {
+            let path = c
+                .get("path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let snippet = c
+                .get("snippet")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let score = c.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let tokens = crate::understanding::estimate_tokens(&snippet);
+            blocks.push(PackedBlock {
+                path,
+                line_start: 1,
+                line_end: snippet.lines().count().max(1),
+                content: snippet,
+                tokens,
+                score,
+            });
+        }
+
+        Ok(crate::understanding::pack_blocks(question, budget, blocks))
+    }
+
+    /// Extract and index symbols for a specific file.
+    pub async fn index_file_symbols(&self, path: &str) -> Result<usize> {
+        let content_str = self.read_text(path).await?;
+        let detected = crate::understanding::detect_type_and_language(path, content_str.as_bytes());
+        let lang = detected.language.unwrap_or_else(|| "text".to_string());
+        let symbols = crate::understanding::extract_symbols(path, &content_str, &lang);
+
+        let norm = normalize_path(path);
+        let symbols_json =
+            serde_json::to_value(&symbols).map_err(|e| SurrealFsError::Other(e.to_string()))?;
+
+        let sql = r#"
+            RETURN {
+                LET $file_id = fn::sfs_resolve($path);
+                IF $file_id IS NONE { THROW 'sfs:not_found' };
+                DELETE symbol WHERE file_id = $file_id;
+                FOR $sym IN $symbols {
+                    CREATE symbol CONTENT {
+                        file_id: $file_id,
+                        name: $sym.name,
+                        qualified: $sym.qualified,
+                        kind: $sym.kind,
+                        language: $sym.language,
+                        signature: $sym.signature,
+                        doc: $sym.doc,
+                        line_start: $sym.line_start,
+                        line_end: $sym.line_end
+                    };
+                };
+                RETURN array::len($symbols);
+            };
+        "#;
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("symbols", symbols_json))
+            .await?;
+        let count: Option<i64> = res.take(0usize)?;
+        Ok(count.unwrap_or(0) as usize)
+    }
+
+    /// Claim pipeline jobs for execution by a worker.
+    pub async fn claim_jobs(
+        &self,
+        worker_id: &str,
+        kinds: &[&str],
+        limit: usize,
+    ) -> Result<Vec<PipelineJob>> {
+        let kinds_vec: Vec<String> = kinds.iter().map(|s| s.to_string()).collect();
+        let sql = "RETURN fn::sfs_job_claim($worker_id, $kinds, $limit);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("worker_id", worker_id.to_string()))
+            .bind(("kinds", kinds_vec))
+            .bind(("limit", limit as i64))
+            .await?;
+        let rows: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(value_to_serde(r)?);
+        }
+        Ok(out)
+    }
+
+    /// Complete a pipeline job.
+    pub async fn complete_job(&self, job_id: &str, error: Option<&str>) -> Result<()> {
+        let sql = "RETURN fn::sfs_job_complete($job_id, $error);";
+        self.db
+            .query(sql)
+            .bind(("job_id", job_id.to_string()))
+            .bind(("error", error.map(|s| s.to_string())))
+            .await?;
+        Ok(())
     }
 }
