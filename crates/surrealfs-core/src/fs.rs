@@ -4,9 +4,9 @@ use crate::chunking::{chunk_data, decompress_chunk, FastCdcConfig};
 use crate::crdt::CrdtDoc;
 use crate::errors::{Result, SurrealFsError};
 use crate::models::{
-    CodeSymbol, EntityRecord, FileEntry, FileLock, FileVersion, FolderDigest, GrepMatch,
-    MailboxMessage, PackResult, PackedBlock, PipelineJob, SearchHit, SectionHit, TableRow,
-    UploadSession, UsageStats, WorkspaceDiff,
+    CodeSymbol, CredentialRecord, EntityRecord, FileEntry, FileLock, FileVersion, FolderDigest,
+    GrepMatch, MailboxMessage, PackResult, PackedBlock, PipelineJob, SearchHit, SectionHit,
+    TableRow, UploadSession, UsageStats, WorkspaceDiff,
 };
 use crate::paths::normalize_path;
 use crate::understanding::{
@@ -173,24 +173,25 @@ impl SurrealFs {
         Ok(Vec::new())
     }
 
-    /// Write raw bytes to a file.
+    /// Write raw bytes to a file with optional optimistic concurrency.
     pub async fn write_bytes(
         &self,
         path: &str,
         data: &[u8],
-        content_type: Option<&str>,
+        if_generation: Option<u64>,
     ) -> Result<FileEntry> {
         let norm = normalize_path(path);
         if let Ok(text) = std::str::from_utf8(data) {
-            return self.write_text(&norm, text, None).await;
+            return self.write_text(&norm, text, if_generation).await;
         }
-        let mime = content_type.unwrap_or("application/octet-stream");
+        let mime = "application/octet-stream";
         let mut res = self
             .db
-            .query("LET $id = fn::sfs_resolve($path); IF $id IS NOT NONE { UPDATE $id SET file = <bytes>$data, content = NONE, content_type = $mime, updated_at = time::now(); RETURN fn::sfs_stat($path); }; LET $parent_id = fn::sfs_ensure_parents($path, $caller); LET $raw = string::split($path, '/'); LET $segments = array::filter($raw, |$v| string::len($v) > 0); LET $filename = $segments[array::len($segments) - 1]; LET $created = (CREATE file CONTENT { filename: $filename, parent: $parent_id, file: <bytes>$data, content_type: $mime }); RETURN fn::sfs_stat($path);")
+            .query("LET $id = fn::sfs_resolve($path); IF $id IS NOT NONE { UPDATE $id SET file = <bytes>$data, content = NONE, content_type = $mime, updated_at = time::now() WHERE $if_gen IS NONE OR generation = $if_gen; RETURN fn::sfs_stat($path); }; LET $parent_id = fn::sfs_ensure_parents($path, $caller); LET $raw = string::split($path, '/'); LET $segments = array::filter($raw, |$v| string::len($v) > 0); LET $filename = $segments[array::len($segments) - 1]; LET $created = (CREATE file CONTENT { filename: $filename, parent: $parent_id, file: <bytes>$data, content_type: $mime }); RETURN fn::sfs_stat($path);")
             .bind(("path", norm.clone()))
             .bind(("data", data.to_vec()))
             .bind(("mime", mime.to_string()))
+            .bind(("if_gen", if_generation))
             .bind(("caller", self.caller.clone()))
             .await?;
         let entry: Option<SValue> = res.take(res.num_statements() - 1)?;
@@ -1417,5 +1418,100 @@ impl SurrealFs {
         opts: &crate::git::GitImportOptions,
     ) -> Result<crate::git::GitImportResult> {
         crate::git::import_git_repository(self, opts).await
+    }
+
+    /// Creates or updates an external protocol credential (§22).
+    pub async fn create_credential(
+        &self,
+        kind: &str,
+        identifier: &str,
+        secret_hash: Option<&str>,
+        user_id: &str,
+        meta: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let sql = r#"
+            UPSERT credential:[ $kind, $identifier ] CONTENT {
+                kind: $kind,
+                identifier: $identifier,
+                secret_hash: $secret_hash,
+                user_id: $user_id,
+                enabled: true,
+                meta: $meta,
+                created_at: time::now()
+            };
+        "#;
+        self.db
+            .query(sql)
+            .bind(("kind", kind))
+            .bind(("identifier", identifier))
+            .bind(("secret_hash", secret_hash))
+            .bind(("user_id", user_id))
+            .bind(("meta", meta.unwrap_or(serde_json::json!({}))))
+            .await?;
+        Ok(())
+    }
+
+    /// Resolves an external protocol credential to an authenticated user (§22).
+    pub async fn resolve_credential(
+        &self,
+        kind: &str,
+        identifier: &str,
+    ) -> Result<Option<CredentialRecord>> {
+        let sql = "RETURN fn::sfs_resolve_credential($kind, $identifier);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("kind", kind))
+            .bind(("identifier", identifier))
+            .await?;
+        let item: Option<SValue> = res.take(0usize)?;
+        match item {
+            Some(v) => {
+                let json: serde_json::Value = value_to_serde(v)?;
+                if json.is_null() {
+                    Ok(None)
+                } else {
+                    let record: CredentialRecord = serde_json::from_value(json)?;
+                    Ok(Some(record))
+                }
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Revokes an external protocol credential (§22).
+    pub async fn revoke_credential(&self, kind: &str, identifier: &str) -> Result<bool> {
+        let sql = r#"
+            UPDATE credential SET enabled = false WHERE kind = $kind AND identifier = $identifier;
+        "#;
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("kind", kind))
+            .bind(("identifier", identifier))
+            .await?;
+        let updated: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        Ok(!updated.is_empty())
+    }
+
+    /// Lists external credentials (§22).
+    pub async fn list_credentials(&self, kind: Option<&str>) -> Result<Vec<CredentialRecord>> {
+        let sql = match kind {
+            Some(_) => "SELECT kind, identifier, secret_hash, user_id, enabled, meta FROM credential WHERE kind = $kind ORDER BY identifier ASC;",
+            None => "SELECT kind, identifier, secret_hash, user_id, enabled, meta FROM credential ORDER BY kind ASC, identifier ASC;",
+        };
+        let mut q = self.db.query(sql);
+        if let Some(k) = kind {
+            q = q.bind(("kind", k));
+        }
+        let mut res = q.await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut list = Vec::new();
+        for item in items {
+            let val = value_to_serde(item)?;
+            let rec: CredentialRecord = serde_json::from_value(val)?;
+            list.push(rec);
+        }
+        Ok(list)
     }
 }

@@ -16,6 +16,7 @@ path = "src/bin/git_remote_surrealfs.rs"
 [dependencies]
 surrealfs-core = { path = "../surrealfs-core" }
 surrealfs-fuse = { path = "../surrealfs-fuse" }
+surrealfs-server = { path = "../surrealfs-server" }
 surrealdb.workspace = true
 clap = { version = "4.5", features = ["derive", "env"] }
 tokio.workspace = true

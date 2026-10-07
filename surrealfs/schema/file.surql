@@ -928,6 +928,20 @@ DEFINE FIELD OVERWRITE target_root  ON TABLE git_commit TYPE string;
 DEFINE FIELD OVERWRITE created_at   ON TABLE git_commit TYPE datetime VALUE time::now() READONLY;
 DEFINE INDEX OVERWRITE idx_git_commit_sha ON TABLE git_commit FIELDS sha;
 
+-- External protocol credentials (§22)
+DEFINE TABLE OVERWRITE credential SCHEMAFULL
+    PERMISSIONS
+        FOR select, create, update, delete WHERE fn::sfs_me() = 'root' OR $access = 'admin';
+DEFINE FIELD OVERWRITE kind        ON TABLE credential TYPE string ASSERT $value IN ['webdav', 's3', 'ssh', 'slack', 'teams', 'bearer'];
+DEFINE FIELD OVERWRITE identifier  ON TABLE credential TYPE string;
+DEFINE FIELD OVERWRITE secret_hash ON TABLE credential TYPE option<string>;
+DEFINE FIELD OVERWRITE user_id     ON TABLE credential TYPE string;
+DEFINE FIELD OVERWRITE enabled     ON TABLE credential TYPE bool DEFAULT true;
+DEFINE FIELD OVERWRITE created_at  ON TABLE credential TYPE datetime VALUE time::now() READONLY;
+DEFINE FIELD OVERWRITE meta        ON TABLE credential TYPE option<object> FLEXIBLE;
+DEFINE INDEX OVERWRITE idx_credential_lookup ON TABLE credential FIELDS kind, identifier UNIQUE;
+
+
 
 
 -- Swarm Advisory Leases: file_lock
@@ -2096,6 +2110,21 @@ DEFINE FUNCTION OVERWRITE fn::sfs_query_table(
         ORDER BY row_idx ASC
         LIMIT $lim
     );
+} PERMISSIONS FULL;
+
+-- Resolves an external protocol credential to an authenticated user principal (§22)
+DEFINE FUNCTION OVERWRITE fn::sfs_resolve_credential(
+    $kind: string,
+    $identifier: string
+) {
+    LET $cred = SELECT id, kind, identifier, secret_hash, user_id, enabled, meta
+                FROM credential
+                WHERE kind = $kind AND identifier = $identifier AND enabled = true
+                LIMIT 1;
+    IF array::len($cred) == 0 {
+        RETURN NONE;
+    };
+    RETURN $cred[0];
 } PERMISSIONS FULL;
 
 

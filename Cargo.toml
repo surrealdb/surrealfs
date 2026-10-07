@@ -5,6 +5,7 @@ members = [
     "crates/surrealfs-sim",
     "crates/surrealfs-fuse",
     "crates/surrealfs-shim",
+    "crates/surrealfs-server",
 ]
 resolver = "2"
 
@@ -30,3 +31,8 @@ futures = "0.3"
 blake3 = "1.5"
 zstd = "0.13"
 fastcdc = "1.0"
+sha2 = "0.10"
+hex = "0.4"
+hmac = "0.12"
+md-5 = "0.10"
+base64 = "0.22"

@@ -279,3 +279,20 @@ pub struct TableRow {
     pub sheet: Option<String>,
     pub data: serde_json::Value,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CredentialRecord {
+    pub kind: String,
+    pub identifier: String,
+    #[serde(default)]
+    pub secret_hash: Option<String>,
+    pub user_id: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
+}
+
+fn default_true() -> bool {
+    true
+}

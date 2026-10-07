@@ -70,3 +70,10 @@ impl From<anyhow::Error> for SurrealFsError {
         SurrealFsError::Other(err.to_string())
     }
 }
+
+impl From<serde_json::Error> for SurrealFsError {
+    fn from(err: serde_json::Error) -> Self {
+        SurrealFsError::Other(err.to_string())
+    }
+}
+

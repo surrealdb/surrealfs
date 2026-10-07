@@ -1,7 +1,9 @@
 mod common;
 
 use common::{create_test_fs, get_server_url};
-use surrealfs_cli::{run_cli, Cli, Commands, CrdtCommands, LockCommands, LsArgs};
+use surrealfs_cli::{
+    run_cli, Cli, Commands, CrdtCommands, CredentialCommands, LockCommands, LsArgs,
+};
 
 fn make_cli(url: &str, ns: &str, db: &str, cmd: Commands) -> Cli {
     Cli {
@@ -251,6 +253,7 @@ async fn test_cli_grep_and_lock() {
         Commands::Mount {
             mountpoint: tmp_mount.clone(),
             branch: "dev".to_string(),
+            nfs: false,
         },
     ))
     .await
@@ -533,4 +536,74 @@ async fn test_cli_understanding_pipeline() {
     assert!(git_out.contains("Imported 1 files"));
 
     let _ = std::fs::remove_dir_all(&temp_repo);
+}
+
+#[tokio::test]
+async fn test_cli_credentials_and_serve_dispatch() {
+    let (_fs, ns, db) = create_test_fs().await;
+    let url = common::get_server_url().await;
+
+    // 1. Create credential via CLI
+    let create_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Credential {
+            action: CredentialCommands::Create {
+                kind: "webdav".to_string(),
+                identifier: "alice".to_string(),
+                secret: "pass123".to_string(),
+                user_id: "user:alice".to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(create_out.contains("Created credential alice (webdav) for user:alice"));
+
+    // 2. List credentials
+    let list_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Credential {
+            action: CredentialCommands::List { user_id: None },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(list_out.contains("alice"));
+    assert!(list_out.contains("user:alice"));
+
+    // 3. Revoke credential
+    let revoke_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Credential {
+            action: CredentialCommands::Revoke {
+                kind: "webdav".to_string(),
+                identifier: "alice".to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(revoke_out.contains("Revoked credential alice (webdav)"));
+
+    // 4. Test Mount --nfs command builder
+    let nfs_mount_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Mount {
+            mountpoint: "/mnt/surrealfs".to_string(),
+            branch: "main".to_string(),
+            nfs: true,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(nfs_mount_out.contains("To complete NFS mount, run:"));
+    assert!(nfs_mount_out.contains("mount -t nfs"));
 }

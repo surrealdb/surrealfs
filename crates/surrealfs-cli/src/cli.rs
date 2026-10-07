@@ -123,6 +123,9 @@ pub enum Commands {
         /// Branch to mount (default: "main")
         #[arg(short, long, default_value = "main")]
         branch: String,
+        /// Run NFSv3 loopback mount without FUSE (§22.2)
+        #[arg(long)]
+        nfs: bool,
     },
 
     /// Manage collaborative CRDT document mode
@@ -216,6 +219,67 @@ pub enum Commands {
         target_path: String,
         #[arg(short, long)]
         max_commits: Option<usize>,
+    },
+
+    /// Run multi-protocol server daemon (WebDAV, S3, NFS, SFTP) (§22)
+    Serve {
+        #[command(subcommand)]
+        action: ServeCommands,
+    },
+
+    /// Manage external protocol credentials (§22, §24)
+    Credential {
+        #[command(subcommand)]
+        action: CredentialCommands,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ServeCommands {
+    /// Run WebDAV protocol server (§22.1)
+    Webdav {
+        #[arg(short, long, default_value = "127.0.0.1:8080")]
+        addr: String,
+        #[arg(short, long, default_value = "/")]
+        prefix: String,
+    },
+    /// Run S3-compatible REST API server (§22.3)
+    S3 {
+        #[arg(short, long, default_value = "127.0.0.1:9000")]
+        addr: String,
+    },
+    /// Run loopback NFSv3 server (§22.2)
+    Nfs {
+        #[arg(short, long, default_value = "127.0.0.1:2049")]
+        addr: String,
+        #[arg(short, long)]
+        mount_point: Option<String>,
+    },
+    /// Run SFTP subsystem server (§22.8)
+    Sftp {
+        #[arg(short, long, default_value = "127.0.0.1:2222")]
+        addr: String,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum CredentialCommands {
+    /// Create or update an external credential
+    Create {
+        kind: String,
+        identifier: String,
+        secret: String,
+        user_id: String,
+    },
+    /// Revoke / disable a credential
+    Revoke {
+        kind: String,
+        identifier: String,
+    },
+    /// List configured credentials
+    List {
+        #[arg(short, long)]
+        user_id: Option<String>,
     },
 }
 
@@ -437,7 +501,18 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                 }
             }
         }
-        Commands::Mount { mountpoint, branch } => {
+        Commands::Mount {
+            mountpoint,
+            branch,
+            nfs,
+        } => {
+            if *nfs {
+                let fs = cli.connect_fs().await?;
+                let nfs_server = surrealfs_server::NfsServer::new(fs);
+                let cmd = nfs_server.mount_command(mountpoint, 2049);
+                output.push_str(&format!("To complete NFS mount, run:\n  sudo {}\n", cmd));
+                return Ok(output);
+            }
             let _fs = cli.connect_fs().await?;
             let caller = cli.caller.as_deref().unwrap_or("root").to_string();
             let _router = surrealfs_fuse::SyntheticRouter::new(
@@ -616,6 +691,70 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                 "Imported {} files and {} commits to {}\n",
                 res.imported_files, res.imported_commits, res.target_path
             ));
+        }
+        Commands::Serve { action } => {
+            let fs = cli.connect_fs().await?;
+            match action {
+                ServeCommands::Webdav { addr, prefix } => {
+                    output.push_str(&format!(
+                        "Starting WebDAV server on {} with prefix {}\n",
+                        addr, prefix
+                    ));
+                    let server = std::sync::Arc::new(surrealfs_server::WebDavServer::new(fs, prefix));
+                    surrealfs_server::run_http_server(addr, server).await?;
+                }
+                ServeCommands::S3 { addr } => {
+                    output.push_str(&format!("Starting S3 server on {}\n", addr));
+                    let server = std::sync::Arc::new(surrealfs_server::S3Server::new(fs));
+                    surrealfs_server::run_http_server(addr, server).await?;
+                }
+                ServeCommands::Nfs { addr, mount_point } => {
+                    let nfs_server = surrealfs_server::NfsServer::new(fs);
+                    if let Some(mp) = mount_point {
+                        let cmd = nfs_server.mount_command(mp, 2049);
+                        output.push_str(&format!(
+                            "NFS server on {}. Mount command:\n  sudo {}\n",
+                            addr, cmd
+                        ));
+                    } else {
+                        output.push_str(&format!("NFS server configured on {}\n", addr));
+                    }
+                }
+                ServeCommands::Sftp { addr } => {
+                    output.push_str(&format!("SFTP subsystem configured on {}\n", addr));
+                }
+            }
+        }
+        Commands::Credential { action } => {
+            let fs = cli.connect_fs().await?;
+            match action {
+                CredentialCommands::Create {
+                    kind,
+                    identifier,
+                    secret,
+                    user_id,
+                } => {
+                    fs.create_credential(kind, identifier, Some(secret), user_id, None)
+                        .await?;
+                    output.push_str(&format!(
+                        "Created credential {} ({}) for {}\n",
+                        identifier, kind, user_id
+                    ));
+                }
+                CredentialCommands::Revoke { kind, identifier } => {
+                    fs.revoke_credential(kind, identifier).await?;
+                    output.push_str(&format!("Revoked credential {} ({})\n", identifier, kind));
+                }
+                CredentialCommands::List { user_id } => {
+                    let creds = fs.list_credentials(user_id.as_deref()).await?;
+                    for c in creds {
+                        output.push_str(&format!(
+                            "{:<8} {:<24} {:<16} enabled={}\n",
+                            c.kind, c.identifier, c.user_id, c.enabled
+                        ));
+                    }
+                }
+            }
         }
     }
     Ok(output)
