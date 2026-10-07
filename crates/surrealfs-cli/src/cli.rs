@@ -209,6 +209,14 @@ pub enum Commands {
         #[arg(short, long, default_value = "0.85")]
         threshold: f64,
     },
+
+    /// Import a Git repository into SurrealFS respecting .gitignore and mapping commits (§21.5)
+    ImportGit {
+        repo_path: String,
+        target_path: String,
+        #[arg(short, long)]
+        max_commits: Option<usize>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -590,6 +598,24 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
             let json = serde_json::to_string_pretty(&matches)?;
             output.push_str(&json);
             output.push('\n');
+        }
+        Commands::ImportGit {
+            repo_path,
+            target_path,
+            max_commits,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let opts = surrealfs_core::GitImportOptions {
+                repo_path: repo_path.clone(),
+                target_path: target_path.clone(),
+                max_commits: *max_commits,
+                branch: None,
+            };
+            let res = fs.import_git(&opts).await?;
+            output.push_str(&format!(
+                "Imported {} files and {} commits to {}\n",
+                res.imported_files, res.imported_commits, res.target_path
+            ));
         }
     }
     Ok(output)

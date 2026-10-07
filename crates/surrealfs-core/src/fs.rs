@@ -1381,4 +1381,41 @@ impl SurrealFs {
         matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(matches)
     }
+
+    /// Records a Git commit mapped to a SurrealFS tree (§21.5).
+    pub async fn record_git_commit(
+        &self,
+        commit: &crate::git::GitCommit,
+        target_root: &str,
+    ) -> Result<()> {
+        let sql = r#"
+            CREATE git_commit CONTENT {
+                sha: $sha,
+                author_name: $author_name,
+                author_email: $author_email,
+                timestamp: $timestamp,
+                message: $message,
+                target_root: $target_root,
+                created_at: time::now()
+            };
+        "#;
+        self.db
+            .query(sql)
+            .bind(("sha", commit.sha.as_str()))
+            .bind(("author_name", commit.author_name.as_str()))
+            .bind(("author_email", commit.author_email.as_str()))
+            .bind(("timestamp", commit.timestamp.as_str()))
+            .bind(("message", commit.message.as_str()))
+            .bind(("target_root", target_root))
+            .await?;
+        Ok(())
+    }
+
+    /// Imports a Git repository into SurrealFS, respecting .gitignore and mapping commits (§21.5).
+    pub async fn import_git(
+        &self,
+        opts: &crate::git::GitImportOptions,
+    ) -> Result<crate::git::GitImportResult> {
+        crate::git::import_git_repository(self, opts).await
+    }
 }

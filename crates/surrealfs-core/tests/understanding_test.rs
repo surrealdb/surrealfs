@@ -224,3 +224,49 @@ async fn test_simhash_near_duplicates_check() {
     assert_eq!(duplicates[0].0, "/docs/doc1.txt");
     assert!(duplicates[0].1 >= 0.80);
 }
+
+#[tokio::test]
+async fn test_git_repository_import() {
+    let fs = create_test_fs().await;
+
+    // Create a temporary directory structure representing a git repository
+    let temp_dir = std::env::temp_dir().join(format!("sfs-git-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    std::fs::create_dir_all(temp_dir.join("src")).unwrap();
+
+    std::fs::write(temp_dir.join(".gitignore"), "*.log\nbuild/\nsecret.env\n").unwrap();
+    std::fs::write(temp_dir.join("README.md"), "# Project X\nDocumentation.").unwrap();
+    std::fs::write(
+        temp_dir.join("src/main.rs"),
+        "fn main() { println!(\"Hi\"); }",
+    )
+    .unwrap();
+    std::fs::write(temp_dir.join("debug.log"), "IGNORE ME").unwrap();
+    std::fs::write(temp_dir.join("secret.env"), "KEY=123").unwrap();
+
+    let opts = surrealfs_core::GitImportOptions {
+        repo_path: temp_dir.to_string_lossy().to_string(),
+        target_path: "/projects/imported".to_string(),
+        max_commits: Some(10),
+        branch: None,
+    };
+
+    let result = fs.import_git(&opts).await.expect("import_git failed");
+    assert_eq!(result.imported_files, 3); // .gitignore, README.md, and src/main.rs (debug.log and secret.env ignored)
+    assert_eq!(result.target_path, "/projects/imported");
+
+    let readme = fs.read_text("/projects/imported/README.md").await.unwrap();
+    assert!(readme.contains("Project X"));
+
+    let main_rs = fs
+        .read_text("/projects/imported/src/main.rs")
+        .await
+        .unwrap();
+    assert!(main_rs.contains("println!"));
+
+    // Ignored files should not exist
+    assert!(fs.read_text("/projects/imported/debug.log").await.is_err());
+    assert!(fs.read_text("/projects/imported/secret.env").await.is_err());
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+}

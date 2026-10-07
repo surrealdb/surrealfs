@@ -9,6 +9,10 @@ license.workspace = true
 name = "surrealfs-rs"
 path = "src/main.rs"
 
+[[bin]]
+name = "git-remote-surrealfs"
+path = "src/bin/git_remote_surrealfs.rs"
+
 [dependencies]
 surrealfs-core = { path = "../surrealfs-core" }
 surrealfs-fuse = { path = "../surrealfs-fuse" }

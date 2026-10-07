@@ -511,4 +511,26 @@ async fn test_cli_understanding_pipeline() {
     .await
     .unwrap();
     assert!(near_out.starts_with('['));
+
+    // 10. Git import
+    let temp_repo = std::env::temp_dir().join(format!("sfs-cli-git-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp_repo);
+    std::fs::create_dir_all(&temp_repo).unwrap();
+    std::fs::write(temp_repo.join("hello.txt"), "Git imported file!").unwrap();
+
+    let git_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::ImportGit {
+            repo_path: temp_repo.to_string_lossy().to_string(),
+            target_path: "/git/imported".to_string(),
+            max_commits: Some(5),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(git_out.contains("Imported 1 files"));
+
+    let _ = std::fs::remove_dir_all(&temp_repo);
 }

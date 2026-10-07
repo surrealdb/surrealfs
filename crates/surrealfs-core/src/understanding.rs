@@ -212,6 +212,9 @@ pub fn detect_type_and_language(path: &str, data: &[u8]) -> DetectedMeta {
         "css" | "scss" => ("text/css", Some("css")),
         "sh" | "bash" | "zsh" => ("text/x-shellscript", Some("shell")),
         "txt" => ("text/plain", Some("text")),
+        "ipynb" => ("application/x-ipynb+json", Some("python")),
+        "csv" => ("text/csv", Some("csv")),
+        "tsv" => ("text/tab-separated-values", Some("tsv")),
         _ => ("text/plain", None),
     };
 
@@ -801,6 +804,69 @@ pub fn parse_tabular_records(content: &str, limit: usize) -> (Vec<String>, Vec<s
     (headers, rows)
 }
 
+/// Parsed cell from a Jupyter notebook (§21.6).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotebookCell {
+    pub cell_idx: usize,
+    pub cell_type: String,
+    pub source: String,
+    pub execution_count: Option<i64>,
+}
+
+/// Extracts clean cells from a Jupyter notebook JSON, stripping output clutter (§21.6).
+pub fn extract_notebook_cells(content: &str) -> Vec<NotebookCell> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(content) else {
+        return Vec::new();
+    };
+    let Some(cells) = val.get("cells").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    for (idx, cell) in cells.iter().enumerate() {
+        let cell_type = cell
+            .get("cell_type")
+            .and_then(|t| t.as_str())
+            .unwrap_or("code")
+            .to_string();
+        let execution_count = cell.get("execution_count").and_then(|c| c.as_i64());
+        let source = if let Some(arr) = cell.get("source").and_then(|s| s.as_array()) {
+            arr.iter()
+                .filter_map(|line| line.as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        } else if let Some(s) = cell.get("source").and_then(|s| s.as_str()) {
+            s.to_string()
+        } else {
+            String::new()
+        };
+        result.push(NotebookCell {
+            cell_idx: idx,
+            cell_type,
+            source,
+            execution_count,
+        });
+    }
+    result
+}
+
+/// Converts a Jupyter notebook into clean, searchable markdown/code text (§21.6).
+pub fn notebook_to_searchable_text(content: &str) -> String {
+    let cells = extract_notebook_cells(content);
+    let mut out = String::new();
+    for cell in cells {
+        out.push_str(&format!(
+            "# [Cell {} ({})]\n",
+            cell.cell_idx, cell.cell_type
+        ));
+        out.push_str(&cell.source);
+        if !cell.source.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,5 +1047,38 @@ def standalone(x: int) -> int:
         assert_eq!(r1["name"], "Alice");
         assert_eq!(r1["active"], true);
         assert_eq!(r1["score"], 98.5);
+    }
+
+    #[test]
+    fn test_notebook_cell_extraction() {
+        let notebook_json = r##"{
+            "cells": [
+                {
+                    "cell_type": "markdown",
+                    "source": ["# Analysis Notebook\n", "Introductory remarks."]
+                },
+                {
+                    "cell_type": "code",
+                    "execution_count": 1,
+                    "source": ["import numpy as np\n", "arr = np.zeros(10)\n"],
+                    "outputs": [{"output_type": "stream", "text": ["Done\n"]}]
+                }
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 2
+        }"##;
+
+        let cells = extract_notebook_cells(notebook_json);
+        assert_eq!(cells.len(), 2);
+        assert_eq!(cells[0].cell_type, "markdown");
+        assert!(cells[0].source.contains("# Analysis Notebook"));
+        assert_eq!(cells[1].cell_type, "code");
+        assert!(cells[1].source.contains("import numpy"));
+
+        let searchable = notebook_to_searchable_text(notebook_json);
+        assert!(searchable.contains("# [Cell 0 (markdown)]"));
+        assert!(searchable.contains("# [Cell 1 (code)]"));
+        assert!(!searchable.contains("output_type"));
     }
 }

@@ -914,6 +914,20 @@ DEFINE FIELD OVERWRITE row_idx  ON file_row TYPE int;
 DEFINE FIELD OVERWRITE data     ON file_row TYPE object FLEXIBLE;
 DEFINE INDEX OVERWRITE idx_file_row_pos ON file_row FIELDS file_id, row_idx UNIQUE;
 
+-- Git commit history mapping (§21.5)
+DEFINE TABLE OVERWRITE git_commit SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE true
+        FOR create, update, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer';
+DEFINE FIELD OVERWRITE sha          ON TABLE git_commit TYPE string;
+DEFINE FIELD OVERWRITE author_name  ON TABLE git_commit TYPE string;
+DEFINE FIELD OVERWRITE author_email ON TABLE git_commit TYPE string;
+DEFINE FIELD OVERWRITE timestamp    ON TABLE git_commit TYPE string;
+DEFINE FIELD OVERWRITE message      ON TABLE git_commit TYPE string;
+DEFINE FIELD OVERWRITE target_root  ON TABLE git_commit TYPE string;
+DEFINE FIELD OVERWRITE created_at   ON TABLE git_commit TYPE datetime VALUE time::now() READONLY;
+DEFINE INDEX OVERWRITE idx_git_commit_sha ON TABLE git_commit FIELDS sha;
+
 
 
 -- Swarm Advisory Leases: file_lock
