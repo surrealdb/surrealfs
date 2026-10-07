@@ -1,0 +1,27 @@
+[package]
+name = "surrealfs-shim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+name = "surrealfs_shim"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+surrealfs-core = { path = "../surrealfs-core" }
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+libc = "0.2"
+parking_lot = "0.12"
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+surrealdb.workspace = true
+tempfile = "3.17"

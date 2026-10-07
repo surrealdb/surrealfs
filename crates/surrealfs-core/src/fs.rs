@@ -148,6 +148,52 @@ impl SurrealFs {
         content.ok_or_else(|| SurrealFsError::NotFound(format!("File not found: {}", path)))
     }
 
+    /// Read raw bytes of a file.
+    pub async fn read_bytes(&self, path: &str) -> Result<Vec<u8>> {
+        let norm = normalize_path(path);
+        let mut res = self
+            .db
+            .query("RETURN fn::sfs_read($path, $caller);")
+            .bind(("path", norm.clone()))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let val: Option<serde_json::Value> = res.take(0usize)?;
+        let v = val.ok_or_else(|| SurrealFsError::NotFound(format!("File not found: {}", path)))?;
+        if let Some(text) = v.as_str() {
+            return Ok(text.as_bytes().to_vec());
+        }
+        if let Some(bytes) = extract_bytes(Some(&v)) {
+            return Ok(bytes);
+        }
+        Ok(Vec::new())
+    }
+
+    /// Write raw bytes to a file.
+    pub async fn write_bytes(
+        &self,
+        path: &str,
+        data: &[u8],
+        content_type: Option<&str>,
+    ) -> Result<FileEntry> {
+        let norm = normalize_path(path);
+        if let Ok(text) = std::str::from_utf8(data) {
+            return self.write_text(&norm, text, None).await;
+        }
+        let mime = content_type.unwrap_or("application/octet-stream");
+        let mut res = self
+            .db
+            .query("LET $id = fn::sfs_resolve($path); IF $id IS NOT NONE { UPDATE $id SET file = <bytes>$data, content = NONE, content_type = $mime, updated_at = time::now(); RETURN fn::sfs_stat($path); }; LET $parent_id = fn::sfs_ensure_parents($path, $caller); LET $raw = string::split($path, '/'); LET $segments = array::filter($raw, |$v| string::len($v) > 0); LET $filename = $segments[array::len($segments) - 1]; LET $created = (CREATE file CONTENT { filename: $filename, parent: $parent_id, file: <bytes>$data, content_type: $mime }); RETURN fn::sfs_stat($path);")
+            .bind(("path", norm.clone()))
+            .bind(("data", data.to_vec()))
+            .bind(("mime", mime.to_string()))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let entry: Option<SValue> = res.take(res.num_statements() - 1)?;
+        let val =
+            entry.ok_or_else(|| SurrealFsError::Database(format!("Failed to write: {}", norm)))?;
+        value_to_serde(val)
+    }
+
     /// Write or overwrite text file content.
     pub async fn write_text(
         &self,

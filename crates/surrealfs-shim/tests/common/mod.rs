@@ -84,7 +84,6 @@ pub async fn create_test_fs() -> SurrealFs {
         .await
         .expect("Failed to connect to test server");
 
-    // Apply schema
     let schema_file = include_str!("../../../../surrealfs/schema/file.surql");
     let schema_auth = include_str!("../../../../surrealfs/schema/record_auth.surql");
 

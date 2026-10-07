@@ -4,6 +4,7 @@ members = [
     "crates/surrealfs-cli",
     "crates/surrealfs-sim",
     "crates/surrealfs-fuse",
+    "crates/surrealfs-shim",
 ]
 resolver = "2"
 
