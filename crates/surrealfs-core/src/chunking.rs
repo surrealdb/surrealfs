@@ -1,3 +1,5 @@
+use crate::models::BlobChunk;
+use fastcdc::FastCDC;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -179,6 +181,86 @@ pub fn chunk_text(text: &str, filename: &str) -> Vec<FileSection> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FastCdcConfig {
+    pub min_size: usize,
+    pub avg_size: usize,
+    pub max_size: usize,
+}
+
+impl Default for FastCdcConfig {
+    fn default() -> Self {
+        Self {
+            min_size: 256 * 1024,      // 256 KB
+            avg_size: 1024 * 1024,     // 1 MB
+            max_size: 4 * 1024 * 1024, // 4 MB
+        }
+    }
+}
+
+impl FastCdcConfig {
+    pub fn small() -> Self {
+        Self {
+            min_size: 4 * 1024,  // 4 KB
+            avg_size: 16 * 1024, // 16 KB
+            max_size: 64 * 1024, // 64 KB
+        }
+    }
+}
+
+/// Chunks raw byte data using FastCDC rolling hash, BLAKE3 content addressing,
+/// and zstd transparent compression.
+pub fn chunk_data(data: &[u8], config: Option<FastCdcConfig>) -> Vec<BlobChunk> {
+    if data.is_empty() {
+        return Vec::new();
+    }
+
+    let cfg = config.unwrap_or_default();
+    let chunker = FastCDC::new(data, cfg.min_size, cfg.avg_size, cfg.max_size);
+
+    let mut result = Vec::new();
+    for chunk in chunker {
+        let chunk_bytes = &data[chunk.offset..chunk.offset + chunk.length];
+        let hash = blake3::hash(chunk_bytes).to_hex().to_string();
+        let chunk_id = format!("b3:{}", hash);
+
+        // Attempt transparent compression with zstd
+        let (stored_bytes, codec) = match zstd::encode_all(chunk_bytes, 3) {
+            Ok(comp) if comp.len() < chunk_bytes.len() => (comp, "zstd".to_string()),
+            _ => (chunk_bytes.to_vec(), "none".to_string()),
+        };
+
+        result.push(BlobChunk {
+            chunk_id,
+            offset: chunk.offset as u64,
+            length: chunk.length as u64,
+            uncompressed_size: chunk_bytes.len() as u64,
+            stored_size: stored_bytes.len() as u64,
+            codec,
+            data: Some(stored_bytes),
+        });
+    }
+
+    result
+}
+
+/// Computes the whole-file Merkle root hash over ordered chunk BLAKE3 identifiers.
+pub fn compute_merkle_root(chunk_ids: &[String]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for id in chunk_ids {
+        hasher.update(id.as_bytes());
+    }
+    format!("b3:{}", hasher.finalize().to_hex())
+}
+
+/// Decompresses chunk bytes according to the blob codec.
+pub fn decompress_chunk(data: &[u8], codec: &str) -> Result<Vec<u8>, std::io::Error> {
+    match codec {
+        "zstd" => zstd::decode_all(data),
+        _ => Ok(data.to_vec()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -224,5 +306,33 @@ Final thoughts.
         assert_eq!(sections[0].line_end, 50);
         assert_eq!(sections[1].line_start, 41);
         assert_eq!(sections[1].line_end, 90);
+    }
+
+    #[test]
+    fn test_fastcdc_chunk_data_and_compression() {
+        let mut sample = Vec::new();
+        // Repetitive compressible data to test zstd compression
+        for i in 0..100_000 {
+            sample.extend_from_slice(
+                format!("Repeated pattern line {} - payload data\n", i % 10).as_bytes(),
+            );
+        }
+
+        let chunks = chunk_data(&sample, Some(FastCdcConfig::small()));
+        assert!(!chunks.is_empty());
+
+        let mut reassembled = Vec::new();
+        for chunk in &chunks {
+            assert!(chunk.chunk_id.starts_with("b3:"));
+            let decompressed =
+                decompress_chunk(chunk.data.as_ref().unwrap(), &chunk.codec).unwrap();
+            assert_eq!(decompressed.len(), chunk.length as usize);
+            reassembled.extend_from_slice(&decompressed);
+        }
+        assert_eq!(reassembled, sample);
+
+        let chunk_ids: Vec<String> = chunks.iter().map(|c| c.chunk_id.clone()).collect();
+        let merkle = compute_merkle_root(&chunk_ids);
+        assert!(merkle.starts_with("b3:"));
     }
 }

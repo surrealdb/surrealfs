@@ -21,6 +21,9 @@ yrs = "0.28.0"
 sha2 = "0.11.0"
 hex = "0.4.3"
 base64 = "0.22"
+blake3.workspace = true
+zstd.workspace = true
+fastcdc.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

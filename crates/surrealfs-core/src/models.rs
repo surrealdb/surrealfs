@@ -139,3 +139,30 @@ pub struct WorkspaceDiff {
     #[serde(default)]
     pub branch_gen: Option<u64>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlobChunk {
+    pub chunk_id: String,
+    pub offset: u64,
+    pub length: u64,
+    pub uncompressed_size: u64,
+    pub stored_size: u64,
+    pub codec: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UploadSession {
+    pub upload_id: String,
+    pub missing_chunks: Vec<String>,
+    pub received_chunks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UsageStats {
+    pub path: String,
+    pub files: u64,
+    pub logical_bytes: u64,
+    pub stored_bytes: u64,
+}

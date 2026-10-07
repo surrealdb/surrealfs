@@ -1,10 +1,11 @@
 //! Core async SurrealFs implementation for Rust.
 
+use crate::chunking::{chunk_data, decompress_chunk, FastCdcConfig};
 use crate::crdt::CrdtDoc;
 use crate::errors::{Result, SurrealFsError};
 use crate::models::{
     FileEntry, FileLock, FileVersion, GrepMatch, MailboxMessage, SearchHit, SectionHit,
-    WorkspaceDiff,
+    UploadSession, UsageStats, WorkspaceDiff,
 };
 use crate::paths::normalize_path;
 use serde::de::DeserializeOwned;
@@ -846,5 +847,197 @@ impl SurrealFs {
         let v = entry_val
             .ok_or_else(|| SurrealFsError::Database("Failed to apply CRDT mutation".to_string()))?;
         value_to_serde(v)
+    }
+
+    /// Upload a file using FastCDC content-addressed chunking, deduplication,
+    /// and transparent zstd compression.
+    pub async fn upload_file(
+        &self,
+        path: &str,
+        data: &[u8],
+        if_generation: Option<u64>,
+        config: Option<FastCdcConfig>,
+    ) -> Result<FileEntry> {
+        let norm = normalize_path(path);
+        let chunks = chunk_data(data, config);
+        if chunks.is_empty() {
+            return self.write_bytes(&norm, &[], None).await;
+        }
+
+        let chunk_ids: Vec<String> = chunks.iter().map(|c| c.chunk_id.clone()).collect();
+        let total_size = data.len() as i64;
+
+        // Step 1: Begin upload session and identify missing chunks
+        let begin_sql = "RETURN fn::sfs_upload_begin($path, $size, $chunk_ids, $caller);";
+        let mut begin_res = self
+            .db
+            .query(begin_sql)
+            .bind(("path", norm.clone()))
+            .bind(("size", total_size))
+            .bind(("chunk_ids", chunk_ids.clone()))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let session_val: Option<SValue> = begin_res.take(0usize)?;
+        let s_val = session_val.ok_or_else(|| {
+            SurrealFsError::Database("Empty response from fn::sfs_upload_begin".to_string())
+        })?;
+        let session: UploadSession = value_to_serde(s_val)?;
+
+        // Step 2: Upload missing chunks
+        let missing_set: std::collections::HashSet<&str> =
+            session.missing_chunks.iter().map(|s| s.as_str()).collect();
+
+        let mut uploaded = std::collections::HashSet::new();
+        for chunk in &chunks {
+            if missing_set.contains(chunk.chunk_id.as_str()) && !uploaded.contains(&chunk.chunk_id)
+            {
+                uploaded.insert(chunk.chunk_id.clone());
+                let chunk_data = chunk.data.as_ref().unwrap();
+                let upload_chunk_sql = r#"
+                    RETURN fn::sfs_upload_chunk(
+                        $upload_id,
+                        $chunk_id,
+                        $uncompressed_size,
+                        $stored_size,
+                        $codec,
+                        <bytes>$data,
+                        $caller
+                    );
+                "#;
+                self.db
+                    .query(upload_chunk_sql)
+                    .bind(("upload_id", session.upload_id.clone()))
+                    .bind(("chunk_id", chunk.chunk_id.clone()))
+                    .bind(("uncompressed_size", chunk.uncompressed_size as i64))
+                    .bind(("stored_size", chunk.stored_size as i64))
+                    .bind(("codec", chunk.codec.clone()))
+                    .bind(("data", chunk_data.clone()))
+                    .bind(("caller", self.caller.clone()))
+                    .await?;
+            }
+        }
+
+        // Step 3: Commit upload session
+        let offsets: Vec<i64> = chunks.iter().map(|c| c.offset as i64).collect();
+        let lengths: Vec<i64> = chunks.iter().map(|c| c.length as i64).collect();
+        let commit_sql = r#"
+            RETURN fn::sfs_upload_commit(
+                $upload_id,
+                $if_generation,
+                $offsets,
+                $lengths,
+                $caller
+            );
+        "#;
+        let mut commit_res = self
+            .db
+            .query(commit_sql)
+            .bind(("upload_id", session.upload_id))
+            .bind(("if_generation", if_generation.map(|g| g as i64)))
+            .bind(("offsets", offsets))
+            .bind(("lengths", lengths))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let entry_val: Option<SValue> = commit_res.take(0usize)?;
+        let v = entry_val.ok_or_else(|| {
+            SurrealFsError::Database("Empty response from fn::sfs_upload_commit".to_string())
+        })?;
+        value_to_serde(v)
+    }
+
+    /// Read an arbitrary byte range from a file, efficiently streaming only covering chunks.
+    pub async fn read_range(&self, path: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
+        let norm = normalize_path(path);
+        let sql = "RETURN fn::sfs_read_bytes_range($path, $offset, $length, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("offset", offset as i64))
+            .bind(("length", length as i64))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let val: Option<SValue> = res.take(0usize)?;
+        let s_val = val.ok_or_else(|| {
+            SurrealFsError::NotFound(format!("File not found for read_range: {}", path))
+        })?;
+
+        let json_val: Value = value_to_serde(s_val)?;
+        let chunked = json_val
+            .get("chunked")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        if !chunked {
+            let data_bytes = if let Some(s) = json_val.get("data").and_then(|v| v.as_str()) {
+                s.as_bytes().to_vec()
+            } else {
+                extract_bytes(json_val.get("data")).unwrap_or_default()
+            };
+            return Ok(data_bytes);
+        }
+
+        // Chunked file: reassemble requested range from covering chunks
+        let mut out = vec![0u8; length as usize];
+        let chunks_arr = json_val
+            .get("chunks")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| {
+                SurrealFsError::Database("Missing chunks in range read response".to_string())
+            })?;
+
+        for c in chunks_arr {
+            let c_offset = c.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
+            let c_length = c.get("length").and_then(|v| v.as_u64()).unwrap_or(0);
+            let codec = c.get("codec").and_then(|v| v.as_str()).unwrap_or("none");
+
+            let raw_bytes = extract_bytes(c.get("bytes")).unwrap_or_default();
+            let decompressed = decompress_chunk(&raw_bytes, codec)
+                .map_err(|e| SurrealFsError::Other(format!("Failed to decompress chunk: {}", e)))?;
+
+            let start = std::cmp::max(offset, c_offset);
+            let end = std::cmp::min(offset + length, c_offset + c_length);
+            if start < end {
+                let chunk_slice_start = (start - c_offset) as usize;
+                let chunk_slice_len = (end - start) as usize;
+                let target_start = (start - offset) as usize;
+
+                if chunk_slice_start + chunk_slice_len <= decompressed.len() {
+                    out[target_start..target_start + chunk_slice_len].copy_from_slice(
+                        &decompressed[chunk_slice_start..chunk_slice_start + chunk_slice_len],
+                    );
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Return instant disk usage statistics for a path.
+    pub async fn du(&self, path: &str) -> Result<UsageStats> {
+        let norm = normalize_path(path);
+        let sql = "RETURN fn::sfs_du($path, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let val: Option<SValue> = res.take(0usize)?;
+        let s_val = val
+            .ok_or_else(|| SurrealFsError::NotFound(format!("Path not found for du: {}", path)))?;
+        value_to_serde(s_val)
+    }
+
+    /// Clean up unreferenced blobs older than max_age_secs.
+    pub async fn gc_blobs(&self, max_age_secs: u64) -> Result<usize> {
+        let sql = "RETURN fn::sfs_gc_blobs($max_age_secs);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("max_age_secs", max_age_secs as i64))
+            .await?;
+        let count: Option<i64> = res.take(0usize)?;
+        Ok(count.unwrap_or(0) as usize)
     }
 }

@@ -293,6 +293,8 @@ DEFINE FIELD OVERWRITE crdt        ON TABLE file TYPE bool DEFAULT false
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT ''
     PERMISSIONS FOR update WHERE false;
+DEFINE FIELD OVERWRITE size       ON TABLE file TYPE option<int> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 
 -- Timestamps
 DEFINE FIELD OVERWRITE created_at ON TABLE file TYPE datetime VALUE time::now() READONLY;
@@ -597,21 +599,70 @@ DEFINE FUNCTION OVERWRITE fn::sfs_grep(
 -- Extended Tables & Subsystems
 -- =============================================================================
 
--- Content Chunking: file_chunk
+-- Content Chunking & Manifest: file_chunk
 DEFINE TABLE OVERWRITE file_chunk SCHEMAFULL
     PERMISSIONS
         FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
-        FOR create, update, delete WHERE $access = 'indexer';
+        FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE file         ON file_chunk TYPE record<file>;
-DEFINE FIELD OVERWRITE chunk_index  ON file_chunk TYPE int;
-DEFINE FIELD OVERWRITE byte_offset  ON file_chunk TYPE int;
-DEFINE FIELD OVERWRITE byte_length  ON file_chunk TYPE int;
-DEFINE FIELD OVERWRITE text         ON file_chunk TYPE string;
+DEFINE FIELD OVERWRITE chunk_index  ON file_chunk TYPE option<int>;
+DEFINE FIELD OVERWRITE byte_offset  ON file_chunk TYPE option<int>;
+DEFINE FIELD OVERWRITE byte_length  ON file_chunk TYPE option<int>;
+DEFINE FIELD OVERWRITE text         ON file_chunk TYPE option<string>;
 DEFINE FIELD OVERWRITE embedding    ON file_chunk TYPE option<array<float, 1536>>;
-DEFINE FIELD OVERWRITE hash         ON file_chunk TYPE string;
-DEFINE INDEX OVERWRITE idx_chunk_file_order ON file_chunk FIELDS file, chunk_index UNIQUE;
+DEFINE FIELD OVERWRITE hash         ON file_chunk TYPE option<string>;
+DEFINE FIELD OVERWRITE offset       ON file_chunk TYPE option<int>;
+DEFINE FIELD OVERWRITE length       ON file_chunk TYPE option<int>;
+DEFINE FIELD OVERWRITE blob         ON file_chunk TYPE option<record<blob>>;
+DEFINE INDEX OVERWRITE idx_chunk_file_order ON file_chunk FIELDS file, chunk_index;
+DEFINE INDEX OVERWRITE idx_chunk_offset ON file_chunk FIELDS file, offset;
 DEFINE INDEX OVERWRITE idx_hnsw_chunk_embedding ON file_chunk FIELDS embedding
     HNSW DIMENSION 1536 DIST COSINE TYPE F32;
+
+-- Content-Addressed Blob Storage (BLAKE3)
+DEFINE TABLE OVERWRITE blob SCHEMAFULL
+    PERMISSIONS FOR select, create, update, delete FULL;
+DEFINE FIELD OVERWRITE size       ON blob TYPE int;
+DEFINE FIELD OVERWRITE stored     ON blob TYPE int;
+DEFINE FIELD OVERWRITE codec      ON blob TYPE string;
+DEFINE FIELD OVERWRITE tier       ON blob TYPE string;
+DEFINE FIELD OVERWRITE bytes      ON blob TYPE option<bytes>;
+DEFINE FIELD OVERWRITE location   ON blob TYPE option<string>;
+DEFINE FIELD OVERWRITE refs       ON blob TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE scope      ON blob TYPE string;
+DEFINE FIELD OVERWRITE created_at ON blob TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_blob_scope ON blob FIELDS scope;
+
+-- Upload Sessions
+DEFINE TABLE OVERWRITE upload SCHEMAFULL
+    PERMISSIONS FOR select, create, update, delete FULL;
+DEFINE FIELD OVERWRITE path            ON upload TYPE string;
+DEFINE FIELD OVERWRITE caller          ON upload TYPE string;
+DEFINE FIELD OVERWRITE scope           ON upload TYPE string;
+DEFINE FIELD OVERWRITE size            ON upload TYPE int;
+DEFINE FIELD OVERWRITE chunk_ids       ON upload TYPE array<string>;
+DEFINE FIELD OVERWRITE received_chunks ON upload TYPE array<string> DEFAULT [];
+DEFINE FIELD OVERWRITE created_at      ON upload TYPE datetime DEFAULT time::now();
+DEFINE FIELD OVERWRITE expires_at      ON upload TYPE datetime DEFAULT time::now() + 1d;
+
+-- Disk Usage & Instant du
+DEFINE TABLE OVERWRITE usage SCHEMAFULL
+    PERMISSIONS FOR select, create, update, delete FULL;
+DEFINE FIELD OVERWRITE scope         ON usage TYPE string;
+DEFINE FIELD OVERWRITE path          ON usage TYPE string;
+DEFINE FIELD OVERWRITE files         ON usage TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE logical_bytes ON usage TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE stored_bytes  ON usage TYPE int DEFAULT 0;
+DEFINE FIELD OVERWRITE updated_at    ON usage TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_usage_scope_path ON usage FIELDS scope, path UNIQUE;
+
+-- Quotas
+DEFINE TABLE OVERWRITE quota SCHEMAFULL
+    PERMISSIONS FOR select, create, update, delete FULL;
+DEFINE FIELD OVERWRITE scope         ON quota TYPE string;
+DEFINE FIELD OVERWRITE max_bytes     ON quota TYPE int;
+DEFINE FIELD OVERWRITE max_files     ON quota TYPE option<int>;
+DEFINE INDEX OVERWRITE idx_quota_scope ON quota FIELDS scope UNIQUE;
 
 -- Section-level AST / Markdown Chunking: file_section
 DEFINE TABLE OVERWRITE file_section SCHEMAFULL
@@ -854,7 +905,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
     };
     LET $row = (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
                        hash, generation, created_at, updated_at, meta, crdt,
-                       IF content IS NOT NONE THEN string::len(content)
+                       IF size IS NOT NONE THEN size
+                       ELSE IF content IS NOT NONE THEN string::len(content)
                        ELSE IF file IS NOT NONE THEN bytes::len(file)
                        ELSE 0 END AS size
                 FROM ONLY $id);
@@ -869,7 +921,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
     IF $path = '/' {
         RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
                        hash, generation, created_at, updated_at, meta, crdt,
-                       IF content IS NOT NONE THEN string::len(content)
+                       IF size IS NOT NONE THEN size
+                       ELSE IF content IS NOT NONE THEN string::len(content)
                        ELSE IF file IS NOT NONE THEN bytes::len(file)
                        ELSE 0 END AS size
                 FROM file
@@ -882,7 +935,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
     };
     RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
                    hash, generation, created_at, updated_at, meta, crdt,
-                   IF content IS NOT NONE THEN string::len(content)
+                   IF size IS NOT NONE THEN size
+                   ELSE IF content IS NOT NONE THEN string::len(content)
                    ELSE IF file IS NOT NONE THEN bytes::len(file)
                    ELSE 0 END AS size
             FROM file
@@ -1379,6 +1433,252 @@ DEFINE FUNCTION OVERWRITE fn::sfs_diff($path: string, $gen_a: option<int>, $gen_
     LET $vb = IF $gen_b IS NOT NONE THEN (SELECT content FROM ONLY file_version WHERE path = $path AND generation = $gen_b LIMIT 1).content ?? '' ELSE $curr END;
     RETURN $vb;
 } PERMISSIONS FULL;
+
+-- Upload Begin: Calculate missing chunks for client dedup within scope
+DEFINE FUNCTION OVERWRITE fn::sfs_upload_begin(
+    $path: string,
+    $size: int,
+    $chunk_ids: array<string>,
+    $caller: any
+) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $scope = $who;
+    
+    LET $existing_records = (
+        SELECT VALUE record::id(id) 
+        FROM blob 
+        WHERE scope = $scope
+    );
+    LET $unique_chunks = array::distinct($chunk_ids);
+    LET $missing = array::difference($unique_chunks, $existing_records);
+    LET $received = array::intersect($unique_chunks, $existing_records);
+
+    LET $up = (CREATE ONLY upload CONTENT {
+        path: $path,
+        caller: $who,
+        scope: $scope,
+        size: $size,
+        chunk_ids: $chunk_ids,
+        received_chunks: $received,
+        created_at: time::now(),
+        expires_at: time::now() + 1d
+    });
+
+    RETURN {
+        upload_id: type::string($up.id),
+        missing_chunks: $missing,
+        received_chunks: $received
+    };
+} PERMISSIONS FULL;
+
+-- Upload Chunk: Store individual content-addressed chunk
+DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
+    $upload_id: string,
+    $chunk_id: string,
+    $uncompressed_size: int,
+    $stored_bytes: int,
+    $codec: string,
+    $data: bytes,
+    $caller: any
+) {
+    LET $up_rec = type::record($upload_id);
+    LET $up = (SELECT * FROM ONLY $up_rec);
+    IF $up IS NONE {
+        THROW 'sfs:not_found: upload expired or not found';
+    };
+
+    LET $blob_id = type::record('blob', $chunk_id);
+    LET $existing_blob = (SELECT id FROM ONLY $blob_id);
+    IF $existing_blob IS NONE {
+        CREATE $blob_id CONTENT {
+            size: $uncompressed_size,
+            stored: $stored_bytes,
+            codec: $codec,
+            tier: 'inline',
+            bytes: $data,
+            refs: 0,
+            scope: $up.scope,
+            created_at: time::now()
+        };
+    };
+
+    LET $updated_received = array::distinct(array::concat($up.received_chunks, [$chunk_id]));
+    UPDATE $up_rec SET received_chunks = $updated_received;
+    RETURN true;
+} PERMISSIONS FULL;
+
+-- Upload Commit: Assemble manifest, set file metadata, update usage
+DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
+    $upload_id: string,
+    $if_generation: any,
+    $offsets: array<int>,
+    $lengths: array<int>,
+    $caller: any
+) {
+    LET $up_rec = type::record($upload_id);
+    LET $up = (SELECT * FROM ONLY $up_rec);
+    IF $up IS NONE {
+        THROW 'sfs:not_found: upload expired or not found';
+    };
+
+    LET $diff = array::difference(array::distinct($up.chunk_ids), $up.received_chunks);
+    IF array::len($diff) > 0 {
+        THROW 'sfs:incomplete_upload: missing chunks';
+    };
+
+    LET $path = $up.path;
+    LET $who = fn::sfs_me() ?? $caller ?? $up.caller ?? 'root';
+    LET $existing = fn::sfs_resolve($path);
+    LET $file_id = IF $existing IS NOT NONE {
+        LET $curr = (SELECT generation, is_folder FROM ONLY $existing);
+        IF $curr.is_folder {
+            THROW 'sfs:is_a_directory';
+        };
+        IF $if_generation != NONE AND $if_generation != NULL AND $curr.generation != $if_generation {
+            THROW 'sfs:conflict';
+        };
+        DELETE file_chunk WHERE file = $existing;
+        UPDATE $existing SET 
+            content = NONE,
+            file = NONE,
+            size = $up.size,
+            updated_at = time::now();
+        $existing;
+    } ELSE {
+        LET $parent_id = fn::sfs_ensure_parents($path, $who);
+        LET $raw = string::split($path, '/');
+        LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+        LET $filename = $segments[array::len($segments) - 1];
+        LET $created = (CREATE ONLY file CONTENT {
+            filename: $filename,
+            parent: $parent_id,
+            owner: $who,
+            size: $up.size,
+            content_type: 'application/octet-stream',
+            is_folder: false,
+            created_at: time::now(),
+            updated_at: time::now()
+        });
+        $created.id;
+    };
+
+    LET $count = array::len($up.chunk_ids);
+    FOR $i IN 0..$count {
+        LET $cid = $up.chunk_ids[$i];
+        LET $off = $offsets[$i] ?? 0;
+        LET $len = $lengths[$i] ?? 0;
+        LET $b_rec = type::record('blob', $cid);
+        CREATE file_chunk CONTENT {
+            file: $file_id,
+            offset: $off,
+            length: $len,
+            blob: $b_rec
+        };
+        UPDATE $b_rec SET refs += 1;
+    };
+
+    LET $existing_usage = (SELECT * FROM ONLY usage WHERE scope = $up.scope AND path = $path LIMIT 1);
+    IF $existing_usage IS NONE {
+        CREATE usage CONTENT {
+            scope: $up.scope,
+            path: $path,
+            files: 1,
+            logical_bytes: $up.size,
+            stored_bytes: $up.size,
+            updated_at: time::now()
+        };
+    } ELSE {
+        UPDATE $existing_usage.id SET
+            logical_bytes = $up.size,
+            stored_bytes = $up.size,
+            updated_at = time::now();
+    };
+
+    DELETE $up_rec;
+    RETURN fn::sfs_stat($path);
+} PERMISSIONS FULL;
+
+-- Range Read: Read sub-slice of a chunked or standard file
+DEFINE FUNCTION OVERWRITE fn::sfs_read_bytes_range(
+    $path: string,
+    $offset: int,
+    $length: int,
+    $caller: any
+) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+
+    LET $manifest = (
+        SELECT offset, length, blob.bytes AS bytes, blob.codec AS codec 
+        FROM file_chunk 
+        WHERE file = $id AND blob != NONE
+        ORDER BY offset
+    );
+
+    IF array::len($manifest) > 0 {
+        LET $end = $offset + $length;
+        LET $covering = array::filter($manifest, |$c| 
+            $c.offset < $end AND ($c.offset + $c.length) > $offset
+        );
+        RETURN {
+            chunked: true,
+            chunks: $covering
+        };
+    };
+
+    LET $row = (SELECT content, file FROM ONLY $id);
+    IF $row.content IS NOT NONE {
+        LET $sub = string::slice($row.content, $offset, $length);
+        RETURN {
+            chunked: false,
+            data: $sub
+        };
+    };
+    IF $row.file IS NOT NONE {
+        RETURN {
+            chunked: false,
+            data: $row.file
+        };
+    };
+    RETURN {
+        chunked: false,
+        data: ''
+    };
+} PERMISSIONS FULL;
+
+-- Garbage Collector: Delete unreferenced blobs older than max age
+DEFINE FUNCTION OVERWRITE fn::sfs_gc_blobs($max_age_secs: int) {
+    LET $threshold = time::now() - duration::from_secs($max_age_secs);
+    LET $dead = (
+        SELECT VALUE id FROM blob 
+        WHERE refs <= 0 AND created_at < $threshold
+    );
+    FOR $b IN $dead {
+        DELETE $b;
+    };
+    RETURN array::len($dead);
+} PERMISSIONS FULL;
+
+-- Disk Usage (du): Instant usage query
+DEFINE FUNCTION OVERWRITE fn::sfs_du($path: string, $caller: any) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $records = (
+        SELECT * FROM usage 
+        WHERE scope = $who AND (path = $path OR string::starts_with(path, $path))
+    );
+    LET $total_files = math::sum($records[*].files) ?? 0;
+    LET $total_logical = math::sum($records[*].logical_bytes) ?? 0;
+    LET $total_stored = math::sum($records[*].stored_bytes) ?? 0;
+    RETURN {
+        path: $path,
+        files: $total_files,
+        logical_bytes: $total_logical,
+        stored_bytes: $total_stored
+    };
+} PERMISSIONS FULL;
+
 
 -- Seed: /home
 --

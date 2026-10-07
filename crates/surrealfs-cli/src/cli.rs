@@ -133,6 +133,24 @@ pub enum Commands {
 
     /// Split file into AST / markdown sections and print chunks
     Chunk { path: String },
+
+    /// Upload a file using FastCDC chunking and BLAKE3 content addressing
+    Upload {
+        local_path: String,
+        remote_path: String,
+    },
+
+    /// Display instant disk usage for a directory tree
+    Du {
+        #[arg(default_value = "/")]
+        path: String,
+    },
+
+    /// Garbage collect unreferenced blobs older than max_age_secs
+    Gc {
+        #[arg(short, long, default_value = "86400")]
+        max_age_secs: u64,
+    },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -375,6 +393,32 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
             let json = serde_json::to_string_pretty(&sections)?;
             output.push_str(&json);
             output.push('\n');
+        }
+        Commands::Upload {
+            local_path,
+            remote_path,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let data = std::fs::read(local_path)
+                .with_context(|| format!("Failed to read local file: {}", local_path))?;
+            let entry = fs.upload_file(remote_path, &data, None, None).await?;
+            output.push_str(&format!(
+                "Uploaded '{}' -> '{}' ({} bytes, gen {})\n",
+                local_path, remote_path, entry.size, entry.generation
+            ));
+        }
+        Commands::Du { path } => {
+            let fs = cli.connect_fs().await?;
+            let usage = fs.du(path).await?;
+            output.push_str(&format!(
+                "{}\tfiles: {}\tlogical: {} B\tstored: {} B\n",
+                usage.path, usage.files, usage.logical_bytes, usage.stored_bytes
+            ));
+        }
+        Commands::Gc { max_age_secs } => {
+            let fs = cli.connect_fs().await?;
+            let count = fs.gc_blobs(*max_age_secs).await?;
+            output.push_str(&format!("Garbage collected {} unreferenced blobs\n", count));
         }
     }
     Ok(output)
