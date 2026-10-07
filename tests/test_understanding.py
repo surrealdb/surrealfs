@@ -168,3 +168,59 @@ async def test_folder_digest_and_packing(fs):
     assert pack["question"] == "configuration endpoints"
     assert pack["budget"] == 1000
     assert len(pack["candidates"]) >= 1
+
+
+async def test_entities_and_mentions(fs):
+    """fn::sfs_entities returns entities linked via mentions relation."""
+    entry = await fs.write_text("/sec/notes.md", "Security review of Okta integration")
+    fid = entry.id
+
+    # Create entity and relation
+    await fs.db.query(
+        """
+        UPSERT entity:okta MERGE {
+            name: 'Okta', kind: 'system', created_at: time::now()
+        };
+        LET $fid = type::record($fid_str);
+        RELATE $fid->mentions->entity:okta;
+        """,
+        {"fid_str": fid},
+    )
+
+    # Query entities
+    res = await fs.db.query("RETURN fn::sfs_entities('/sec/notes.md', 'root');")
+    entities = res[0]
+    assert len(entities) == 1
+    assert entities[0]["name"] == "Okta"
+    assert entities[0]["kind"] == "system"
+
+
+async def test_query_table(fs):
+    """fn::sfs_query_table retrieves rows from file_row table."""
+    entry = await fs.write_text("/data/users.csv", "id,name\n1,Alice\n2,Bob\n")
+    fid = entry.id
+
+    # Populate file_row
+    await fs.db.query(
+        """
+        LET $fid = type::record($fid_str);
+        CREATE file_row CONTENT {
+            file_id: $fid, row_idx: 0, data: { id: 1, name: 'Alice' }
+        };
+        CREATE file_row CONTENT {
+            file_id: $fid, row_idx: 1, data: { id: 2, name: 'Bob' }
+        };
+        """,
+        {"fid_str": fid},
+    )
+
+    # Query table rows
+    res = await fs.db.query(
+        "RETURN fn::sfs_query_table('/data/users.csv', 10, 'root');"
+    )
+    rows = res[0]
+    assert len(rows) == 2
+    assert rows[0]["row_idx"] == 0
+    assert rows[0]["data"]["name"] == "Alice"
+    assert rows[1]["row_idx"] == 1
+    assert rows[1]["data"]["name"] == "Bob"

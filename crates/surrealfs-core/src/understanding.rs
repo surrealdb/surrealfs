@@ -593,6 +593,214 @@ pub fn pack_blocks(question: &str, budget: usize, mut candidates: Vec<PackedBloc
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExtractedEntity {
+    pub name: String,
+    pub kind: String,
+}
+
+static RE_TAG: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)#([a-zA-Z][a-zA-Z0-9_\-]{1,50})").unwrap());
+static RE_TICKET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b([A-Z]{2,10}-[0-9]{1,6})\b").unwrap());
+static RE_MENTION: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"@([a-zA-Z0-9_\.\-]{2,50})").unwrap());
+
+/// Extracts tags and entities (people, companies, systems, tickets) from text (§20.7).
+pub fn extract_entities_and_tags(text: &str) -> (Vec<String>, Vec<ExtractedEntity>) {
+    let mut tags = Vec::new();
+    let mut entities = Vec::new();
+
+    // 1. Tags
+    for caps in RE_TAG.captures_iter(text) {
+        if let Some(m) = caps.get(1) {
+            let t = m.as_str().to_lowercase();
+            if !tags.contains(&t) {
+                tags.push(t.clone());
+                entities.push(ExtractedEntity {
+                    name: t,
+                    kind: "tag".to_string(),
+                });
+            }
+        }
+    }
+
+    // 2. Tickets
+    for caps in RE_TICKET.captures_iter(text) {
+        if let Some(m) = caps.get(1) {
+            let tick = m.as_str().to_string();
+            if !entities.iter().any(|e| e.name == tick) {
+                entities.push(ExtractedEntity {
+                    name: tick,
+                    kind: "ticket".to_string(),
+                });
+            }
+        }
+    }
+
+    // 3. Mentions / Persons
+    for caps in RE_MENTION.captures_iter(text) {
+        if let Some(m) = caps.get(1) {
+            let user = m.as_str().to_string();
+            if !entities.iter().any(|e| e.name == user) {
+                entities.push(ExtractedEntity {
+                    name: user,
+                    kind: "person".to_string(),
+                });
+            }
+        }
+    }
+
+    // 4. Well-known systems and cloud providers
+    let known_systems = [
+        ("okta", "system"),
+        ("aws", "system"),
+        ("gcp", "system"),
+        ("azure", "system"),
+        ("surrealdb", "system"),
+        ("redis", "system"),
+        ("postgres", "system"),
+        ("kafka", "system"),
+        ("kubernetes", "system"),
+        ("docker", "system"),
+        ("github", "system"),
+        ("datadog", "system"),
+        ("stripe", "company"),
+        ("openai", "company"),
+        ("anthropic", "company"),
+    ];
+
+    let lower_text = text.to_lowercase();
+    for &(term, kind) in &known_systems {
+        let pattern = format!(r"\b{}\b", term);
+        if let Ok(re) = Regex::new(&pattern) {
+            if re.is_match(&lower_text)
+                && !entities.iter().any(|e| e.name.eq_ignore_ascii_case(term))
+            {
+                entities.push(ExtractedEntity {
+                    name: term.to_string(),
+                    kind: kind.to_string(),
+                });
+            }
+        }
+    }
+
+    (tags, entities)
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+/// Computes 64-bit SimHash lexical signature of text (§20.8).
+pub fn compute_simhash(text: &str) -> u64 {
+    let words: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    if words.is_empty() {
+        return 0;
+    }
+
+    let mut v = [0i32; 64];
+
+    if words.len() >= 3 {
+        for i in 0..=(words.len() - 3) {
+            let gram = format!("{} {} {}", words[i], words[i + 1], words[i + 2]);
+            let h = fnv1a_64(gram.as_bytes());
+            for (bit, item) in v.iter_mut().enumerate() {
+                if (h & (1u64 << bit)) != 0 {
+                    *item += 1;
+                } else {
+                    *item -= 1;
+                }
+            }
+        }
+    } else {
+        for word in &words {
+            let h = fnv1a_64(word.as_bytes());
+            for (bit, item) in v.iter_mut().enumerate() {
+                if (h & (1u64 << bit)) != 0 {
+                    *item += 1;
+                } else {
+                    *item -= 1;
+                }
+            }
+        }
+    }
+
+    let mut fingerprint = 0u64;
+    for (bit, count) in v.iter().enumerate() {
+        if *count > 0 {
+            fingerprint |= 1u64 << bit;
+        }
+    }
+    fingerprint
+}
+
+/// Computes similarity in range [0.0, 1.0] between two 64-bit SimHash signatures.
+pub fn simhash_similarity(h1: u64, h2: u64) -> f64 {
+    let dist = (h1 ^ h2).count_ones();
+    1.0 - (dist as f64 / 64.0)
+}
+
+/// Parse CSV / TSV text into column headers and JSON row objects (§21.6).
+pub fn parse_tabular_records(content: &str, limit: usize) -> (Vec<String>, Vec<serde_json::Value>) {
+    let lines: Vec<&str> = content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+
+    let delim = if lines[0].contains('\t') { '\t' } else { ',' };
+
+    let headers: Vec<String> = lines[0]
+        .split(delim)
+        .map(|s| s.trim().trim_matches('"').to_string())
+        .collect();
+
+    let mut rows = Vec::new();
+    for line in lines.iter().skip(1).take(limit) {
+        let cols: Vec<&str> = line
+            .split(delim)
+            .map(|s| s.trim().trim_matches('"'))
+            .collect();
+        let mut map = serde_json::Map::new();
+        for (i, header) in headers.iter().enumerate() {
+            let val_str = cols.get(i).copied().unwrap_or("");
+            let val = if let Ok(int_val) = val_str.parse::<i64>() {
+                serde_json::Value::Number(int_val.into())
+            } else if let Ok(float_val) = val_str.parse::<f64>() {
+                if let Some(num) = serde_json::Number::from_f64(float_val) {
+                    serde_json::Value::Number(num)
+                } else {
+                    serde_json::Value::String(val_str.to_string())
+                }
+            } else if val_str.eq_ignore_ascii_case("true") {
+                serde_json::Value::Bool(true)
+            } else if val_str.eq_ignore_ascii_case("false") {
+                serde_json::Value::Bool(false)
+            } else {
+                serde_json::Value::String(val_str.to_string())
+            };
+            map.insert(header.clone(), val);
+        }
+        rows.push(serde_json::Value::Object(map));
+    }
+
+    (headers, rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -724,5 +932,54 @@ def standalone(x: int) -> int:
         assert!(res.used_tokens <= 100);
         assert!(res.formatted.contains("Context for: How does a work?"));
         assert!(res.formatted.contains("### `/a.py:1-5`"));
+    }
+
+    #[test]
+    fn test_simhash_near_duplicates() {
+        let t1 = "SurrealFS provides unified storage with ACID transactions and vector embeddings for AI agents.";
+        let t2 = "SurrealFS provides unified storage with ACID transactions and vector embeddings for autonomous agents.";
+        let t3 = "An apple a day keeps the doctor away in the sunny garden.";
+
+        let h1 = compute_simhash(t1);
+        let h2 = compute_simhash(t2);
+        let h3 = compute_simhash(t3);
+
+        assert_eq!(simhash_similarity(h1, h1), 1.0);
+        let sim_close = simhash_similarity(h1, h2);
+        let sim_far = simhash_similarity(h1, h3);
+
+        assert!(sim_close > 0.80, "Expected close similarity: {}", sim_close);
+        assert!(sim_far < 0.70, "Expected far similarity: {}", sim_far);
+    }
+
+    #[test]
+    fn test_extract_entities_and_tags() {
+        let text = "Check ticket SEC-1042: @alice reported an issue with Okta and AWS authentication. #security #auth";
+        let (tags, entities) = extract_entities_and_tags(text);
+
+        assert!(tags.contains(&"security".to_string()));
+        assert!(tags.contains(&"auth".to_string()));
+
+        let names: Vec<String> = entities.into_iter().map(|e| e.name).collect();
+        assert!(names.contains(&"security".to_string()));
+        assert!(names.contains(&"SEC-1042".to_string()));
+        assert!(names.contains(&"alice".to_string()));
+        assert!(names.contains(&"okta".to_string()));
+        assert!(names.contains(&"aws".to_string()));
+    }
+
+    #[test]
+    fn test_parse_tabular_records() {
+        let csv = "id,name,active,score\n1,Alice,true,98.5\n2,Bob,false,85.0\n";
+        let (headers, rows) = parse_tabular_records(csv, 10);
+
+        assert_eq!(headers, vec!["id", "name", "active", "score"]);
+        assert_eq!(rows.len(), 2);
+
+        let r1 = &rows[0];
+        assert_eq!(r1["id"], 1);
+        assert_eq!(r1["name"], "Alice");
+        assert_eq!(r1["active"], true);
+        assert_eq!(r1["score"], 98.5);
     }
 }

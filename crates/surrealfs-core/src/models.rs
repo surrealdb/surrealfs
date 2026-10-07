@@ -261,3 +261,21 @@ pub struct PipelineJob {
     #[serde(default)]
     pub created_at: Option<DateTime<Utc>>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EntityRecord {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub name: String,
+    pub kind: String,
+    #[serde(default)]
+    pub source_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TableRow {
+    pub row_idx: i64,
+    #[serde(default)]
+    pub sheet: Option<String>,
+    pub data: serde_json::Value,
+}

@@ -4,11 +4,14 @@ use crate::chunking::{chunk_data, decompress_chunk, FastCdcConfig};
 use crate::crdt::CrdtDoc;
 use crate::errors::{Result, SurrealFsError};
 use crate::models::{
-    CodeSymbol, FileEntry, FileLock, FileVersion, FolderDigest, GrepMatch, MailboxMessage,
-    PackResult, PackedBlock, PipelineJob, SearchHit, SectionHit, UploadSession, UsageStats,
-    WorkspaceDiff,
+    CodeSymbol, EntityRecord, FileEntry, FileLock, FileVersion, FolderDigest, GrepMatch,
+    MailboxMessage, PackResult, PackedBlock, PipelineJob, SearchHit, SectionHit, TableRow,
+    UploadSession, UsageStats, WorkspaceDiff,
 };
 use crate::paths::normalize_path;
+use crate::understanding::{
+    compute_simhash, parse_tabular_records, simhash_similarity, ExtractedEntity,
+};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use surrealdb::engine::remote::ws::{Client, Ws};
@@ -1224,5 +1227,158 @@ impl SurrealFs {
             .bind(("error", error.map(|s| s.to_string())))
             .await?;
         Ok(())
+    }
+
+    /// Retrieve entities mentioned in a file or directory (§20.7).
+    pub async fn entities(&self, path: &str) -> Result<Vec<EntityRecord>> {
+        let norm = normalize_path(path);
+        let mut res = self
+            .db
+            .query("RETURN fn::sfs_entities($path, $caller);")
+            .bind(("path", norm))
+            .bind((
+                "caller",
+                self.caller.clone().unwrap_or_else(|| "root".to_string()),
+            ))
+            .await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut records = Vec::new();
+        for item in items {
+            records.push(value_to_serde(item)?);
+        }
+        Ok(records)
+    }
+
+    /// Records entities for a file and creates mentions relations (§20.7).
+    pub async fn record_entities(&self, path: &str, entities: &[ExtractedEntity]) -> Result<()> {
+        let norm = normalize_path(path);
+        let entities_json =
+            serde_json::to_value(entities).map_err(|e| SurrealFsError::Other(e.to_string()))?;
+        let sql = r#"
+            RETURN {
+                LET $file_id = fn::sfs_resolve($path);
+                IF $file_id IS NONE { THROW 'sfs:not_found' };
+                FOR $ent IN $entities {
+                    LET $eid = type::record('entity', [$ent.name, $ent.kind]);
+                    UPSERT $eid MERGE { name: $ent.name, kind: $ent.kind, created_at: time::now() };
+                    RELATE $file_id->mentions->$eid;
+                };
+                RETURN true;
+            };
+        "#;
+        self.db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("entities", entities_json))
+            .await?;
+        Ok(())
+    }
+
+    /// Query tabular file rows (§21.6).
+    pub async fn query_table(&self, path: &str, limit: Option<usize>) -> Result<Vec<TableRow>> {
+        let norm = normalize_path(path);
+        let mut res = self
+            .db
+            .query("RETURN fn::sfs_query_table($path, $limit, $caller);")
+            .bind(("path", norm))
+            .bind(("limit", limit.map(|l| l as i64)))
+            .bind((
+                "caller",
+                self.caller.clone().unwrap_or_else(|| "root".to_string()),
+            ))
+            .await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut rows = Vec::new();
+        for item in items {
+            rows.push(value_to_serde(item)?);
+        }
+        Ok(rows)
+    }
+
+    /// Parse CSV/TSV file content and load into file_row table (§21.6).
+    pub async fn load_tabular_file(&self, path: &str, max_rows: usize) -> Result<usize> {
+        let norm = normalize_path(path);
+        let text = self.read_text(&norm).await?;
+        let (_headers, rows) = parse_tabular_records(&text, max_rows);
+        let count = rows.len();
+        let mut indexed_rows = Vec::new();
+        for (idx, r) in rows.into_iter().enumerate() {
+            indexed_rows.push(serde_json::json!({
+                "row_idx": idx as i64,
+                "data": r,
+            }));
+        }
+        let rows_json = serde_json::to_value(&indexed_rows)
+            .map_err(|e| SurrealFsError::Other(e.to_string()))?;
+        let sql = r#"
+            RETURN {
+                LET $file_id = fn::sfs_resolve($path);
+                IF $file_id IS NONE { THROW 'sfs:not_found' };
+                DELETE file_row WHERE file_id = $file_id;
+                FOR $r IN $rows {
+                    CREATE file_row CONTENT {
+                        file_id: $file_id,
+                        row_idx: $r.row_idx,
+                        data: $r.data
+                    };
+                };
+                RETURN array::len($rows);
+            };
+        "#;
+        self.db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("rows", rows_json))
+            .await?;
+        Ok(count)
+    }
+
+    /// Sets the SimHash fingerprint on a file (§20.8).
+    pub async fn set_simhash(&self, path: &str, simhash: u64) -> Result<()> {
+        let norm = normalize_path(path);
+        let sql = r#"
+            RETURN {
+                LET $file_id = fn::sfs_resolve($path);
+                IF $file_id IS NONE { THROW 'sfs:not_found' };
+                UPDATE $file_id MERGE { meta: { simhash: $simhash } };
+                RETURN true;
+            };
+        "#;
+        self.db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("simhash", simhash as i64))
+            .await?;
+        Ok(())
+    }
+
+    /// Checks text against existing files using SimHash lexical signatures (§20.8).
+    pub async fn check_near_duplicates(
+        &self,
+        text: &str,
+        threshold: f64,
+    ) -> Result<Vec<(String, f64)>> {
+        let h = compute_simhash(text);
+        let mut res = self
+            .db
+            .query("SELECT path, meta.simhash AS simhash FROM file WHERE meta.simhash IS NOT NONE;")
+            .await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut matches = Vec::new();
+        for item in items {
+            let val: serde_json::Value = value_to_serde(item)?;
+            if let (Some(p), Some(num)) = (
+                val.get("path").and_then(|v| v.as_str()),
+                val.get("simhash").and_then(|v| v.as_i64()),
+            ) {
+                let target_h = num as u64;
+                let sim = simhash_similarity(h, target_h);
+                if sim >= threshold {
+                    matches.push((p.to_string(), sim));
+                }
+            }
+        }
+        matches.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(matches)
     }
 }

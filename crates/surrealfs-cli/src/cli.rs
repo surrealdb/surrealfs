@@ -185,6 +185,30 @@ pub enum Commands {
 
     /// Detect content type, language, and encoding for a file
     Detect { path: String },
+
+    /// List entities mentioned in a file or directory tree (§20.7)
+    Entities { path: String },
+
+    /// Query rows in a structured tabular file (§21.6)
+    TableQuery {
+        path: String,
+        #[arg(short, long, default_value = "50")]
+        limit: usize,
+    },
+
+    /// Load CSV/TSV file rows into file_row table (§21.6)
+    TableLoad {
+        path: String,
+        #[arg(short, long, default_value = "1000")]
+        max_rows: usize,
+    },
+
+    /// Check near duplicates for a text or file using SimHash (§20.8)
+    NearDups {
+        path_or_text: String,
+        #[arg(short, long, default_value = "0.85")]
+        threshold: f64,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -528,6 +552,42 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
             let bytes = fs.read_bytes(path).await?;
             let meta = surrealfs_core::understanding::detect_type_and_language(path, &bytes);
             let json = serde_json::to_string_pretty(&meta)?;
+            output.push_str(&json);
+            output.push('\n');
+        }
+        Commands::Entities { path } => {
+            let fs = cli.connect_fs().await?;
+            let entities = fs.entities(path).await?;
+            let json = serde_json::to_string_pretty(&entities)?;
+            output.push_str(&json);
+            output.push('\n');
+        }
+        Commands::TableQuery { path, limit } => {
+            let fs = cli.connect_fs().await?;
+            let rows = fs.query_table(path, Some(*limit)).await?;
+            let json = serde_json::to_string_pretty(&rows)?;
+            output.push_str(&json);
+            output.push('\n');
+        }
+        Commands::TableLoad { path, max_rows } => {
+            let fs = cli.connect_fs().await?;
+            let count = fs.load_tabular_file(path, *max_rows).await?;
+            output.push_str(&format!("Loaded {} rows for {}\n", count, path));
+        }
+        Commands::NearDups {
+            path_or_text,
+            threshold,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let text = if path_or_text.starts_with('/') {
+                fs.read_text(path_or_text)
+                    .await
+                    .unwrap_or_else(|_| path_or_text.clone())
+            } else {
+                path_or_text.clone()
+            };
+            let matches = fs.check_near_duplicates(&text, *threshold).await?;
+            let json = serde_json::to_string_pretty(&matches)?;
             output.push_str(&json);
             output.push('\n');
         }

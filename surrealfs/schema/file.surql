@@ -888,6 +888,33 @@ DEFINE TABLE OVERWRITE links_to     SCHEMAFULL TYPE RELATION IN file OUT file
                      AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
         FOR create, update, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
 
+-- Entities & Mentions (Section 20.7)
+DEFINE TABLE OVERWRITE entity SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_me() = 'root' OR $access = 'indexer' OR array::len(<-mentions) > 0
+        FOR create, update, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer';
+DEFINE FIELD OVERWRITE name       ON entity TYPE string;
+DEFINE FIELD OVERWRITE kind       ON entity TYPE string; -- person | company | system | project | ticket | tag
+DEFINE FIELD OVERWRITE created_at ON entity TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_entity_name_kind ON entity FIELDS name, kind UNIQUE;
+
+DEFINE TABLE OVERWRITE mentions SCHEMAFULL TYPE RELATION IN file OUT entity
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
+        FOR create, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer' OR fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+
+-- Tabular Data: file_row (Section 21.6)
+DEFINE TABLE OVERWRITE file_row SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR create, update, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer' OR fn::sfs_can_write(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE file_id  ON file_row TYPE record<file>;
+DEFINE FIELD OVERWRITE sheet    ON file_row TYPE option<string> DEFAULT NONE;
+DEFINE FIELD OVERWRITE row_idx  ON file_row TYPE int;
+DEFINE FIELD OVERWRITE data     ON file_row TYPE object FLEXIBLE;
+DEFINE INDEX OVERWRITE idx_file_row_pos ON file_row FIELDS file_id, row_idx UNIQUE;
+
+
 
 -- Swarm Advisory Leases: file_lock
 DEFINE TABLE OVERWRITE file_lock SCHEMAFULL
@@ -1991,6 +2018,70 @@ DEFINE FUNCTION OVERWRITE fn::sfs_job_complete(
             updated_at = time::now();
     };
     RETURN true;
+} PERMISSIONS FULL;
+
+-- Entities Retrieval (Section 20.7)
+DEFINE FUNCTION OVERWRITE fn::sfs_entities($path: string, $caller: any) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $fid = fn::sfs_resolve($path);
+    IF $fid IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $target = (SELECT id, parent, owner, mode, is_folder FROM ONLY $fid);
+    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($target.parent), $target.owner, $target.mode, $who) {
+        THROW 'sfs:denied_or_missing';
+    };
+
+    IF $target.is_folder {
+        RETURN (
+            SELECT 
+                out.name AS name,
+                out.kind AS kind,
+                type::string(out.id) AS id,
+                in.path AS source_path
+            FROM mentions
+            WHERE string::starts_with(in.path, $path)
+              AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, $who))
+            ORDER BY name ASC
+        );
+    } ELSE {
+        RETURN (
+            SELECT 
+                out.name AS name,
+                out.kind AS kind,
+                type::string(out.id) AS id,
+                in.path AS source_path
+            FROM mentions
+            WHERE in = $fid
+            ORDER BY name ASC
+        );
+    };
+} PERMISSIONS FULL;
+
+-- Tabular Data Query (Section 21.6)
+DEFINE FUNCTION OVERWRITE fn::sfs_query_table(
+    $path: string,
+    $limit: option<int>,
+    $caller: any
+) {
+    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $fid = fn::sfs_resolve($path);
+    IF $fid IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $target = (SELECT id, parent, owner, mode FROM ONLY $fid);
+    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($target.parent), $target.owner, $target.mode, $who) {
+        THROW 'sfs:denied_or_missing';
+    };
+
+    LET $lim = $limit ?? 100;
+    RETURN (
+        SELECT row_idx, sheet, data
+        FROM file_row
+        WHERE file_id = $fid
+        ORDER BY row_idx ASC
+        LIMIT $lim
+    );
 } PERMISSIONS FULL;
 
 

@@ -136,3 +136,91 @@ async fn test_pipeline_job_claiming_and_completion() {
         .await
         .expect("complete_job failed");
 }
+
+#[tokio::test]
+async fn test_entities_and_mentions() {
+    let fs = create_test_fs().await;
+
+    fs.write_text(
+        "/sec/review.md",
+        "Configured AWS and Okta SSO with ticket SEC-999 #security",
+        None,
+    )
+    .await
+    .expect("write_text failed");
+
+    let entities = vec![
+        surrealfs_core::understanding::ExtractedEntity {
+            name: "Okta".to_string(),
+            kind: "system".to_string(),
+        },
+        surrealfs_core::understanding::ExtractedEntity {
+            name: "SEC-999".to_string(),
+            kind: "ticket".to_string(),
+        },
+    ];
+
+    fs.record_entities("/sec/review.md", &entities)
+        .await
+        .expect("record_entities failed");
+
+    let retrieved = fs
+        .entities("/sec/review.md")
+        .await
+        .expect("entities failed");
+    assert_eq!(retrieved.len(), 2);
+    let names: Vec<String> = retrieved.into_iter().map(|e| e.name).collect();
+    assert!(names.contains(&"Okta".to_string()));
+    assert!(names.contains(&"SEC-999".to_string()));
+}
+
+#[tokio::test]
+async fn test_tabular_data_load_and_query() {
+    let fs = create_test_fs().await;
+
+    let csv_content = "user_id,username,active,balance\n101,alice,true,500.50\n102,bob,false,0.0\n";
+    fs.write_text("/data/accounts.csv", csv_content, None)
+        .await
+        .expect("write_text failed");
+
+    let loaded = fs
+        .load_tabular_file("/data/accounts.csv", 100)
+        .await
+        .expect("load_tabular_file failed");
+    assert_eq!(loaded, 2);
+
+    let rows = fs
+        .query_table("/data/accounts.csv", Some(10))
+        .await
+        .expect("query_table failed");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].data["username"], "alice");
+    assert_eq!(rows[0].data["active"], true);
+    assert_eq!(rows[1].data["username"], "bob");
+    assert_eq!(rows[1].data["active"], false);
+}
+
+#[tokio::test]
+async fn test_simhash_near_duplicates_check() {
+    let fs = create_test_fs().await;
+
+    let doc1 = "SurrealFS provides unified storage with ACID transactions and vector embeddings for AI agents.";
+    let doc2 = "SurrealFS provides unified storage with ACID transactions and vector embeddings for autonomous agents.";
+
+    fs.write_text("/docs/doc1.txt", doc1, None)
+        .await
+        .expect("write_text failed");
+
+    let h1 = surrealfs_core::understanding::compute_simhash(doc1);
+    fs.set_simhash("/docs/doc1.txt", h1)
+        .await
+        .expect("set_simhash failed");
+
+    let duplicates = fs
+        .check_near_duplicates(doc2, 0.80)
+        .await
+        .expect("check_near_duplicates failed");
+    assert!(!duplicates.is_empty());
+    assert_eq!(duplicates[0].0, "/docs/doc1.txt");
+    assert!(duplicates[0].1 >= 0.80);
+}

@@ -456,4 +456,59 @@ async fn test_cli_understanding_pipeline() {
     .await
     .unwrap();
     assert!(claim_out.contains("detect") || claim_out.contains("symbols"));
+
+    // 8. Tabular load and query
+    run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Write {
+            path: "/data/items.csv".to_string(),
+            content: "id,name,qty\n10,Widget,100\n20,Gadget,50\n".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let load_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::TableLoad {
+            path: "/data/items.csv".to_string(),
+            max_rows: 100,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(load_out.contains("Loaded 2 rows"));
+
+    let query_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::TableQuery {
+            path: "/data/items.csv".to_string(),
+            limit: 10,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(query_out.contains("Widget"));
+    assert!(query_out.contains("Gadget"));
+
+    // 9. Near duplicates check
+    let near_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::NearDups {
+            path_or_text: "def authenticate_user(username, password): return username == 'admin'"
+                .to_string(),
+            threshold: 0.50,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(near_out.starts_with('['));
 }
