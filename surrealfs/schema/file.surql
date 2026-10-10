@@ -47,80 +47,171 @@ DEFINE FUNCTION OVERWRITE fn::sfs_me() {
 -- ponytail: only the *other* x bit gates. A directory with its owner-x bit
 -- clear (0600) does not block its own owner, which real unix would. Track the
 -- owner bit too if anyone ever writes such a mode on purpose.
+-- Groups & Team Membership (Section 24.1)
+DEFINE TABLE OVERWRITE user_group SCHEMAFULL
+    PERMISSIONS
+        FOR select FULL
+        FOR create, update, delete WHERE fn::sfs_me() = 'root';
+DEFINE FIELD OVERWRITE name        ON user_group TYPE string;
+DEFINE FIELD OVERWRITE description ON user_group TYPE option<string> DEFAULT NONE;
+DEFINE FIELD OVERWRITE created_at  ON user_group TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_user_group_name ON user_group FIELDS name UNIQUE;
+
+DEFINE TABLE OVERWRITE group_member SCHEMAFULL
+    PERMISSIONS
+        FOR select FULL
+        FOR create, update, delete WHERE fn::sfs_me() = 'root';
+DEFINE FIELD OVERWRITE group_name  ON group_member TYPE string;
+DEFINE FIELD OVERWRITE user_id     ON group_member TYPE string;
+DEFINE FIELD OVERWRITE added_at    ON group_member TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_group_member_uniq ON group_member FIELDS group_name, user_id UNIQUE;
+DEFINE INDEX OVERWRITE idx_group_member_user ON group_member FIELDS user_id;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_is_member($group: string, $me: option<string>) {
+    IF $me IS NONE {
+        RETURN false;
+    };
+    IF $me = 'root' {
+        RETURN true;
+    };
+    LET $found = (SELECT VALUE id FROM ONLY group_member WHERE group_name = $group AND user_id = $me LIMIT 1);
+    RETURN $found IS NOT NONE;
+};
+
 DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
-    -- `$parent`'s own contribution: its owner if it is closed, else NONE.
-    LET $own = IF $parent IS NONE THEN NONE
-        ELSE IF ($parent.mode ?? 493) % 2 = 0 THEN $parent.owner
-        ELSE NONE END;
-    RETURN IF $own IS NONE THEN $parent.gate
-        ELSE IF $parent.gate IS NONE OR $parent.gate = $own THEN $own
-        ELSE '!closed' END;
+    IF $parent IS NONE {
+        RETURN NONE;
+    };
+    LET $mode = $parent.mode ?? 493;
+    LET $closed = ($mode % 2 = 0);
+    LET $parent_gate = $parent.gate;
+
+    IF !$closed {
+        RETURN $parent_gate;
+    };
+
+    -- When closed to others, determine reachable tokens for this folder
+    LET $owner_token = $parent.owner;
+    LET $base_tokens = [$owner_token];
+    -- If group has execute and group is set, group members can traverse
+    LET $tokens = IF (math::floor($mode / 8) % 2 = 1) AND $parent.group IS NOT NONE
+        THEN array::concat($base_tokens, ['group:' + $parent.group])
+        ELSE $base_tokens
+    END;
+
+    IF $parent_gate IS NONE {
+        RETURN array::join($tokens, ',');
+    };
+
+    -- Intersect with parent's allowed gate tokens
+    LET $parent_tokens = string::split($parent_gate, ',');
+    LET $norm_parent = array::map($parent_tokens, |$t| IF string::starts_with($t, 'owner:') THEN string::replace($t, 'owner:', '') ELSE $t END);
+    LET $intersected = array::intersect($tokens, $norm_parent);
+
+    IF array::len($intersected) = 0 {
+        RETURN '!closed';
+    };
+    RETURN array::join($intersected, ',');
 };
 
 -- Whether `$me` can traverse to a row gated by `$gate`. An unauthenticated
--- caller is nobody and gets nothing: without this guard `$gate IS NONE` would
--- read as "unguarded" and hand the shared tree to an anonymous connection.
+-- caller is nobody and gets nothing. Supports multi-token gate sets: owner:<x>,group:<y>.
 DEFINE FUNCTION OVERWRITE fn::sfs_reachable($gate: option<string>, $me: option<string>) {
-    RETURN $me IS NOT NONE AND ($gate IS NONE OR $gate = $me);
+    IF $me IS NONE {
+        RETURN false;
+    };
+    IF $me = 'root' {
+        RETURN true;
+    };
+    IF $gate IS NONE {
+        RETURN true;
+    };
+    IF $gate = '!closed' {
+        RETURN false;
+    };
+
+    -- Legacy plain string matching (e.g. $gate = 'alice')
+    IF $gate = $me OR $gate = ('owner:' + $me) {
+        RETURN true;
+    };
+
+    LET $tokens = string::split($gate, ',');
+    FOR $token IN $tokens {
+        IF $token = $me OR $token = ('owner:' + $me) {
+            RETURN true;
+        };
+        IF string::starts_with($token, 'group:') {
+            LET $grp = string::replace($token, 'group:', '');
+            IF fn::sfs_is_member($grp, $me) {
+                RETURN true;
+            };
+        };
+    };
+
+    RETURN false;
 };
 
--- The octal digit that applies to `$me`: the owner digit for the owner,
--- otherwise the other digit. Within a digit, `r` is `d >= 4`, `w` is
--- `math::floor(d / 2) % 2`, and `x` is `d % 2`.
---
--- `$owner` and `$mode` are required, not optional: every row has both, by
--- `DEFAULT`, so a row reaching here without one is a schema that did not apply
--- rather than a row to guess a permission for. Coalescing them to root's would
--- turn that into a silent wrong answer.
---
--- ponytail: the group digit (`math::floor($mode / 8) % 8`) is stored and
--- round-trips through `chmod`, but is never consulted -- nothing in SurrealFS
--- has a group concept to consult it with. Add a group table if teams ever need
--- a folder outsiders cannot see.
-DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: any, $me: option<string>) {
+-- Group-aware octal digit calculation: owner digit for owner, group digit for group member,
+-- otherwise the other digit.
+DEFINE FUNCTION OVERWRITE fn::sfs_bits_grp($owner: string, $mode: any, $me: option<string>, $group: option<string>) {
     LET $m = $mode ?? 493;
     RETURN IF $owner = $me
         THEN math::floor($m / 64) % 8
+        ELSE IF $group IS NOT NONE AND fn::sfs_is_member($group, $me)
+        THEN math::floor($m / 8) % 8
         ELSE $m % 8
     END;
 };
 
--- Readable by `$me`: reachable through every ancestor, and the read bit set.
+-- Legacy 3-argument version delegates to fn::sfs_bits_grp with NONE group.
+DEFINE FUNCTION OVERWRITE fn::sfs_bits($owner: string, $mode: any, $me: option<string>) {
+    RETURN fn::sfs_bits_grp($owner, $mode, $me, NONE);
+};
+
+-- Readable by `$me` with group awareness
+DEFINE FUNCTION OVERWRITE fn::sfs_can_read_grp(
+    $gate: option<string>, $owner: string, $mode: any, $me: option<string>, $group: option<string>
+) {
+    RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_bits_grp($owner, $mode, $me, $group) >= 4;
+};
+
 DEFINE FUNCTION OVERWRITE fn::sfs_can_read(
     $gate: option<string>, $owner: string, $mode: any, $me: option<string>
 ) {
-    RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_bits($owner, $mode, $me) >= 4;
+    RETURN fn::sfs_can_read_grp($gate, $owner, $mode, $me, NONE);
 };
 
--- The write bit of the digit that applies to `$me`. Within a digit `w` is
--- `math::floor(d / 2) % 2`; see `fn::sfs_bits`.
+-- Write bit with group awareness
+DEFINE FUNCTION OVERWRITE fn::sfs_w_grp($owner: string, $mode: any, $me: option<string>, $group: option<string>) {
+    RETURN math::floor((fn::sfs_bits_grp($owner, $mode, $me, $group) ?? 7) / 2) % 2 = 1;
+};
+
 DEFINE FUNCTION OVERWRITE fn::sfs_w($owner: string, $mode: any, $me: option<string>) {
-    RETURN math::floor((fn::sfs_bits($owner, $mode, $me) ?? 7) / 2) % 2 = 1;
+    RETURN fn::sfs_w_grp($owner, $mode, $me, NONE);
 };
 
--- Writable by `$me`: reachable through every ancestor, and the write bit set.
+-- Writable by `$me` with group awareness
+DEFINE FUNCTION OVERWRITE fn::sfs_can_write_grp(
+    $gate: option<string>, $owner: string, $mode: any, $me: option<string>, $group: option<string>
+) {
+    RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_w_grp($owner, $mode, $me, $group);
+};
+
 DEFINE FUNCTION OVERWRITE fn::sfs_can_write(
     $gate: option<string>, $owner: string, $mode: any, $me: option<string>
 ) {
-    RETURN fn::sfs_reachable($gate, $me) AND fn::sfs_w($owner, $mode, $me);
+    RETURN fn::sfs_can_write_grp($gate, $owner, $mode, $me, NONE);
 };
 
 -- Whether `$me` may add or remove an *entry* in `$parent`: write and execute on
--- the folder, which is what unix keys create, delete and rename on -- never the
--- entry's own bits. This is the rule `SurrealFs._require_writable_dir` applies.
---
--- NONE is the root directory. It is not a row (see `_resolve`) and behaves as
--- 0777 owned by root, so anyone signed in may make a top-level entry -- which is
--- the shared tree the whole design rests on. `fn::sfs_home_ok` is what stops
--- that from including `/home`.
+-- the folder, consulting the group digit when caller is in $parent.group.
 DEFINE FUNCTION OVERWRITE fn::sfs_can_enter(
     $parent: option<record<file>>, $me: option<string>
 ) {
     RETURN IF $me IS NONE THEN false
         ELSE IF $parent IS NONE THEN true
         ELSE fn::sfs_reachable($parent.gate, $me)
-             -- w and x are the low two bits of the digit, so both set is `% 4 = 3`.
-             AND (fn::sfs_bits($parent.owner, ($parent.mode ?? 493), $me) ?? 7) % 4 = 3
+             AND (fn::sfs_bits_grp($parent.owner, ($parent.mode ?? 493), $me, $parent.group) ?? 7) % 4 = 3
     END;
 };
 
@@ -182,12 +273,12 @@ DEFINE FUNCTION OVERWRITE fn::sfs_home_ok(
 DEFINE TABLE OVERWRITE file SCHEMAFULL
     PERMISSIONS
         FOR select
-            WHERE fn::sfs_can_read(fn::sfs_gate(parent), owner, mode, fn::sfs_me())
+            WHERE fn::sfs_can_read_grp(fn::sfs_gate(parent), owner, mode, fn::sfs_me(), group)
                OR $access = 'indexer'
         FOR create
             WHERE owner = fn::sfs_me()
-              AND fn::sfs_can_enter(parent, fn::sfs_me())
-              AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
+               AND fn::sfs_can_enter(parent, fn::sfs_me())
+               AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
         -- An update clause is evaluated against the before state *and* the after
         -- state -- verified on 3.2.4 -- so `parent` here means the source folder
         -- on one pass and the destination on the other, which is exactly what a
@@ -200,7 +291,7 @@ DEFINE TABLE OVERWRITE file SCHEMAFULL
             WHERE $access = 'indexer'
                OR (fn::sfs_reachable(fn::sfs_gate(parent), fn::sfs_me())
                    AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
-                   AND (fn::sfs_w(owner, mode, fn::sfs_me())
+                   AND (fn::sfs_w_grp(owner, mode, fn::sfs_me(), group)
                         OR fn::sfs_can_enter(parent, fn::sfs_me())))
         -- ponytail: the union is loose in one direction. A record user holding
         -- the `w` bit on a row satisfies it on both passes, so they can also
@@ -215,7 +306,8 @@ DEFINE TABLE OVERWRITE file SCHEMAFULL
         FOR delete
             WHERE fn::sfs_can_enter(parent, fn::sfs_me())
               AND fn::sfs_home_ok(parent, filename, fn::sfs_me())
-              AND !fn::sfs_has_children(id);
+              AND !fn::sfs_has_children(id)
+              AND (!meta.legal_hold OR meta.legal_hold = false);
 
 -- There is no `chown`, so `owner` is immutable once written -- and it has to be,
 -- because a field permission is evaluated only against the *after* state
@@ -229,6 +321,8 @@ DEFINE TABLE OVERWRITE file SCHEMAFULL
 -- the owner may chmod", the rule `SurrealFs.chmod` applies.
 DEFINE FIELD OVERWRITE owner ON TABLE file TYPE string DEFAULT 'root'
     PERMISSIONS FOR update WHERE false;
+DEFINE FIELD OVERWRITE group ON TABLE file TYPE option<string> DEFAULT NONE
+    PERMISSIONS FOR update WHERE owner = fn::sfs_me() OR fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE mode  ON TABLE file TYPE int    DEFAULT 438  -- 0o666
     PERMISSIONS FOR update WHERE owner = fn::sfs_me();
 DEFINE FIELD OVERWRITE filename ON TABLE file TYPE string;
@@ -1064,6 +1158,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
             content_type: 'inode/directory',
             is_folder: true,
             owner: 'root',
+            group: NONE,
             mode: 493,
             size: 0,
             generation: 1
@@ -1073,7 +1168,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $row = (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+    LET $row = (SELECT id, filename, path, content_type, is_folder, owner, group, mode, gate,
                        hash, generation, created_at, updated_at, meta, crdt,
                        IF size IS NOT NONE THEN size
                        ELSE IF content IS NOT NONE THEN string::len(content)
@@ -1403,9 +1498,15 @@ DEFINE FUNCTION OVERWRITE fn::sfs_read($path: string, $caller: any) {
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $row = (SELECT content, file FROM ONLY $id);
+    LET $row = (SELECT content, file, gate, mode, owner, group FROM ONLY $id);
     IF $row IS NONE {
         THROW 'sfs:not_found';
+    };
+    LET $me = $caller ?? fn::sfs_me();
+    IF $me != 'root' {
+        IF !fn::sfs_can_read_grp($row.gate, $row.owner, $row.mode, $me, $row.group) {
+            THROW 'sfs:denied';
+        };
     };
     IF $row.content IS NOT NONE {
         RETURN $row.content;
@@ -1503,20 +1604,51 @@ DEFINE FUNCTION OVERWRITE fn::sfs_edit(
     RETURN fn::sfs_stat($path);
 } PERMISSIONS FULL;
 
+-- Legal Hold Check (Section 24.4)
+DEFINE FUNCTION OVERWRITE fn::sfs_is_legal_hold($path: string) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        RETURN false;
+    };
+    LET $row = (SELECT meta, parent FROM ONLY $id);
+    IF $row.meta.legal_hold = true {
+        RETURN true;
+    };
+    IF $row.parent IS NOT NONE {
+        RETURN fn::sfs_is_legal_hold($row.parent.path);
+    };
+    RETURN false;
+};
+
+DEFINE FUNCTION OVERWRITE fn::sfs_set_legal_hold($path: string, $enabled: bool) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    UPDATE $id SET meta.legal_hold = $enabled, updated_at = time::now();
+    RETURN fn::sfs_stat($path);
+} PERMISSIONS FULL;
+
 -- Delete file or directory
 DEFINE FUNCTION OVERWRITE fn::sfs_rm($path: string, $recursive: any, $caller: any) {
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
+    IF fn::sfs_is_legal_hold($path) {
+        THROW 'sfs:legal_hold';
+    };
     LET $children_cnt = (SELECT count() FROM file WHERE parent_key = <string>$id GROUP ALL)[0].count ?? 0;
     IF $children_cnt > 0 {
         IF $recursive != true {
             THROW 'sfs:not_empty';
         };
-        LET $children = (SELECT VALUE id FROM file WHERE parent_key = <string>$id);
+        LET $children = (SELECT id, path FROM file WHERE parent_key = <string>$id);
         FOR $child IN $children {
-            DELETE $child;
+            IF fn::sfs_is_legal_hold($child.path) {
+                THROW 'sfs:legal_hold';
+            };
+            DELETE $child.id;
         };
     };
     DELETE $id;
@@ -2125,6 +2257,146 @@ DEFINE FUNCTION OVERWRITE fn::sfs_resolve_credential(
         RETURN NONE;
     };
     RETURN $cred[0];
+} PERMISSIONS FULL;
+
+-- Share Links & Bearer Access (Section 24.2)
+DEFINE TABLE OVERWRITE share SCHEMAFULL
+    PERMISSIONS
+        FOR select FULL
+        FOR create WHERE fn::sfs_me() = 'root' OR created_by = fn::sfs_me()
+        FOR update, delete WHERE fn::sfs_me() = 'root' OR created_by = fn::sfs_me();
+DEFINE FIELD OVERWRITE path       ON share TYPE string;
+DEFINE FIELD OVERWRITE mode       ON share TYPE string DEFAULT 'ro'; -- 'ro' or 'append'
+DEFINE FIELD OVERWRITE token      ON share TYPE string;
+DEFINE FIELD OVERWRITE created_by ON share TYPE string;
+DEFINE FIELD OVERWRITE expires_at ON share TYPE option<datetime> DEFAULT NONE;
+DEFINE FIELD OVERWRITE revoked    ON share TYPE bool DEFAULT false;
+DEFINE FIELD OVERWRITE created_at ON share TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_share_token ON share FIELDS token UNIQUE;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_create_share(
+    $path: string,
+    $mode: string,
+    $duration_secs: option<int>,
+    $caller: string
+) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $tok = rand::string(32);
+    LET $exp = IF $duration_secs IS NOT NONE AND $duration_secs > 0 THEN time::now() + (<duration>(type::string($duration_secs) + 's')) ELSE NONE END;
+    CREATE share SET path = $path, mode = ($mode ?? 'ro'), token = $tok, created_by = $caller, expires_at = $exp, revoked = false, created_at = time::now();
+    RETURN (SELECT * FROM ONLY share WHERE token = $tok LIMIT 1);
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_revoke_share($token_or_id: string, $caller: string) {
+    LET $sh = (SELECT * FROM ONLY share WHERE token = $token_or_id OR id = type::record('share', $token_or_id) LIMIT 1);
+    IF $sh IS NONE {
+        THROW 'sfs:not_found';
+    };
+    IF $caller != 'root' AND $caller != $sh.created_by {
+        THROW 'sfs:denied';
+    };
+    UPDATE $sh.id SET revoked = true;
+    RETURN true;
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_resolve_share($tok: string) {
+    LET $s = (SELECT * FROM ONLY share WHERE token = $tok LIMIT 1);
+    IF $s IS NONE OR $s.revoked = true {
+        RETURN NONE;
+    };
+    IF $s.expires_at IS NOT NONE AND $s.expires_at < time::now() {
+        RETURN NONE;
+    };
+    RETURN $s;
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_list_shares($caller: string) {
+    RETURN IF $caller = 'root'
+        THEN (SELECT * FROM share WHERE revoked = false ORDER BY created_at DESC)
+        ELSE (SELECT * FROM share WHERE created_by = $caller AND revoked = false ORDER BY created_at DESC)
+    END;
+} PERMISSIONS FULL;
+
+-- Webhooks & Outbound Events (Section 23.2)
+DEFINE TABLE OVERWRITE webhook SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_me() = 'root' OR owner = fn::sfs_me()
+        FOR create WHERE fn::sfs_me() = 'root' OR owner = fn::sfs_me()
+        FOR update, delete WHERE fn::sfs_me() = 'root' OR owner = fn::sfs_me();
+DEFINE FIELD OVERWRITE owner        ON webhook TYPE string DEFAULT fn::sfs_me();
+DEFINE FIELD OVERWRITE path_pattern ON webhook TYPE string;
+DEFINE FIELD OVERWRITE events       ON webhook TYPE array<string>;
+DEFINE FIELD OVERWRITE url          ON webhook TYPE string;
+DEFINE FIELD OVERWRITE secret       ON webhook TYPE string;
+DEFINE FIELD OVERWRITE active       ON webhook TYPE bool DEFAULT true;
+DEFINE FIELD OVERWRITE created_at   ON webhook TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_webhook_owner ON webhook FIELDS owner;
+
+DEFINE TABLE OVERWRITE webhook_delivery SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_me() = 'root' OR owner = fn::sfs_me()
+        FOR create, update, delete WHERE fn::sfs_me() = 'root';
+DEFINE FIELD OVERWRITE webhook_id   ON webhook_delivery TYPE record<webhook>;
+DEFINE FIELD OVERWRITE owner        ON webhook_delivery TYPE string;
+DEFINE FIELD OVERWRITE event        ON webhook_delivery TYPE string;
+DEFINE FIELD OVERWRITE path         ON webhook_delivery TYPE string;
+DEFINE FIELD OVERWRITE status_code  ON webhook_delivery TYPE option<int> DEFAULT NONE;
+DEFINE FIELD OVERWRITE success      ON webhook_delivery TYPE bool;
+DEFINE FIELD OVERWRITE error        ON webhook_delivery TYPE option<string> DEFAULT NONE;
+DEFINE FIELD OVERWRITE attempts     ON webhook_delivery TYPE int DEFAULT 1;
+DEFINE FIELD OVERWRITE delivered_at ON webhook_delivery TYPE datetime DEFAULT time::now();
+DEFINE INDEX OVERWRITE idx_delivery_webhook ON webhook_delivery FIELDS webhook_id;
+
+-- Group Management Functions (Section 24.1)
+DEFINE FUNCTION OVERWRITE fn::sfs_create_group($name: string, $description: option<string>) {
+    LET $existing = (SELECT * FROM ONLY user_group WHERE name = $name LIMIT 1);
+    IF $existing IS NOT NONE {
+        RETURN $existing;
+    };
+    CREATE user_group SET name = $name, description = $description, created_at = time::now();
+    RETURN (SELECT * FROM ONLY user_group WHERE name = $name LIMIT 1);
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_add_group_member($group: string, $user: string) {
+    LET $grp = (SELECT * FROM ONLY user_group WHERE name = $group LIMIT 1);
+    IF $grp IS NONE {
+        CREATE user_group SET name = $group, created_at = time::now();
+    };
+    LET $existing = (SELECT * FROM ONLY group_member WHERE group_name = $group AND user_id = $user LIMIT 1);
+    IF $existing IS NOT NONE {
+        RETURN true;
+    };
+    CREATE group_member SET group_name = $group, user_id = $user, added_at = time::now();
+    RETURN true;
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_remove_group_member($group: string, $user: string) {
+    DELETE group_member WHERE group_name = $group AND user_id = $user;
+    RETURN true;
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_list_group_members($group: string) {
+    RETURN (SELECT user_id, added_at FROM group_member WHERE group_name = $group ORDER BY added_at ASC);
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_get_user_groups($user: string) {
+    RETURN (SELECT group_name FROM group_member WHERE user_id = $user ORDER BY group_name ASC).group_name;
+} PERMISSIONS FULL;
+
+DEFINE FUNCTION OVERWRITE fn::sfs_chgrp($path: string, $group: option<string>, $caller: any) {
+    LET $id = fn::sfs_resolve($path);
+    IF $id IS NONE {
+        THROW 'sfs:not_found';
+    };
+    LET $row = (SELECT owner FROM ONLY $id);
+    IF $caller != 'root' AND $caller != $row.owner {
+        THROW 'sfs:denied';
+    };
+    UPDATE $id SET group = $group, updated_at = time::now();
+    RETURN fn::sfs_stat($path);
 } PERMISSIONS FULL;
 
 

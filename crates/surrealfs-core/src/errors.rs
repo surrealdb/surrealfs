@@ -32,6 +32,15 @@ pub enum SurrealFsError {
     #[error("Lock error: {0}")]
     Lock(String),
 
+    #[error("Legal hold active: {0}")]
+    LegalHold(String),
+
+    #[error("Storage error: {0}")]
+    Storage(String),
+
+    #[error("Invalid arguments: {0}")]
+    InvalidArguments(String),
+
     #[error("Other error: {0}")]
     Other(String),
 }
@@ -43,6 +52,8 @@ impl From<surrealdb::Error> for SurrealFsError {
         let msg = err.to_string();
         if msg.contains("sfs:not_found") || msg.contains("not found") {
             SurrealFsError::NotFound(msg)
+        } else if msg.contains("sfs:legal_hold") {
+            SurrealFsError::LegalHold(msg)
         } else if msg.contains("sfs:permission")
             || msg.contains("denied")
             || msg.contains("Permissions")
@@ -76,4 +87,3 @@ impl From<serde_json::Error> for SurrealFsError {
         SurrealFsError::Other(err.to_string())
     }
 }
-

@@ -2,7 +2,8 @@ mod common;
 
 use common::{create_test_fs, get_server_url};
 use surrealfs_cli::{
-    run_cli, Cli, Commands, CrdtCommands, CredentialCommands, LockCommands, LsArgs,
+    run_cli, Cli, Commands, CrdtCommands, CredentialCommands, GroupCommands, LockCommands, LsArgs,
+    ShareCommands, WebhookCommands,
 };
 
 fn make_cli(url: &str, ns: &str, db: &str, cmd: Commands) -> Cli {
@@ -606,4 +607,330 @@ async fn test_cli_credentials_and_serve_dispatch() {
     .unwrap();
     assert!(nfs_mount_out.contains("To complete NFS mount, run:"));
     assert!(nfs_mount_out.contains("mount -t nfs"));
+}
+
+#[tokio::test]
+async fn test_cli_phase9_trust_and_operations() {
+    let (_fs, ns, db) = create_test_fs().await;
+    let url = get_server_url().await;
+    let tmp = tempfile::tempdir().unwrap();
+
+    // 1. Group commands
+    let g_create = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Group {
+            action: GroupCommands::Create {
+                name: "devs".to_string(),
+                description: Some("Developers".to_string()),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(g_create.contains("Group 'devs' created"));
+
+    let g_add = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Group {
+            action: GroupCommands::Add {
+                group: "devs".to_string(),
+                user: "bob".to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(g_add.contains("Added 'bob' to group 'devs'"));
+
+    let g_members = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Group {
+            action: GroupCommands::Members {
+                group: "devs".to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(g_members.contains("bob"));
+
+    // 2. Write file, chmod, chgrp, legal hold
+    run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Write {
+            path: "/audit/ledger.txt".to_string(),
+            content: "SEC Financial Records 2026".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+
+    let chgrp_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Chgrp {
+            path: "/audit/ledger.txt".to_string(),
+            group: Some("devs".to_string()),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(chgrp_out.contains("Updated group for /audit/ledger.txt to Some(\"devs\")"));
+
+    let chmod_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Chmod {
+            path: "/audit/ledger.txt".to_string(),
+            mode: "0640".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(chmod_out.contains("Updated mode for /audit/ledger.txt to 640"));
+
+    let hold_set = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::LegalHold {
+            path: "/audit/ledger.txt".to_string(),
+            active: Some(true),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(hold_set.contains("Set legal hold on /audit/ledger.txt to true"));
+
+    let hold_check = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::LegalHold {
+            path: "/audit/ledger.txt".to_string(),
+            active: None,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(hold_check.contains("Legal hold on /audit/ledger.txt: true"));
+
+    // Deletion should fail due to legal hold
+    let rm_fail = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Rm {
+            path: "/audit/ledger.txt".to_string(),
+            recursive: false,
+        },
+    ))
+    .await;
+    assert!(rm_fail.is_err());
+
+    // 3. Share link lifecycle
+    let share_create = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Share {
+            action: ShareCommands::Create {
+                path: "/audit/ledger.txt".to_string(),
+                mode: "r".to_string(),
+                expires_in_secs: Some(3600),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(share_create.contains("Created share link:"));
+
+    let token = share_create
+        .lines()
+        .find(|l| l.contains("Token:"))
+        .map(|l| l.split(':').nth(1).unwrap().trim())
+        .unwrap();
+
+    let share_resolve = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Share {
+            action: ShareCommands::Resolve {
+                token: token.to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(share_resolve.contains("Resolved share link:"));
+
+    let share_revoke = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Share {
+            action: ShareCommands::Revoke {
+                token: token.to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(share_revoke.contains("Revoked share link"));
+
+    // 4. Webhook registration
+    let hook_create = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Webhook {
+            action: WebhookCommands::Create {
+                pattern: "/audit/*".to_string(),
+                events: "create,write".to_string(),
+                url: "https://example.com/webhook".to_string(),
+                secret: "s3cr3t".to_string(),
+            },
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(hook_create.contains("Created webhook"));
+
+    let hook_list = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Webhook {
+            action: WebhookCommands::List,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(hook_list.contains("/audit/*"));
+
+    // 5. Export / Import archive
+    let export_tar = tmp.path().join("audit.tar.gz");
+    let export_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Export {
+            path: "/audit".to_string(),
+            output_file: export_tar.to_str().unwrap().to_string(),
+            format: "targz".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(export_out.contains("Exported /audit"));
+    assert!(export_tar.exists());
+
+    let import_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Import {
+            archive_file: export_tar.to_str().unwrap().to_string(),
+            target_path: "/audit_restored".to_string(),
+            format: "targz".to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(import_out.contains("Imported"));
+
+    // 6. Backup & RestoreBackup
+    let backup_dir = tmp.path().join("backup_dir");
+    let backup_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Backup {
+            path: "/audit".to_string(),
+            backup_dir: backup_dir.to_str().unwrap().to_string(),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(backup_out.contains("Backup complete:"));
+
+    let restore_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::RestoreBackup {
+            backup_dir: backup_dir.to_str().unwrap().to_string(),
+            target_prefix: "/audit_pitr".to_string(),
+            as_of: None,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(restore_out.contains("Restore complete:"));
+
+    // 7. Stats
+    let stats_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Stats { prometheus: false },
+    ))
+    .await
+    .unwrap();
+    assert!(stats_out.contains("\"total_files\""));
+
+    let prom_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Stats { prometheus: true },
+    ))
+    .await
+    .unwrap();
+    assert!(prom_out.contains("surrealfs_files_total"));
+
+    // 8. Encrypt & Decrypt
+    let enc_input = tmp.path().join("plain.txt");
+    std::fs::write(&enc_input, b"Super confidential payload 2026").unwrap();
+    let key_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+
+    let enc_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Encrypt {
+            path: "/secure/data.enc".to_string(),
+            input_file: enc_input.to_str().unwrap().to_string(),
+            key_hex: key_hex.to_string(),
+            key_id: Some("key-01".to_string()),
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(enc_out.contains("Wrote encrypted file /secure/data.enc"));
+
+    let dec_out = run_cli(make_cli(
+        url,
+        &ns,
+        &db,
+        Commands::Decrypt {
+            path: "/secure/data.enc".to_string(),
+            key_hex: key_hex.to_string(),
+            output_file: None,
+        },
+    ))
+    .await
+    .unwrap();
+    assert!(dec_out.contains("Super confidential payload 2026"));
 }

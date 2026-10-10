@@ -36,9 +36,12 @@ impl Authenticator {
         use base64::Engine;
         let decoded = base64::engine::general_purpose::STANDARD
             .decode(payload)
-            .map_err(|e| SurrealFsError::InvalidPath(format!("Invalid base64 in auth header: {}", e)))?;
-        let auth_str = String::from_utf8(decoded)
-            .map_err(|e| SurrealFsError::InvalidPath(format!("Invalid UTF-8 in credentials: {}", e)))?;
+            .map_err(|e| {
+                SurrealFsError::InvalidPath(format!("Invalid base64 in auth header: {}", e))
+            })?;
+        let auth_str = String::from_utf8(decoded).map_err(|e| {
+            SurrealFsError::InvalidPath(format!("Invalid UTF-8 in credentials: {}", e))
+        })?;
 
         let mut parts = auth_str.splitn(2, ':');
         let username = parts.next().unwrap_or("");

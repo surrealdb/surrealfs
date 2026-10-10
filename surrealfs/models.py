@@ -19,7 +19,9 @@ __all__ = [
     "GrepMatch",
     "SearchHit",
     "SectionHit",
+    "ShareEntry",
     "WatchEvent",
+    "WebhookEntry",
     "WorkspaceEntry",
     "format_mode",
 ]
@@ -58,6 +60,7 @@ class FileEntry:
     content_type: str
     is_folder: bool
     owner: str = "root"
+    group: str | None = None
     mode: int = 0o666
     gate: str | None = None
     size: int = 0
@@ -98,6 +101,7 @@ class FileEntry:
             # Guessing a permission for it is how a wrong answer stays quiet --
             # `fn::sfs_bits` requires them for the same reason.
             owner=row["owner"],
+            group=row.get("group"),
             mode=int(row["mode"]),
             gate=row.get("gate"),
             size=int(size or 0),
@@ -247,5 +251,59 @@ class WorkspaceEntry:
             name=row.get("name") or "",
             owner=row.get("owner") or "root",
             is_public=bool(row.get("is_public") or False),
+            created_at=row.get("created_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ShareEntry:
+    """A row of the ``share`` table representing a shared link."""
+
+    id: str
+    path: str
+    mode: str
+    token: str
+    created_by: str
+    expires_at: datetime | None = None
+    revoked: bool = False
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> ShareEntry:
+        return cls(
+            id=str(row["id"]),
+            path=row.get("path") or "",
+            mode=row.get("mode") or "ro",
+            token=row.get("token") or "",
+            created_by=row.get("created_by") or "",
+            expires_at=row.get("expires_at"),
+            revoked=bool(row.get("revoked") or False),
+            created_at=row.get("created_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class WebhookEntry:
+    """A row of the ``webhook`` table."""
+
+    id: str
+    owner: str
+    path_pattern: str
+    events: list[str]
+    url: str
+    secret: str
+    active: bool = True
+    created_at: datetime | None = None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> WebhookEntry:
+        return cls(
+            id=str(row["id"]),
+            owner=row.get("owner") or "",
+            path_pattern=row.get("path_pattern") or "",
+            events=list(row.get("events") or []),
+            url=row.get("url") or "",
+            secret=row.get("secret") or "",
+            active=bool(row.get("active", True)),
             created_at=row.get("created_at"),
         )

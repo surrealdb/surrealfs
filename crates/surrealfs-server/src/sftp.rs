@@ -199,7 +199,12 @@ impl SftpSession {
 
         for child in children {
             append_string(&mut resp, &child.filename);
-            let longname = format!("{} {} {}", if child.is_folder { "d" } else { "-" }, child.size, child.filename);
+            let longname = format!(
+                "{} {} {}",
+                if child.is_folder { "d" } else { "-" },
+                child.size,
+                child.filename
+            );
             append_string(&mut resp, &longname);
             append_attrs(&mut resp, &child);
         }
@@ -307,7 +312,10 @@ impl SftpSession {
         let mut handles = self.handles.write().await;
         if let Some(handle) = handles.remove(&handle_str) {
             if !handle.is_dir && !handle.write_buffer.is_empty() {
-                let _ = self.fs.write_bytes(&handle.path, &handle.write_buffer, None).await;
+                let _ = self
+                    .fs
+                    .write_bytes(&handle.path, &handle.write_buffer, None)
+                    .await;
             }
         }
 

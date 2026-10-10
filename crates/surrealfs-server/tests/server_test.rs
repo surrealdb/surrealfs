@@ -11,8 +11,8 @@ use surrealfs_server::Authenticator;
 static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 async fn setup_test_fs() -> SurrealFs {
-    let url = std::env::var("SURREALFS_TEST_URL")
-        .unwrap_or_else(|_| "ws://localhost:8000".to_string());
+    let url =
+        std::env::var("SURREALFS_TEST_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -419,15 +419,9 @@ async fn test_credentials_and_authentication() {
     let auth = Authenticator::new(fs.clone());
 
     // 1. Create external credentials (§22)
-    fs.create_credential(
-        "webdav",
-        "alice",
-        Some("secret123"),
-        "user:alice",
-        None,
-    )
-    .await
-    .expect("Failed to create credential");
+    fs.create_credential("webdav", "alice", Some("secret123"), "user:alice", None)
+        .await
+        .expect("Failed to create credential");
 
     // 2. Validate Basic Auth
     // Header format: Basic base64(alice:secret123)

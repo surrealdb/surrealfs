@@ -5,8 +5,9 @@ use crate::crdt::CrdtDoc;
 use crate::errors::{Result, SurrealFsError};
 use crate::models::{
     CodeSymbol, CredentialRecord, EntityRecord, FileEntry, FileLock, FileVersion, FolderDigest,
-    GrepMatch, MailboxMessage, PackResult, PackedBlock, PipelineJob, SearchHit, SectionHit,
-    TableRow, UploadSession, UsageStats, WorkspaceDiff,
+    GrepMatch, GroupMemberRecord, MailboxMessage, PackResult, PackedBlock, PipelineJob, SearchHit,
+    SectionHit, ShareRecord, TableRow, UploadSession, UsageStats, UserGroupRecord,
+    WebhookDeliveryRecord, WebhookRecord, WorkspaceDiff,
 };
 use crate::paths::normalize_path;
 use crate::understanding::{
@@ -68,8 +69,8 @@ fn extract_bytes(val: Option<&Value>) -> Option<Vec<u8>> {
 
 #[derive(Clone)]
 pub struct SurrealFs {
-    db: Surreal<Client>,
-    caller: Option<String>,
+    pub(crate) db: Surreal<Client>,
+    pub(crate) caller: Option<String>,
 }
 
 impl SurrealFs {
@@ -100,6 +101,14 @@ impl SurrealFs {
     /// Return underlying Surreal client reference.
     pub fn client(&self) -> &Surreal<Client> {
         &self.db
+    }
+
+    /// Return a clone of this SurrealFs instance with a different caller identity.
+    pub fn with_caller(&self, caller: impl Into<String>) -> Self {
+        Self {
+            db: self.db.clone(),
+            caller: Some(caller.into()),
+        }
     }
 
     /// Stat a file or directory.
@@ -328,6 +337,18 @@ impl SurrealFs {
             .bind(("caller", self.caller.clone()))
             .await?;
         let _res: Option<bool> = res.take(0usize)?;
+        Ok(())
+    }
+
+    /// Change file mode / permissions.
+    pub async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
+        let norm = normalize_path(path);
+        let sql = "RETURN fn::sfs_chmod($path, $mode);";
+        self.db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("mode", mode as i64))
+            .await?;
         Ok(())
     }
 
@@ -1513,5 +1534,301 @@ impl SurrealFs {
             list.push(rec);
         }
         Ok(list)
+    }
+
+    // Group Management (Section 24.1)
+    pub async fn create_group(
+        &self,
+        name: &str,
+        description: Option<&str>,
+    ) -> Result<UserGroupRecord> {
+        let sql = "RETURN fn::sfs_create_group($name, $description);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("name", name.to_string()))
+            .bind(("description", description.map(|s| s.to_string())))
+            .await?;
+        let item: Option<SValue> = res.take(0usize).unwrap_or(None);
+        let rec: UserGroupRecord = value_to_serde(
+            item.ok_or_else(|| SurrealFsError::NotFound(format!("Group {}", name)))?,
+        )?;
+        Ok(rec)
+    }
+
+    pub async fn list_groups(&self) -> Result<Vec<UserGroupRecord>> {
+        let sql = "SELECT * FROM user_group ORDER BY name ASC;";
+        let mut res = self.db.query(sql).await?;
+        let rows: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut groups = Vec::new();
+        for r in rows {
+            groups.push(value_to_serde(r)?);
+        }
+        Ok(groups)
+    }
+
+    pub async fn add_group_member(&self, group: &str, user: &str) -> Result<()> {
+        let sql = "RETURN fn::sfs_add_group_member($group, $user);";
+        self.db
+            .query(sql)
+            .bind(("group", group.to_string()))
+            .bind(("user", user.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn remove_group_member(&self, group: &str, user: &str) -> Result<()> {
+        let sql = "RETURN fn::sfs_remove_group_member($group, $user);";
+        self.db
+            .query(sql)
+            .bind(("group", group.to_string()))
+            .bind(("user", user.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_group_members(&self, group: &str) -> Result<Vec<GroupMemberRecord>> {
+        let sql = "RETURN fn::sfs_list_group_members($group);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("group", group.to_string()))
+            .await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut list = Vec::new();
+        for item in items {
+            let mut val: Value = value_to_serde(item)?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("group_name".to_string(), serde_json::json!(group));
+            }
+            let rec: GroupMemberRecord = serde_json::from_value(val)?;
+            list.push(rec);
+        }
+        Ok(list)
+    }
+
+    pub async fn get_user_groups(&self, user: &str) -> Result<Vec<String>> {
+        let sql = "RETURN fn::sfs_get_user_groups($user);";
+        let mut res = self.db.query(sql).bind(("user", user.to_string())).await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut groups = Vec::new();
+        for item in items {
+            let val: Value = value_to_serde(item)?;
+            if let Some(s) = val.as_str() {
+                groups.push(s.to_string());
+            }
+        }
+        Ok(groups)
+    }
+
+    pub async fn chgrp(&self, path: &str, group: Option<&str>) -> Result<FileEntry> {
+        let norm = normalize_path(path);
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = "RETURN fn::sfs_chgrp($path, $group, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("group", group.map(|s| s.to_string())))
+            .bind(("caller", caller.to_string()))
+            .await?;
+        let item: Option<SValue> = res.take(0usize).unwrap_or(None);
+        let entry: FileEntry =
+            value_to_serde(item.ok_or_else(|| SurrealFsError::NotFound(path.to_string()))?)?;
+        Ok(entry)
+    }
+
+    // Share Links (Section 24.2)
+    pub async fn create_share(
+        &self,
+        path: &str,
+        mode: &str,
+        duration_secs: Option<u64>,
+    ) -> Result<ShareRecord> {
+        let norm = normalize_path(path);
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = "RETURN fn::sfs_create_share($path, $mode, $duration_secs, $caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("mode", mode.to_string()))
+            .bind(("duration_secs", duration_secs.map(|s| s as i64)))
+            .bind(("caller", caller.to_string()))
+            .await?;
+        let item: Option<SValue> = res.take(0usize)?;
+        let rec: ShareRecord =
+            value_to_serde(item.ok_or_else(|| SurrealFsError::NotFound(path.to_string()))?)?;
+        Ok(rec)
+    }
+
+    pub async fn revoke_share(&self, token_or_id: &str) -> Result<()> {
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = "RETURN fn::sfs_revoke_share($tok, $caller);";
+        self.db
+            .query(sql)
+            .bind(("tok", token_or_id.to_string()))
+            .bind(("caller", caller.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn resolve_share(&self, token: &str) -> Result<Option<ShareRecord>> {
+        let sql = "RETURN fn::sfs_resolve_share($tok);";
+        let mut res = self.db.query(sql).bind(("tok", token.to_string())).await?;
+        let item: Option<SValue> = res.take(0usize).unwrap_or(None);
+        if let Some(sval) = item {
+            let val: Value = value_to_serde(sval)?;
+            if val.is_null() {
+                return Ok(None);
+            }
+            let rec: ShareRecord = serde_json::from_value(val)?;
+            Ok(Some(rec))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_shares(&self) -> Result<Vec<ShareRecord>> {
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = "RETURN fn::sfs_list_shares($caller);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("caller", caller.to_string()))
+            .await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut list = Vec::new();
+        for item in items {
+            let rec: ShareRecord = value_to_serde(item)?;
+            list.push(rec);
+        }
+        Ok(list)
+    }
+
+    // Legal Hold (Section 24.4)
+    pub async fn set_legal_hold(&self, path: &str, enabled: bool) -> Result<FileEntry> {
+        let norm = normalize_path(path);
+        let sql = "RETURN fn::sfs_set_legal_hold($path, $enabled);";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("enabled", enabled))
+            .await?;
+        let item: Option<SValue> = res.take(0usize).unwrap_or(None);
+        let entry: FileEntry =
+            value_to_serde(item.ok_or_else(|| SurrealFsError::NotFound(path.to_string()))?)?;
+        Ok(entry)
+    }
+
+    pub async fn is_legal_hold(&self, path: &str) -> Result<bool> {
+        let norm = normalize_path(path);
+        let sql = "RETURN fn::sfs_is_legal_hold($path);";
+        let mut res = self.db.query(sql).bind(("path", norm)).await?;
+        let item: Option<SValue> = res.take(0usize).unwrap_or(None);
+        if let Some(sval) = item {
+            let val: Value = value_to_serde(sval)?;
+            Ok(val.as_bool().unwrap_or(false))
+        } else {
+            Ok(false)
+        }
+    }
+
+    // Webhooks (Section 23.2)
+    pub async fn create_webhook(
+        &self,
+        path_pattern: &str,
+        events: &[&str],
+        url: &str,
+        secret: &str,
+    ) -> Result<WebhookRecord> {
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = "CREATE webhook SET owner = $owner, path_pattern = $pat, events = $events, url = $url, secret = $secret, active = true;";
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("owner", caller.to_string()))
+            .bind(("pat", path_pattern.to_string()))
+            .bind((
+                "events",
+                events.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            ))
+            .bind(("url", url.to_string()))
+            .bind(("secret", secret.to_string()))
+            .await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let item = items
+            .into_iter()
+            .next()
+            .ok_or_else(|| SurrealFsError::Other("Failed to create webhook".to_string()))?;
+        let rec: WebhookRecord = value_to_serde(item)?;
+        Ok(rec)
+    }
+
+    pub async fn list_webhooks(&self) -> Result<Vec<WebhookRecord>> {
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = if caller == "root" {
+            "SELECT * FROM webhook ORDER BY created_at DESC;"
+        } else {
+            "SELECT * FROM webhook WHERE owner = $caller ORDER BY created_at DESC;"
+        };
+        let mut q = self.db.query(sql);
+        if caller != "root" {
+            q = q.bind(("caller", caller.to_string()));
+        }
+        let mut res = q.await?;
+        let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
+        let mut list = Vec::new();
+        for item in items {
+            let rec: WebhookRecord = value_to_serde(item)?;
+            list.push(rec);
+        }
+        Ok(list)
+    }
+
+    pub async fn delete_webhook(&self, webhook_id: &str) -> Result<()> {
+        let sql = "DELETE type::record('webhook', $id);";
+        self.db
+            .query(sql)
+            .bind(("id", webhook_id.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn log_webhook_delivery(&self, delivery: &WebhookDeliveryRecord) -> Result<()> {
+        let sql = "CREATE webhook_delivery SET webhook_id = type::record('webhook', $wid), owner = $owner, event = $event, path = $path, status_code = $status, success = $success, error = $error, attempts = $attempts, delivered_at = time::now();";
+        self.db
+            .query(sql)
+            .bind(("wid", delivery.webhook_id.clone().unwrap_or_default()))
+            .bind(("owner", delivery.owner.clone()))
+            .bind(("event", delivery.event.clone()))
+            .bind(("path", delivery.path.clone()))
+            .bind(("status", delivery.status_code.map(|c| c as i64)))
+            .bind(("success", delivery.success))
+            .bind(("error", delivery.error.clone()))
+            .bind(("attempts", delivery.attempts as i64))
+            .await?;
+        Ok(())
+    }
+
+    /// Export a subtree as an archive (tar, tar.gz, or zip).
+    pub async fn export_tree(
+        &self,
+        path: &str,
+        format: crate::archive::ArchiveFormat,
+        as_of: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Vec<u8>> {
+        crate::archive::export_tree(self, path, format, as_of).await
+    }
+
+    /// Import an archive into a destination prefix.
+    pub async fn import_tree(
+        &self,
+        target_prefix: &str,
+        archive_bytes: &[u8],
+        format: crate::archive::ArchiveFormat,
+    ) -> Result<crate::archive::ImportReport> {
+        crate::archive::import_tree(self, target_prefix, archive_bytes, format).await
     }
 }

@@ -161,7 +161,11 @@ impl NfsServer {
     }
 
     /// NFS3 Procedure: LOOKUP.
-    pub async fn lookup(&self, dir_handle: &NfsFileHandle, name: &str) -> Result<(NfsFileHandle, NfsFattr3), u32> {
+    pub async fn lookup(
+        &self,
+        dir_handle: &NfsFileHandle,
+        name: &str,
+    ) -> Result<(NfsFileHandle, NfsFattr3), u32> {
         let _ = self.verify_handle(dir_handle).await?;
         let child_path = if dir_handle.path == "/" {
             format!("/{}", name)
@@ -195,7 +199,11 @@ impl NfsServer {
         let data = match self.fs.read_range(&handle.path, offset, count as u64).await {
             Ok(d) => d,
             Err(_) => {
-                let all = self.fs.read_bytes(&handle.path).await.map_err(|_| NFS3ERR_IO)?;
+                let all = self
+                    .fs
+                    .read_bytes(&handle.path)
+                    .await
+                    .map_err(|_| NFS3ERR_IO)?;
                 let start = (offset as usize).min(all.len());
                 let end = ((offset + count as u64) as usize).min(all.len());
                 all[start..end].to_vec()
@@ -274,10 +282,13 @@ impl NfsServer {
             format!("{}/{}", dir_handle.path, name)
         };
 
-        self.fs.mkdir(&child_path, false).await.map_err(|e| match e {
-            SurrealFsError::Conflict(_) => NFS3ERR_EXIST,
-            _ => NFS3ERR_IO,
-        })?;
+        self.fs
+            .mkdir(&child_path, false)
+            .await
+            .map_err(|e| match e {
+                SurrealFsError::Conflict(_) => NFS3ERR_EXIST,
+                _ => NFS3ERR_IO,
+            })?;
 
         let stat = match self.fs.stat(&child_path).await {
             Ok(Some(s)) => s,
@@ -310,11 +321,7 @@ impl NfsServer {
         dir_handle: &NfsFileHandle,
     ) -> Result<Vec<(String, NfsFileHandle, NfsFattr3)>, u32> {
         let _ = self.verify_handle(dir_handle).await?;
-        let children = self
-            .fs
-            .ls(&dir_handle.path)
-            .await
-            .map_err(|_| NFS3ERR_IO)?;
+        let children = self.fs.ls(&dir_handle.path).await.map_err(|_| NFS3ERR_IO)?;
 
         let mut res = Vec::new();
         for child in children {

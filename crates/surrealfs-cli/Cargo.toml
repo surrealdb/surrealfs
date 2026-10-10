@@ -27,3 +27,7 @@ anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 chrono.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

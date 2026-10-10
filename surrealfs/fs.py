@@ -283,7 +283,12 @@ class SurrealFs:
         costs no queries because `gate` collapses the whole chain into one
         column. Says nothing about the row's own bits.
         """
-        return self.is_root or entry.gate is None or entry.gate == self.user
+        if self.is_root or entry.gate is None:
+            return True
+        if entry.gate == "!closed":
+            return False
+        tokens = [t.strip() for t in entry.gate.split(",")]
+        return any(t == self.user or t == f"owner:{self.user}" for t in tokens)
 
     def _allowed(self, entry: FileEntry, need: int) -> bool:
         if self.is_root:

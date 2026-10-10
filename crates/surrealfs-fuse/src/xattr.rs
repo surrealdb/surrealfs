@@ -148,6 +148,7 @@ mod tests {
             crdt: false,
             created_at: None,
             updated_at: None,
+            meta: None,
         }
     }
 

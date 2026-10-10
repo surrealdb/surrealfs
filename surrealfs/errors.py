@@ -19,6 +19,7 @@ __all__ = [
     "DirectoryNotEmpty",
     "InvalidPath",
     "IsADirectory",
+    "LegalHoldError",
     "NotADirectory",
     "NotATextFile",
     "NotFound",
@@ -63,6 +64,11 @@ class PermissionDenied(SurrealFsError, PermissionError):
     that is not world-traversable -- see the ``gate`` field in
     ``schema/file.surql``.
     """
+
+
+class LegalHoldError(SurrealFsError, PermissionError):
+    """The file or an ancestor directory is under legal hold and cannot be modified or
+    deleted."""
 
 
 class NotATextFile(SurrealFsError, ValueError):

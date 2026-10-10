@@ -93,7 +93,10 @@ impl S3Server {
     }
 
     /// Traverses all subdirectories in a bucket recursively (§22.3).
-    async fn list_bucket_objects_recursive(&self, bucket_path: &str) -> Vec<surrealfs_core::models::FileEntry> {
+    async fn list_bucket_objects_recursive(
+        &self,
+        bucket_path: &str,
+    ) -> Vec<surrealfs_core::models::FileEntry> {
         let mut all_files = Vec::new();
         let mut queue = vec![bucket_path.to_string()];
         while let Some(dir) = queue.pop() {
@@ -259,12 +262,13 @@ impl S3Server {
     /// Handles PUT /<bucket>/<key> (PutObject).
     async fn handle_put_object(&self, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
         // Check for UploadPart query params: ?uploadId=...&partNumber=...
-        if let (Some(upload_id), Some(part_num_str)) = (
-            req.query_param("uploadId"),
-            req.query_param("partNumber"),
-        ) {
+        if let (Some(upload_id), Some(part_num_str)) =
+            (req.query_param("uploadId"), req.query_param("partNumber"))
+        {
             if let Ok(part_num) = part_num_str.parse::<u32>() {
-                return self.handle_upload_part(upload_id, part_num, req.body.clone()).await;
+                return self
+                    .handle_upload_part(upload_id, part_num, req.body.clone())
+                    .await;
             }
         }
 
@@ -334,7 +338,11 @@ impl S3Server {
             };
 
             let Some(upload) = upload else {
-                return s3_error("NoSuchUpload", "The specified multipart upload does not exist.", 404);
+                return s3_error(
+                    "NoSuchUpload",
+                    "The specified multipart upload does not exist.",
+                    404,
+                );
             };
 
             // Assemble parts in sorted part order
@@ -477,9 +485,7 @@ fn s3_error(code: &str, message: &str, status: u16) -> HttpResponse {
 fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
     let clean = header.trim();
     let spec = clean.strip_prefix("bytes=")?;
-    let mut parts = spec.splitn(2, '-');
-    let start_str = parts.next()?;
-    let end_str = parts.next()?;
+    let (start_str, end_str) = spec.split_once('-')?;
 
     if start_str.is_empty() {
         let len: u64 = end_str.parse().ok()?;

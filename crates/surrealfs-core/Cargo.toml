@@ -18,12 +18,20 @@ regex.workspace = true
 chrono.workspace = true
 futures.workspace = true
 yrs = "0.28.0"
-sha2 = "0.11.0"
+sha2.workspace = true
 hex = "0.4.3"
 base64 = "0.22"
+hmac.workspace = true
 blake3.workspace = true
 zstd.workspace = true
 fastcdc.workspace = true
+tar = "0.4.46"
+flate2 = "1.1.10"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
+aes-gcm = "0.11.1"
+getrandom = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tempfile = "3"

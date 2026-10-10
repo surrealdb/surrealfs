@@ -96,6 +96,7 @@ impl WebDavServer {
                         crdt: false,
                         created_at: Some(Utc::now()),
                         updated_at: Some(Utc::now()),
+                        meta: None,
                     }
                 } else {
                     return HttpResponse::not_found("Resource not found");
@@ -118,7 +119,8 @@ impl WebDavServer {
             }
         }
 
-        let mut xml = String::from(r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">"#);
+        let mut xml =
+            String::from(r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">"#);
         for entry in entries {
             let href = self.make_href(&entry.path, entry.is_folder);
             let display_name = if entry.path == "/" {
@@ -139,15 +141,24 @@ impl WebDavServer {
             xml.push_str("<D:response>");
             xml.push_str(&format!("<D:href>{}</D:href>", href));
             xml.push_str("<D:propstat><D:prop>");
-            xml.push_str(&format!("<D:displayname>{}</D:displayname>", escape_xml(display_name)));
+            xml.push_str(&format!(
+                "<D:displayname>{}</D:displayname>",
+                escape_xml(display_name)
+            ));
             xml.push_str(&format!("<D:creationdate>{}</D:creationdate>", created_iso));
-            xml.push_str(&format!("<D:getlastmodified>{}</D:getlastmodified>", modified_rfc1123));
+            xml.push_str(&format!(
+                "<D:getlastmodified>{}</D:getlastmodified>",
+                modified_rfc1123
+            ));
 
             if entry.is_folder {
                 xml.push_str("<D:resourcetype><D:collection/></D:resourcetype>");
             } else {
                 xml.push_str("<D:resourcetype/>");
-                xml.push_str(&format!("<D:getcontentlength>{}</D:getcontentlength>", entry.size));
+                xml.push_str(&format!(
+                    "<D:getcontentlength>{}</D:getcontentlength>",
+                    entry.size
+                ));
                 xml.push_str(&format!(
                     "<D:getcontenttype>{}</D:getcontenttype>",
                     escape_xml(&entry.content_type)
@@ -157,12 +168,14 @@ impl WebDavServer {
             }
 
             // Supported lock properties (DAV Class 2)
-            xml.push_str(r#"<D:supportedlock>
+            xml.push_str(
+                r#"<D:supportedlock>
                 <D:lockentry>
                     <D:lockscope><D:exclusive/></D:lockscope>
                     <D:locktype><D:write/></D:locktype>
                 </D:lockentry>
-            </D:supportedlock>"#);
+            </D:supportedlock>"#,
+            );
 
             xml.push_str("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat>");
             xml.push_str("</D:response>");
@@ -300,9 +313,9 @@ impl WebDavServer {
                     .header("ETag", &etag)
                     .body_str("Created")
             }
-            Err(SurrealFsError::Conflict(_)) => {
-                HttpResponse::precondition_failed("Precondition Failed: Resource modified concurrently")
-            }
+            Err(SurrealFsError::Conflict(_)) => HttpResponse::precondition_failed(
+                "Precondition Failed: Resource modified concurrently",
+            ),
             Err(e) => HttpResponse::internal_error(&e.to_string()),
         }
     }
@@ -329,8 +342,9 @@ impl WebDavServer {
 
         match self.fs.mkdir(sfs_path, false).await {
             Ok(_) => HttpResponse::created(),
-            Err(SurrealFsError::Conflict(_)) => HttpResponse::new(405, "Method Not Allowed")
-                .body_str("Directory already exists"),
+            Err(SurrealFsError::Conflict(_)) => {
+                HttpResponse::new(405, "Method Not Allowed").body_str("Directory already exists")
+            }
             Err(e) => HttpResponse::internal_error(&e.to_string()),
         }
     }
@@ -343,12 +357,18 @@ impl WebDavServer {
         };
 
         let dest_raw_path = match dest_header.split_once("://") {
-            Some((_, rest)) => rest.split_once('/').map(|(_, p)| format!("/{}", p)).unwrap_or_else(|| "/".to_string()),
+            Some((_, rest)) => rest
+                .split_once('/')
+                .map(|(_, p)| format!("/{}", p))
+                .unwrap_or_else(|| "/".to_string()),
             None => dest_header.to_string(),
         };
 
         let dest_path = self.resolve_path(&dest_raw_path);
-        let overwrite = req.header("overwrite").map(|v| v.to_uppercase() != "F").unwrap_or(true);
+        let overwrite = req
+            .header("overwrite")
+            .map(|v| v.to_uppercase() != "F")
+            .unwrap_or(true);
 
         if !overwrite && self.fs.exists(&dest_path).await.unwrap_or(false) {
             return HttpResponse::precondition_failed("Destination exists and Overwrite is F");
@@ -369,12 +389,18 @@ impl WebDavServer {
         };
 
         let dest_raw_path = match dest_header.split_once("://") {
-            Some((_, rest)) => rest.split_once('/').map(|(_, p)| format!("/{}", p)).unwrap_or_else(|| "/".to_string()),
+            Some((_, rest)) => rest
+                .split_once('/')
+                .map(|(_, p)| format!("/{}", p))
+                .unwrap_or_else(|| "/".to_string()),
             None => dest_header.to_string(),
         };
 
         let dest_path = self.resolve_path(&dest_raw_path);
-        let overwrite = req.header("overwrite").map(|v| v.to_uppercase() != "F").unwrap_or(true);
+        let overwrite = req
+            .header("overwrite")
+            .map(|v| v.to_uppercase() != "F")
+            .unwrap_or(true);
 
         if !overwrite && self.fs.exists(&dest_path).await.unwrap_or(false) {
             return HttpResponse::precondition_failed("Destination exists and Overwrite is F");
@@ -406,7 +432,10 @@ impl WebDavServer {
             .await
         {
             Ok(_) => {
-                let token = format!("urn:uuid:{}", blake3::hash(format!("{}:{}", sfs_path, Utc::now()).as_bytes()).to_hex());
+                let token = format!(
+                    "urn:uuid:{}",
+                    blake3::hash(format!("{}:{}", sfs_path, Utc::now()).as_bytes()).to_hex()
+                );
                 let xml = format!(
                     r#"<?xml version="1.0" encoding="utf-8"?>
 <D:prop xmlns:D="DAV:">
@@ -502,9 +531,7 @@ fn is_macos_appledouble(path: &str) -> bool {
 fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
     let clean = header.trim();
     let spec = clean.strip_prefix("bytes=")?;
-    let mut parts = spec.splitn(2, '-');
-    let start_str = parts.next()?;
-    let end_str = parts.next()?;
+    let (start_str, end_str) = spec.split_once('-')?;
 
     if start_str.is_empty() {
         // Suffix bytes: -500

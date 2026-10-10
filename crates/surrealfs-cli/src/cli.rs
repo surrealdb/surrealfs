@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
-use surrealfs_core::{ConnectOptions, SurrealFs};
+use surrealfs_core::{create_backup, restore_backup, ArchiveFormat, ConnectOptions, SurrealFs};
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -232,6 +232,87 @@ pub enum Commands {
         #[command(subcommand)]
         action: CredentialCommands,
     },
+
+    /// Manage user groups and memberships (§24.1)
+    Group {
+        #[command(subcommand)]
+        action: GroupCommands,
+    },
+
+    /// Change group ownership of a file or folder (§24.1)
+    Chgrp { path: String, group: Option<String> },
+
+    /// Change file mode permissions (§24.1)
+    Chmod { path: String, mode: String },
+
+    /// Manage share links (§24.2)
+    Share {
+        #[command(subcommand)]
+        action: ShareCommands,
+    },
+
+    /// Set or check legal hold (§24.4)
+    LegalHold {
+        path: String,
+        #[arg(short, long)]
+        active: Option<bool>,
+    },
+
+    /// Manage webhooks (§23.2)
+    Webhook {
+        #[command(subcommand)]
+        action: WebhookCommands,
+    },
+
+    /// Export a directory tree as Tar, TarGz, or Zip (§23.3)
+    Export {
+        path: String,
+        output_file: String,
+        #[arg(short, long, default_value = "targz")]
+        format: String,
+    },
+
+    /// Import a directory tree from an archive (§23.3)
+    Import {
+        archive_file: String,
+        target_path: String,
+        #[arg(short, long, default_value = "targz")]
+        format: String,
+    },
+
+    /// Create content-addressed backup to directory (§24.5)
+    Backup { path: String, backup_dir: String },
+
+    /// Restore from backup to destination prefix (§24.5)
+    RestoreBackup {
+        backup_dir: String,
+        target_prefix: String,
+        #[arg(short, long)]
+        as_of: Option<String>,
+    },
+
+    /// Display system observability statistics and metrics (§24.6)
+    Stats {
+        #[arg(short, long)]
+        prometheus: bool,
+    },
+
+    /// Encrypt and write file with AES-256-GCM (§24.3)
+    Encrypt {
+        path: String,
+        input_file: String,
+        key_hex: String,
+        #[arg(short, long)]
+        key_id: Option<String>,
+    },
+
+    /// Read and decrypt file (§24.3)
+    Decrypt {
+        path: String,
+        key_hex: String,
+        #[arg(short, long)]
+        output_file: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -272,10 +353,7 @@ pub enum CredentialCommands {
         user_id: String,
     },
     /// Revoke / disable a credential
-    Revoke {
-        kind: String,
-        identifier: String,
-    },
+    Revoke { kind: String, identifier: String },
     /// List configured credentials
     List {
         #[arg(short, long)]
@@ -298,6 +376,57 @@ pub enum JobCommands {
         #[arg(short, long)]
         error: Option<String>,
     },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum GroupCommands {
+    /// Create a new group
+    Create {
+        name: String,
+        #[arg(short, long)]
+        description: Option<String>,
+    },
+    /// Add a user to a group
+    Add { group: String, user: String },
+    /// Remove a user from a group
+    Remove { group: String, user: String },
+    /// List all groups
+    List,
+    /// List members of a group
+    Members { group: String },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ShareCommands {
+    /// Create a new share link
+    Create {
+        path: String,
+        #[arg(short, long, default_value = "r")]
+        mode: String,
+        #[arg(short, long)]
+        expires_in_secs: Option<u64>,
+    },
+    /// Revoke a share link by token
+    Revoke { token: String },
+    /// Resolve a share link by token
+    Resolve { token: String },
+    /// List active share links
+    List,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum WebhookCommands {
+    /// Register a new outbound webhook
+    Create {
+        pattern: String,
+        events: String,
+        url: String,
+        secret: String,
+    },
+    /// List all registered webhooks
+    List,
+    /// Delete a webhook by ID
+    Delete { id: String },
 }
 
 #[derive(Args, Debug, Clone)]
@@ -700,7 +829,8 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                         "Starting WebDAV server on {} with prefix {}\n",
                         addr, prefix
                     ));
-                    let server = std::sync::Arc::new(surrealfs_server::WebDavServer::new(fs, prefix));
+                    let server =
+                        std::sync::Arc::new(surrealfs_server::WebDavServer::new(fs, prefix));
                     surrealfs_server::run_http_server(addr, server).await?;
                 }
                 ServeCommands::S3 { addr } => {
@@ -754,6 +884,277 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                         ));
                     }
                 }
+            }
+        }
+        Commands::Group { action } => {
+            let fs = cli.connect_fs().await?;
+            match action {
+                GroupCommands::Create { name, description } => {
+                    fs.create_group(name, description.as_deref()).await?;
+                    output.push_str(&format!("Group '{}' created\n", name));
+                }
+                GroupCommands::Add { group, user } => {
+                    fs.add_group_member(group, user).await?;
+                    output.push_str(&format!("Added '{}' to group '{}'\n", user, group));
+                }
+                GroupCommands::Remove { group, user } => {
+                    fs.remove_group_member(group, user).await?;
+                    output.push_str(&format!("Removed '{}' from group '{}'\n", user, group));
+                }
+                GroupCommands::List => {
+                    let groups = fs.list_groups().await?;
+                    for g in groups {
+                        output.push_str(&format!(
+                            "{:<20} {}\n",
+                            g.name,
+                            g.description.unwrap_or_default()
+                        ));
+                    }
+                }
+                GroupCommands::Members { group } => {
+                    let members = fs.list_group_members(group).await?;
+                    for m in members {
+                        output.push_str(&format!("{:<20} added={:?}\n", m.user_id, m.added_at));
+                    }
+                }
+            }
+        }
+        Commands::Chgrp { path, group } => {
+            let fs = cli.connect_fs().await?;
+            fs.chgrp(path, group.as_deref()).await?;
+            output.push_str(&format!("Updated group for {} to {:?}\n", path, group));
+        }
+        Commands::Chmod { path, mode } => {
+            let fs = cli.connect_fs().await?;
+            let mode_num = if let Some(stripped) = mode.strip_prefix("0o") {
+                u32::from_str_radix(stripped, 8)?
+            } else if let Some(stripped) = mode.strip_prefix('0') {
+                if stripped.is_empty() {
+                    0
+                } else {
+                    u32::from_str_radix(stripped, 8)?
+                }
+            } else {
+                mode.parse::<u32>()?
+            };
+            fs.chmod(path, mode_num).await?;
+            output.push_str(&format!("Updated mode for {} to {:o}\n", path, mode_num));
+        }
+        Commands::Share { action } => {
+            let fs = cli.connect_fs().await?;
+            match action {
+                ShareCommands::Create {
+                    path,
+                    mode,
+                    expires_in_secs,
+                } => {
+                    let link = fs.create_share(path, mode, *expires_in_secs).await?;
+                    output.push_str(&format!(
+                        "Created share link:\n  Token: {}\n  Path:  {}\n  Mode:  {}\n",
+                        link.token, link.path, link.mode
+                    ));
+                    if let Some(exp) = link.expires_at {
+                        output.push_str(&format!("  Expires: {}\n", exp));
+                    }
+                }
+                ShareCommands::Revoke { token } => {
+                    fs.revoke_share(token).await?;
+                    output.push_str(&format!("Revoked share link with token '{}'\n", token));
+                }
+                ShareCommands::Resolve { token } => {
+                    if let Some(link) = fs.resolve_share(token).await? {
+                        output.push_str(&format!(
+                            "Resolved share link:\n  Path: {}\n  Mode: {}\n  Revoked: {}\n",
+                            link.path, link.mode, link.revoked
+                        ));
+                    } else {
+                        output.push_str(&format!("Share link not found or expired: {}\n", token));
+                    }
+                }
+                ShareCommands::List => {
+                    let shares = fs.list_shares().await?;
+                    for s in shares {
+                        output.push_str(&format!(
+                            "{:<32} {:<24} {:<6} revoked={}\n",
+                            s.token, s.path, s.mode, s.revoked
+                        ));
+                    }
+                }
+            }
+        }
+        Commands::LegalHold { path, active } => {
+            let fs = cli.connect_fs().await?;
+            if let Some(act) = active {
+                fs.set_legal_hold(path, *act).await?;
+                output.push_str(&format!("Set legal hold on {} to {}\n", path, act));
+            } else {
+                let is_held = fs.is_legal_hold(path).await?;
+                output.push_str(&format!("Legal hold on {}: {}\n", path, is_held));
+            }
+        }
+        Commands::Webhook { action } => {
+            let fs = cli.connect_fs().await?;
+            match action {
+                WebhookCommands::Create {
+                    pattern,
+                    events,
+                    url,
+                    secret,
+                } => {
+                    let ev_list: Vec<&str> = events.split(',').map(|s| s.trim()).collect();
+                    let hook = fs.create_webhook(pattern, &ev_list, url, secret).await?;
+                    output.push_str(&format!(
+                        "Created webhook {}:\n  Pattern: {}\n  URL:     {}\n",
+                        hook.id.as_deref().unwrap_or(""),
+                        hook.path_pattern,
+                        hook.url
+                    ));
+                }
+                WebhookCommands::List => {
+                    let hooks = fs.list_webhooks().await?;
+                    for h in hooks {
+                        output.push_str(&format!(
+                            "{:<24} {:<20} {:<30} active={}\n",
+                            h.id.as_deref().unwrap_or(""),
+                            h.path_pattern,
+                            h.url,
+                            h.active
+                        ));
+                    }
+                }
+                WebhookCommands::Delete { id } => {
+                    fs.delete_webhook(id).await?;
+                    output.push_str(&format!("Deleted webhook {}\n", id));
+                }
+            }
+        }
+        Commands::Export {
+            path,
+            output_file,
+            format,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let fmt = match format.to_lowercase().as_str() {
+                "tar" => ArchiveFormat::Tar,
+                "zip" => ArchiveFormat::Zip,
+                _ => ArchiveFormat::TarGz,
+            };
+            let bytes = fs.export_tree(path, fmt, None).await?;
+            std::fs::write(output_file, &bytes)?;
+            output.push_str(&format!(
+                "Exported {} ({} bytes) to {}\n",
+                path,
+                bytes.len(),
+                output_file
+            ));
+        }
+        Commands::Import {
+            archive_file,
+            target_path,
+            format,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let fmt = match format.to_lowercase().as_str() {
+                "tar" => ArchiveFormat::Tar,
+                "zip" => ArchiveFormat::Zip,
+                _ => ArchiveFormat::TarGz,
+            };
+            let bytes = std::fs::read(archive_file)?;
+            let rep = fs.import_tree(target_path, &bytes, fmt).await?;
+            output.push_str(&format!(
+                "Imported {} files, {} dirs ({} bytes) into {}\n",
+                rep.files_imported, rep.dirs_created, rep.total_bytes, target_path
+            ));
+        }
+        Commands::Backup { path, backup_dir } => {
+            let fs = cli.connect_fs().await?;
+            let manifest = create_backup(&fs, path, std::path::Path::new(backup_dir)).await?;
+            output.push_str(&format!(
+                "Backup complete:\n  Root:  {}\n  Files: {}\n  Bytes: {}\n  Dest:  {}\n",
+                manifest.root_path,
+                manifest.files.len(),
+                manifest.total_bytes,
+                backup_dir
+            ));
+        }
+        Commands::RestoreBackup {
+            backup_dir,
+            target_prefix,
+            as_of,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let cutoff = if let Some(s) = as_of {
+                Some(chrono::DateTime::parse_from_rfc3339(s)?.with_timezone(&chrono::Utc))
+            } else {
+                None
+            };
+            let rep = restore_backup(&fs, std::path::Path::new(backup_dir), target_prefix, cutoff)
+                .await?;
+            output.push_str(&format!(
+                "Restore complete:\n  Files: {}\n  Dirs:  {}\n  Bytes: {}\n",
+                rep.files_restored, rep.dirs_restored, rep.bytes_restored
+            ));
+        }
+        Commands::Stats { prometheus } => {
+            let fs = cli.connect_fs().await?;
+            if *prometheus {
+                let metrics = fs
+                    .read_virtual_stats("/.surrealfs/metrics")
+                    .await
+                    .unwrap_or_default();
+                output.push_str(&metrics);
+            } else {
+                let stats = fs.get_stats().await?;
+                output.push_str(&serde_json::to_string_pretty(&stats)?);
+                output.push('\n');
+            }
+        }
+        Commands::Encrypt {
+            path,
+            input_file,
+            key_hex,
+            key_id,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let key_bytes = hex::decode(key_hex).context("Invalid key hex")?;
+            if key_bytes.len() != 32 {
+                anyhow::bail!("Key must be exactly 32 bytes (64 hex characters)");
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&key_bytes);
+            let data = std::fs::read(input_file)?;
+            fs.write_encrypted(path, &data, &key, key_id.as_deref())
+                .await?;
+            output.push_str(&format!(
+                "Wrote encrypted file {} ({} bytes)\n",
+                path,
+                data.len()
+            ));
+        }
+        Commands::Decrypt {
+            path,
+            key_hex,
+            output_file,
+        } => {
+            let fs = cli.connect_fs().await?;
+            let key_bytes = hex::decode(key_hex).context("Invalid key hex")?;
+            if key_bytes.len() != 32 {
+                anyhow::bail!("Key must be exactly 32 bytes (64 hex characters)");
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&key_bytes);
+            let decrypted = fs.read_encrypted(path, &key).await?;
+            if let Some(out_p) = output_file {
+                std::fs::write(out_p, &decrypted)?;
+                output.push_str(&format!(
+                    "Decrypted {} to {} ({} bytes)\n",
+                    path,
+                    out_p,
+                    decrypted.len()
+                ));
+            } else {
+                output.push_str(&String::from_utf8_lossy(&decrypted));
+                output.push('\n');
             }
         }
     }

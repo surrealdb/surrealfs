@@ -33,6 +33,8 @@ pub struct FileEntry {
     pub created_at: Option<DateTime<Utc>>,
     #[serde(default)]
     pub updated_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub meta: Option<serde_json::Value>,
 }
 
 fn deserialize_null_as_false<'de, D>(deserializer: D) -> std::result::Result<bool, D::Error>
@@ -295,4 +297,80 @@ pub struct CredentialRecord {
 
 fn default_true() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserGroupRecord {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GroupMemberRecord {
+    pub group_name: String,
+    pub user_id: String,
+    #[serde(default)]
+    pub added_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ShareRecord {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub path: String,
+    #[serde(default = "default_ro")]
+    pub mode: String,
+    pub token: String,
+    pub created_by: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub revoked: bool,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+fn default_ro() -> String {
+    "ro".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookRecord {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub owner: String,
+    pub path_pattern: String,
+    pub events: Vec<String>,
+    pub url: String,
+    pub secret: String,
+    #[serde(default = "default_true")]
+    pub active: bool,
+    #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookDeliveryRecord {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub webhook_id: Option<String>,
+    pub owner: String,
+    pub event: String,
+    pub path: String,
+    #[serde(default)]
+    pub status_code: Option<u16>,
+    pub success: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default = "default_one")]
+    pub attempts: u32,
+    #[serde(default)]
+    pub delivered_at: Option<DateTime<Utc>>,
+}
+
+fn default_one() -> u32 {
+    1
 }

@@ -20,7 +20,9 @@ pub struct HttpRequest {
 
 impl HttpRequest {
     pub fn header(&self, name: &str) -> Option<&str> {
-        self.headers.get(&name.to_ascii_lowercase()).map(|s| s.as_str())
+        self.headers
+            .get(&name.to_ascii_lowercase())
+            .map(|s| s.as_str())
     }
 
     pub fn query_param(&self, name: &str) -> Option<&str> {
@@ -286,10 +288,9 @@ pub fn urlencoding_decode(input: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(byte) = u8::from_str_radix(
-                std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""),
-                16,
-            ) {
+            if let Ok(byte) =
+                u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16)
+            {
                 out.push(byte);
                 i += 3;
                 continue;
@@ -328,7 +329,9 @@ pub async fn run_http_server<H: HttpHandler + 'static>(
                 Ok(None) => {}
                 Err(e) => {
                     debug!("Failed to parse HTTP request from {}: {}", peer_addr, e);
-                    let _ = send_response(&mut stream, HttpResponse::bad_request("Malformed request")).await;
+                    let _ =
+                        send_response(&mut stream, HttpResponse::bad_request("Malformed request"))
+                            .await;
                 }
             }
         });
