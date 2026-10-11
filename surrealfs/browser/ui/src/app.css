@@ -1,84 +1,551 @@
-/* The shell. Everything inside a pane is Mantine; this is just the three tracks
-   and the print rules, which have no component to hang off. */
+/* SurrealFS Browser · Stop Choosing Theme
+   Mirrors the design language, typography, and palette of the Launch Campaign */
+
+:root {
+  --bg: #191723;
+  --panel: #242132;
+  --grey: #3c3a4f;
+  --slate: #706d8f;
+  --mute: #b0aec6;
+  --line: rgba(112, 109, 143, 0.28);
+  --pink: #ff00a0;
+  --pink-d: #800d5b;
+  --pink-dd: #4a0a36;
+  --purple: #651ddd;
+  --purple-d: #3b1a77;
+  --purple-dd: #2a1255;
+  --green: #3ddc97;
+  --amber: #ffb84d;
+  --sans: Geist, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, Menlo, monospace;
+  --post: "Inter Display", Geist, system-ui, sans-serif;
+  --sw: 290px;
+  --tb: 0px;
+
+  /* Mantine CSS variable overrides for obsidian theme */
+  --mantine-color-obsidian-9: #110f18;
+  --mantine-color-obsidian-8: #191723;
+  --mantine-color-obsidian-7: #242132;
+  --mantine-color-obsidian-6: #3c3a4f;
+  --mantine-color-obsidian-5: #706d8f;
+  --mantine-color-body: var(--bg);
+  --mantine-color-text: #ffffff;
+  --surreal-passion: var(--pink);
+}
+
+* {
+  box-sizing: border-box;
+}
 
 html,
 body,
 #root {
-    height: 100%;
-    margin: 0;
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: #fff;
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 400;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: geometricPrecision;
 }
 
+/* Custom Scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: var(--bg);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--grey);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--slate);
+}
+
+/* Three-pane Grid Shell */
 .shell {
-    height: 100%;
-    display: grid;
-    grid-template-columns: 320px 1fr var(--chat-w, 380px);
-    min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: var(--sw) 1fr var(--chat-w, 380px);
+  min-height: 0;
+  background: var(--bg);
 }
 
 .pane {
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
 }
 
-/* The drag strip for the chat panel. Sits in the chat pane's own flow so it
-   cannot be covered by the sandboxed iframe next to it. */
+/* Drag handle between center and chat */
 .drag {
-    position: absolute;
-    inset: 0 auto 0 0;
-    width: 5px;
-    cursor: col-resize;
-    z-index: 2;
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 5px;
+  cursor: col-resize;
+  z-index: 2;
+  transition: background 0.15s ease;
+}
+.drag:hover {
+  background: var(--pink);
 }
 
-.brand-mark {
-    font-family: var(--mantine-font-family-monospace);
-    color: var(--surreal-passion);
-    font-weight: 600;
-    /* 5% of the font size; CSS letter-spacing takes no percentage. */
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+/* Left Rail Branding & Navigation */
+.side-rail {
+  background: var(--bg);
+  border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
 }
 
-/* The frame gets an opaque origin (no allow-same-origin) and /raw sends
-   `Content-Security-Policy: sandbox` besides. */
+.side-brand {
+  padding: 22px 20px 18px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.side-brand .gl {
+  width: 28px;
+  color: var(--pink);
+}
+.side-brand .gl svg {
+  width: 100%;
+  height: auto;
+}
+
+.side-brand .tag {
+  font: 500 11px/1.4 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--slate);
+}
+
+.side-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+
+.side-nav-item {
+  font: 500 11.5px/1.3 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--mute);
+  padding: 8px 12px;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+  transition: all 0.12s ease;
+  border-radius: 0 4px 4px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.side-nav-item:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.side-nav-item.active {
+  color: #fff;
+  border-left-color: var(--pink);
+  background: rgba(255, 0, 160, 0.08);
+}
+
+.side-footer {
+  margin-top: auto;
+  padding: 16px 20px;
+  border-top: 1px solid var(--line);
+  font: 500 10.5px/1.5 var(--mono);
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--slate);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.side-footer .status-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--green);
+}
+
+.side-footer .status-indicator::before {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  box-shadow: 0 0 8px var(--green);
+}
+
+/* Campaign Hero Styling */
+.campaign-container {
+  overflow-y: auto;
+  height: 100%;
+}
+
+.cover {
+  position: relative;
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--pink) 0%, #c43bf6 55%, var(--purple) 100%);
+  color: #fff;
+  min-height: min(40vh, 420px);
+  display: flex;
+}
+
+.cover-in {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 100%;
+  padding: clamp(24px, 3.4vw, 48px);
+}
+
+.cover .wm {
+  width: clamp(140px, 14vw, 220px);
+  color: #fff;
+  margin-bottom: 24px;
+}
+.cover .wm svg {
+  width: 100%;
+  height: auto;
+}
+
+.eyebrow {
+  font: 500 12px/1.4 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 8px;
+}
+
+.cover h1 {
+  font-size: clamp(48px, 7.5vw, 108px);
+  line-height: .92;
+  letter-spacing: -.05em;
+  font-weight: 600;
+  margin: 10px 0 10px -.04em;
+  color: #fff;
+}
+
+.cover .sub {
+  font-size: clamp(18px, 2.2vw, 30px);
+  font-weight: 500;
+  letter-spacing: -.02em;
+  line-height: 1.15;
+  color: rgba(255, 255, 255, 0.95);
+}
+
+/* Bands */
+.band {
+  --c: var(--panel);
+  padding: clamp(40px, 5vw, 72px) clamp(20px, 4vw, 56px);
+}
+.band.alt {
+  background: var(--bg);
+  --c: var(--panel);
+}
+
+.in {
+  max-width: 1120px;
+  margin: 0 auto;
+}
+
+.deck-lede {
+  font-size: clamp(20px, 2.3vw, 32px);
+  line-height: 1.25;
+  letter-spacing: -.025em;
+  font-weight: 500;
+  color: #fff;
+  max-width: 32em;
+}
+
+.pink {
+  color: var(--pink);
+}
+
+.qs {
+  font-size: clamp(24px, 3.4vw, 48px);
+  line-height: 1.15;
+  letter-spacing: -.035em;
+  font-weight: 500;
+  margin-top: clamp(28px, 4vw, 56px);
+  color: #fff;
+}
+
+.bigyes {
+  font-size: clamp(84px, 16vw, 220px);
+  line-height: .86;
+  letter-spacing: -.055em;
+  font-weight: 600;
+  margin: clamp(16px, 3vw, 36px) 0 0 -.04em;
+  white-space: nowrap;
+  color: #fff;
+}
+
+.sq {
+  display: inline-block;
+  width: .15em;
+  height: .15em;
+  background: var(--pink);
+  margin-left: .04em;
+}
+
+.how {
+  margin-top: clamp(24px, 3vw, 48px);
+  max-width: 64ch;
+  color: var(--mute);
+  font-size: 16px;
+  border-left: 3px solid var(--pink);
+  padding-left: 16px;
+  line-height: 1.6;
+}
+
+/* Cards & Grid */
+.grid3 {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+@media (max-width: 880px) {
+  .grid3 {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: clamp(20px, 2.2vw, 28px);
+  position: relative;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+}
+.card:hover {
+  border-color: rgba(255, 0, 160, 0.45);
+}
+
+.card h4 {
+  font-size: 19px;
+  letter-spacing: -.02em;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: #fff;
+}
+
+.card p {
+  color: var(--mute);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.card .when {
+  font: 500 11px/1 var(--mono);
+  letter-spacing: .08em;
+  color: var(--pink);
+  margin-bottom: 10px;
+  text-transform: uppercase;
+}
+
+.status {
+  display: inline-block;
+  font: 600 10.5px/1 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  padding: 4px 7px;
+  border-radius: 2px;
+  vertical-align: middle;
+  background: rgba(112, 109, 143, .35);
+  color: #fff;
+}
+.card .status {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+}
+.status.new {
+  background: var(--pink);
+}
+.status.keep {
+  background: var(--purple);
+}
+.status.plan {
+  background: #fff;
+  color: var(--pink-d);
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+
+/* Custom Campaign Buttons */
+.btn-pink {
+  background: var(--pink) !important;
+  color: #fff !important;
+  font-family: var(--mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  border: none !important;
+  font-weight: 600 !important;
+  border-radius: 3px !important;
+  transition: filter 0.15s ease !important;
+}
+.btn-pink:hover {
+  filter: brightness(1.12) !important;
+}
+
+.btn-purple {
+  background: var(--purple) !important;
+  color: #fff !important;
+  font-family: var(--mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  border: none !important;
+  font-weight: 600 !important;
+  border-radius: 3px !important;
+  transition: filter 0.15s ease !important;
+}
+.btn-purple:hover {
+  filter: brightness(1.15) !important;
+}
+
+.btn-outline {
+  background: transparent !important;
+  color: var(--mute) !important;
+  border: 1px solid var(--line) !important;
+  font-family: var(--mono) !important;
+  font-size: 11px !important;
+  letter-spacing: 0.06em !important;
+  text-transform: uppercase !important;
+  font-weight: 600 !important;
+  border-radius: 3px !important;
+  transition: all 0.15s ease !important;
+}
+.btn-outline:hover {
+  color: #fff !important;
+  border-color: var(--pink) !important;
+  background: rgba(255, 0, 160, 0.06) !important;
+}
+
+/* Top Toolbar */
+.toolbar-header {
+  height: 48px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Chat Post Mockups (.pm) */
+.pm {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.15s ease;
+}
+.pm:hover {
+  border-color: rgba(112, 109, 143, 0.5);
+}
+.pm.user {
+  background: rgba(36, 33, 50, 0.95);
+  border-color: rgba(101, 29, 221, 0.45);
+}
+.pm.agent {
+  border-color: rgba(255, 0, 160, 0.35);
+}
+.pm-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.pm-top .av {
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border-radius: 3px;
+  flex: none;
+  color: #fff;
+}
+.pm-top .av.pink {
+  background: var(--pink);
+}
+.pm-top .av.purple {
+  background: var(--purple);
+}
+.pm-top .who {
+  font: 600 13px/1.2 var(--sans);
+  letter-spacing: .02em;
+  color: #fff;
+}
+.pm-top .kind {
+  margin-left: auto;
+  font: 500 10.5px/1 var(--mono);
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--slate);
+}
+
+/* HTML and Markdown Preview */
 .html-preview {
-    flex: 1;
-    width: 100%;
-    border: 0;
-    background: #fff;
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: #fff;
 }
 
-/* Print is the PDF export: the dialog offers "Save as PDF" in every browser, so
-   this strips the page down to the rendered document. */
+/* Print Rules */
 @media print {
-    .shell {
-        display: block;
-        height: auto;
-    }
-
-    .no-print {
-        display: none !important;
-    }
-
-    /* The viewer scrolls on screen, and an overflow container prints only its
-       visible box -- which would cut a long note off at one page. */
-    .print-body {
-        display: block;
-        overflow: visible !important;
-        height: auto !important;
-        max-width: none;
-        padding: 0;
-        background: #fff;
-        color: #000;
-    }
-
-    .print-body :is(pre, blockquote, table, img, figure) {
-        break-inside: avoid;
-    }
-
-    .print-body :is(h1, h2, h3) {
-        break-after: avoid;
-    }
+  .shell {
+    display: block;
+    height: auto;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .print-body {
+    display: block;
+    overflow: visible !important;
+    height: auto !important;
+    max-width: none;
+    padding: 0;
+    background: #fff;
+    color: #000;
+  }
+  .print-body :is(pre, blockquote, table, img, figure) {
+    break-inside: avoid;
+  }
+  .print-body :is(h1, h2, h3) {
+    break-after: avoid;
+  }
 }

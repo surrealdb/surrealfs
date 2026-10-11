@@ -105,10 +105,17 @@ export function FileTree({
                 return (
                     <Group
                         {...elementProps}
-                        gap={4}
+                        gap={6}
                         wrap="nowrap"
-                        py={2}
-                        bg={item.value === selected ? "obsidian.7" : undefined}
+                        py={4}
+                        px={4}
+                        style={{
+                            background: item.value === selected ? "rgba(255, 0, 160, 0.12)" : undefined,
+                            borderLeft: item.value === selected ? "2px solid var(--pink)" : "2px solid transparent",
+                            borderRadius: "0 3px 3px 0",
+                            transition: "background 0.1s ease",
+                            cursor: "pointer",
+                        }}
                         // The twisty toggles; the name selects, so a folder can
                         // be renamed or deleted like anything else. Only an
                         // implicit folder -- a path segment with no row of its
@@ -133,6 +140,7 @@ export function FileTree({
                                     size="sm"
                                     style={{
                                         transform: expanded ? "rotate(90deg)" : undefined,
+                                        color: "var(--slate)",
                                     }}
                                 />
                             ) : null}
@@ -140,9 +148,18 @@ export function FileTree({
                         <Icon
                             path={dir ? iconOpenFolder : iconFile}
                             size="sm"
-                            c={item.entry ? undefined : "dimmed"}
+                            style={{
+                                color: dir ? "var(--purple)" : item.value === selected ? "var(--pink)" : "var(--slate)",
+                            }}
                         />
-                        <Text size="sm" truncate c={item.value === selected ? "bright" : undefined}>
+                        <Text
+                            size="sm"
+                            truncate
+                            style={{
+                                color: item.value === selected ? "#fff" : "var(--mute)",
+                                fontWeight: item.value === selected ? 500 : 400,
+                            }}
+                        >
                             {node.label}
                         </Text>
                     </Group>

@@ -240,6 +240,9 @@ export function App() {
             <Sidebar
                 entries={entries}
                 current={current}
+                view={view}
+                onViewChange={setView}
+                onGoHome={closeFile}
                 onOpen={guard(openFile)}
                 onRefresh={guard(() => loadTree())}
                 onCreate={askCreate}
@@ -281,6 +284,9 @@ export function App() {
                         entry={current}
                         entries={entries}
                         mode={mode}
+                        onCreateFile={() => askCreate(false)}
+                        onCreateFolder={() => askCreate(true)}
+                        onOpenCanvas={() => setView("canvas")}
                         onEdit={(text) => {
                             draft.current = text;
                             setDirty(true);

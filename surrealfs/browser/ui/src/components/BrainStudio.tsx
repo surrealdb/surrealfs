@@ -144,19 +144,19 @@ export function BrainStudio({
                 ctx.lineTo(targetPos.x, targetPos.y);
 
                 if (edge.relation === "contains") {
-                    ctx.strokeStyle = "rgba(255, 255, 255, 0.12)";
+                    ctx.strokeStyle = "rgba(112, 109, 143, 0.25)";
                     ctx.lineWidth = 1;
                     ctx.setLineDash([2, 4]);
                 } else if (edge.relation === "references" || edge.relation === "links_to") {
-                    ctx.strokeStyle = "rgba(255, 0, 85, 0.45)"; // surreal pink
+                    ctx.strokeStyle = "rgba(255, 0, 160, 0.65)"; // campaign pink
                     ctx.lineWidth = 2;
                     ctx.setLineDash([]);
                 } else if (edge.relation === "implements") {
-                    ctx.strokeStyle = "rgba(92, 124, 250, 0.5)"; // blue
+                    ctx.strokeStyle = "rgba(101, 29, 221, 0.75)"; // campaign purple
                     ctx.lineWidth = 2;
                     ctx.setLineDash([]);
                 } else {
-                    ctx.strokeStyle = "rgba(81, 207, 102, 0.4)"; // green
+                    ctx.strokeStyle = "rgba(61, 220, 151, 0.6)"; // campaign green
                     ctx.lineWidth = 1.5;
                     ctx.setLineDash([]);
                 }
@@ -177,33 +177,33 @@ export function BrainStudio({
                 ctx.arc(pos.x, pos.y, pos.radius, 0, Math.PI * 2);
 
                 if (node.is_folder) {
-                    ctx.fillStyle = isMatch ? "#fcc419" : "rgba(252, 196, 25, 0.3)";
+                    ctx.fillStyle = isMatch ? "#651ddd" : "rgba(101, 29, 221, 0.35)"; // purple
                 } else if (node.content_type.includes("markdown")) {
-                    ctx.fillStyle = isMatch ? "#ff0055" : "rgba(255, 0, 85, 0.3)";
+                    ctx.fillStyle = isMatch ? "#ff00a0" : "rgba(255, 0, 160, 0.35)"; // neon pink
                 } else if (node.content_type.includes("python") || node.content_type.includes("javascript")) {
-                    ctx.fillStyle = isMatch ? "#5c7cfa" : "rgba(92, 124, 250, 0.3)";
+                    ctx.fillStyle = isMatch ? "#3ddc97" : "rgba(61, 220, 151, 0.35)"; // green
                 } else {
-                    ctx.fillStyle = isMatch ? "#51cf66" : "rgba(81, 207, 102, 0.3)";
+                    ctx.fillStyle = isMatch ? "#ffb84d" : "rgba(255, 184, 77, 0.35)"; // amber
                 }
                 ctx.fill();
 
                 // Lock radar beacon ring
                 if (isLocked) {
                     ctx.lineWidth = 2;
-                    ctx.strokeStyle = "#ff6b6b";
+                    ctx.strokeStyle = "#ff00a0";
                     ctx.stroke();
 
                     ctx.beginPath();
                     ctx.arc(pos.x, pos.y, pos.radius + 6, 0, Math.PI * 2);
-                    ctx.strokeStyle = "rgba(255, 107, 107, 0.5)";
+                    ctx.strokeStyle = "rgba(255, 0, 160, 0.5)";
                     ctx.stroke();
                 }
 
                 // Label
                 ctx.fillStyle = isMatch ? "#ffffff" : "rgba(255, 255, 255, 0.4)";
-                ctx.font = "10px monospace";
+                ctx.font = "11px 'JetBrains Mono', monospace";
                 ctx.textAlign = "center";
-                ctx.fillText(node.label, pos.x, pos.y + pos.radius + 12);
+                ctx.fillText(node.label, pos.x, pos.y + pos.radius + 14);
             });
 
             ctx.restore();
@@ -341,10 +341,11 @@ export function BrainStudio({
                 <Card
                     withBorder
                     padding="xs"
-                    radius="md"
+                    radius="sm"
                     style={{
                         pointerEvents: "auto",
-                        background: "rgba(20, 21, 23, 0.85)",
+                        background: "rgba(36, 33, 50, 0.95)",
+                        borderColor: "var(--line)",
                         backdropFilter: "blur(8px)",
                         maxWidth: 320,
                     }}
@@ -355,16 +356,16 @@ export function BrainStudio({
                                 width: 8,
                                 height: 8,
                                 borderRadius: "50%",
-                                background: activity.locks.length > 0 ? "#ff6b6b" : "#51cf66",
-                                boxShadow: activity.locks.length > 0 ? "0 0 8px #ff6b6b" : "none",
+                                background: activity.locks.length > 0 ? "var(--pink)" : "var(--green)",
+                                boxShadow: activity.locks.length > 0 ? "0 0 8px var(--pink)" : "0 0 8px var(--green)",
                             }}
                         />
-                        <Text size="xs" fw={700}>
+                        <Text size="xs" fw={700} style={{ color: "#fff" }}>
                             Agent Presence Radar
                         </Text>
-                        <Badge size="xs" variant="light" color={activity.locks.length > 0 ? "red" : "gray"}>
+                        <span className={activity.locks.length > 0 ? "status new" : "status"} style={{ fontSize: 9 }}>
                             {activity.locks.length} active
-                        </Badge>
+                        </span>
                     </Group>
 
                     {activity.locks.length === 0 ? (
@@ -375,12 +376,12 @@ export function BrainStudio({
                         <Stack gap={4}>
                             {activity.locks.slice(0, 3).map((l: FileLockInfo, idx: number) => (
                                 <Group key={idx} justify="space-between" gap="xs">
-                                    <Text size="xs" ff="monospace" style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>
+                                    <Text size="xs" ff="monospace" style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", color: "#fff" }}>
                                         {l.path}
                                     </Text>
-                                    <Badge size="xs" color="red">
+                                    <span className="status new" style={{ fontSize: 9 }}>
                                         {l.holder}
-                                    </Badge>
+                                    </span>
                                 </Group>
                             ))}
                         </Stack>
@@ -393,26 +394,27 @@ export function BrainStudio({
                 <Paper
                     withBorder
                     p="xs"
-                    radius="md"
+                    radius="sm"
                     style={{
                         position: "absolute",
                         bottom: 16,
                         left: 16,
                         right: 16,
-                        background: "rgba(20, 21, 23, 0.9)",
+                        background: "rgba(36, 33, 50, 0.95)",
+                        borderColor: "var(--line)",
                         backdropFilter: "blur(8px)",
                     }}
                 >
                     <Group justify="space-between" mb={8}>
                         <Group gap="xs">
-                            <Text size="xs" fw={700}>
+                            <Text size="xs" fw={700} style={{ color: "#fff" }}>
                                 ⏱ Timeline Playback Scrubber
                             </Text>
                             {currentVersion && (
                                 <>
-                                    <Badge size="xs" color="blue">
+                                    <span className="status keep" style={{ fontSize: 9 }}>
                                         Gen {currentVersion.generation}
-                                    </Badge>
+                                    </span>
                                     <Text size="xs" ff="monospace" c="dimmed">
                                         {currentVersion.path}
                                     </Text>

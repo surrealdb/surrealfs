@@ -13,6 +13,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { api, formatSize, isJson, isText, raw } from "../api";
 import type { Mode } from "../App";
 import type { Entry } from "../types";
+import { CampaignHero } from "./CampaignHero";
 
 /** What `useEditor` wants for the file on screen, if it knows the language. */
 const LANGUAGES: Record<string, "json" | "yaml" | "html" | "markdown" | "python" | "bash"> = {
@@ -31,6 +32,9 @@ export function Viewer({
     entry,
     entries,
     mode,
+    onCreateFile,
+    onCreateFolder,
+    onOpenCanvas,
     onEdit,
     onReady,
     onError,
@@ -38,6 +42,9 @@ export function Viewer({
     entry: Entry | null;
     entries: Entry[];
     mode: Mode;
+    onCreateFile?: () => void;
+    onCreateFolder?: () => void;
+    onOpenCanvas?: () => void;
     onEdit: (text: string) => void;
     onReady: () => void;
     onError: (message: string) => void;
@@ -73,16 +80,26 @@ export function Viewer({
 
     if (!entry)
         return (
-            <Body>
-                <Text c="dimmed">Pick a file from the tree.</Text>
-            </Body>
+            <CampaignHero
+                onCreateFile={() => onCreateFile?.()}
+                onCreateFolder={() => onCreateFolder?.()}
+                onOpenCanvas={() => onOpenCanvas?.()}
+            />
         );
 
     if (entry.is_folder) {
         const inside = entries.filter((e) => e.path.startsWith(`${entry.path}/`)).length;
         return (
             <Body>
-                <Text c="dimmed">{inside} item(s) inside.</Text>
+                <Box p="xl" style={{ maxWidth: 760 }}>
+                    <div className="status keep">FOLDER</div>
+                    <h2 style={{ marginTop: 12, marginBottom: 8, color: "#fff", fontSize: 32 }}>
+                        {entry.path}
+                    </h2>
+                    <p style={{ color: "var(--mute)", fontSize: 16 }}>
+                        {inside} item(s) contained within this directory.
+                    </p>
+                </Box>
             </Body>
         );
     }
@@ -100,7 +117,9 @@ export function Viewer({
     if (ct === "text/markdown" && text !== null)
         return (
             <Body className="print-body">
-                <MarkdownViewer content={text} maw={860} />
+                <Box maw={980} mx="auto" px="md">
+                    <MarkdownViewer content={text} />
+                </Box>
             </Body>
         );
 
@@ -140,13 +159,14 @@ export function Viewer({
 
     return (
         <Body>
-            <Text c="dimmed" mb="md">
-                {ct} · {formatSize(entry.size)} — no preview.
+            <Text c="dimmed" mb="md" className="mono">
+                {ct} · {formatSize(entry.size)} — no inline preview.
             </Text>
             <Button
                 component="a"
                 href={raw(entry.path)}
                 download={entry.filename}
+                className="btn-pink"
                 leftSection={<Icon path={iconDownload} size="sm" />}
             >
                 Download
@@ -178,7 +198,7 @@ function Source({
 
 function Body({ children, className }: { children: ReactNode; className?: string }) {
     return (
-        <Box flex={1} mih={0} style={{ ...pad, overflow: "auto" }} className={className}>
+        <Box flex={1} mih={0} style={{ ...pad, overflow: "auto", background: "var(--bg)" }} className={className}>
             {children}
         </Box>
     );

@@ -1,9 +1,10 @@
-import { ActionIcon, Badge, Box, Button, Group, Paper, Stack, Text, Textarea } from "@mantine/core";
+import { ActionIcon, Box, Button, Group, Stack, Text, Textarea } from "@mantine/core";
 import { Icon, MarkdownViewer, Spinner, iconPlus, iconSend } from "@surrealdb/ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, json } from "../api";
 import type { Bubble } from "../types";
+import { SurrealGlyph } from "./SurrealLogo";
 
 const HINT =
     "Ask the agent to take notes. It reads and writes the same filesystem you are browsing.";
@@ -118,24 +119,30 @@ export function Chat({
     return (
         <Box
             className="pane no-print"
-            bg="obsidian.8"
             pos="relative"
-            style={{ borderLeft: "1px solid var(--mantine-color-obsidian-6)" }}
+            style={{
+                background: "var(--bg)",
+                borderLeft: "1px solid var(--line)",
+            }}
         >
             <Resizer />
 
             <Group
+                h={48}
+                px="md"
                 justify="space-between"
-                p="md"
-                style={{ borderBottom: "1px solid var(--mantine-color-obsidian-7)" }}
+                className="toolbar-header no-print"
+                style={{ borderBottom: "1px solid var(--line)" }}
             >
-                <Text size="xs" tt="uppercase">
-                    <span className="brand-mark">Agent chat</span>
-                </Text>
+                <Group gap="xs">
+                    <Text size="xs" className="mono" style={{ color: "#fff", fontWeight: 600 }}>
+                        Agent Assistant
+                    </Text>
+                    <span className="status plan" style={{ fontSize: 9 }}>ONLINE</span>
+                </Group>
                 <Button
                     size="compact-xs"
-                    variant="light"
-                    color="obsidian"
+                    className="btn-outline"
                     disabled={busy}
                     leftSection={<Icon path={iconPlus} size="xs" />}
                     onClick={newChat}
@@ -151,37 +158,62 @@ export function Chat({
                             // Bubbles are only ever appended to, and the last one is
                             // the one being written -- the index is a stable key.
                             // biome-ignore lint/suspicious/noArrayIndexKey: append-only
-                            <Paper key={i} p="sm" bg={bubble.who === "you" ? "obsidian.7" : undefined}>
-                                <Text size="xs" tt="uppercase" c="dimmed" mb={4}>
-                                    {bubble.who}
-                                </Text>
+                            <div className={`pm ${bubble.who === "you" ? "user" : "agent"}`} key={i}>
+                                <div className="pm-top">
+                                    <div className={`av ${bubble.who === "you" ? "purple" : "pink"}`}>
+                                        <SurrealGlyph style={{ width: 14, height: 14 }} />
+                                    </div>
+                                    <div className="who">
+                                        {bubble.who === "you" ? "You" : "Surreal Agent"}
+                                    </div>
+                                    <div className="kind">
+                                        {bubble.who === "you" ? "Prompt" : "Action / Response"}
+                                    </div>
+                                </div>
+
                                 {bubble.tools?.length ? (
-                                    <Group gap={4} mb="xs">
+                                    <Group gap={4} my={2}>
                                         {bubble.tools.map((tool, t) => (
                                             // biome-ignore lint/suspicious/noArrayIndexKey: append-only
-                                            <Badge key={t} size="xs" variant="light" tt="none">
+                                            <span
+                                                key={t}
+                                                className="status"
+                                                style={{
+                                                    fontSize: 10,
+                                                    background: "rgba(112, 109, 143, 0.25)",
+                                                }}
+                                            >
                                                 {tool}
-                                            </Badge>
+                                            </span>
                                         ))}
                                     </Group>
                                 ) : null}
+
                                 {bubble.who === "agent" && bubble.done ? (
                                     <MarkdownViewer content={bubble.text} fz="sm" />
                                 ) : (
-                                    <Text size="sm" style={{ whiteSpace: "pre-wrap" }}>
+                                    <Text size="sm" style={{ whiteSpace: "pre-wrap", color: "#fff" }}>
                                         {bubble.text}
                                     </Text>
                                 )}
                                 {bubble.who === "agent" && !bubble.done && !bubble.text ? (
                                     <Spinner size="sm" />
                                 ) : null}
-                            </Paper>
+                            </div>
                         ))}
                     </Stack>
                 ) : (
-                    <Text size="sm" c="dimmed">
-                        {HINT}
-                    </Text>
+                    <div className="card" style={{ background: "transparent", borderColor: "var(--line)" }}>
+                        <div className="when">AI NOTE-TAKING ASSISTANT</div>
+                        <h4>Swarm Memory & Filesystem</h4>
+                        <p>{HINT}</p>
+                        <div
+                            className="mono"
+                            style={{ marginTop: 12, fontSize: 11, color: "var(--slate)" }}
+                        >
+                            Connected to SurrealDB Vector & Hybrid Retrieval
+                        </div>
+                    </div>
                 )}
             </Box>
 
@@ -190,7 +222,10 @@ export function Chat({
                 gap="xs"
                 align="flex-end"
                 wrap="nowrap"
-                style={{ borderTop: "1px solid var(--mantine-color-obsidian-7)" }}
+                style={{
+                    borderTop: "1px solid var(--line)",
+                    background: "var(--panel)",
+                }}
             >
                 <Textarea
                     ref={box}
@@ -211,11 +246,12 @@ export function Chat({
                     }}
                 />
                 <ActionIcon
-                    variant="surreal"
+                    className="btn-pink"
                     size="lg"
                     aria-label="Send"
                     disabled={busy || !text.trim()}
                     onClick={() => void send()}
+                    style={{ height: 38, width: 38 }}
                 >
                     <Icon path={iconSend} size="sm" />
                 </ActionIcon>

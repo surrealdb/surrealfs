@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import { json } from "../api";
 import type { Entry, Hit } from "../types";
 import { FileTree } from "./FileTree";
+import { SurrealGlyph } from "./SurrealLogo";
 
 interface Results {
     hybrid: boolean;
@@ -21,6 +22,9 @@ interface Results {
 export function Sidebar({
     entries,
     current,
+    view = "editor",
+    onViewChange,
+    onGoHome,
     onOpen,
     onRefresh,
     onCreate,
@@ -28,6 +32,9 @@ export function Sidebar({
 }: {
     entries: Entry[];
     current: Entry | null;
+    view?: "editor" | "canvas";
+    onViewChange?: (view: "editor" | "canvas") => void;
+    onGoHome?: () => void;
     onOpen: (path: string) => void;
     onRefresh: () => void;
     onCreate: (folder: boolean) => void;
@@ -53,17 +60,49 @@ export function Sidebar({
     }, [debounced]);
 
     return (
-        <Box className="pane no-print" bg="obsidian.8" style={{ borderRight: "1px solid var(--mantine-color-obsidian-6)" }}>
-            <Box p="md" style={{ borderBottom: "1px solid var(--mantine-color-obsidian-7)" }}>
-                <Text size="xs" tt="uppercase">
-                    <span className="brand-mark">SurrealFS browser</span>
-                </Text>
-            </Box>
+        <Box className="side-rail no-print">
+            {/* Top Brand Block */}
+            <div className="side-brand">
+                <div
+                    className="gl"
+                    style={{ cursor: "pointer" }}
+                    onClick={onGoHome}
+                    title="Return to Home / Overview"
+                >
+                    <SurrealGlyph />
+                </div>
+                <div className="tag">
+                    SurrealFS<br />Virtual Agent Filesystem
+                </div>
+            </div>
 
-            <Stack gap="xs" p="sm" style={{ borderBottom: "1px solid var(--mantine-color-obsidian-7)" }}>
+            {/* Navigation Tracks */}
+            <div className="side-nav">
+                <div
+                    className={`side-nav-item ${view === "editor" ? "active" : ""}`}
+                    onClick={() => onViewChange?.("editor")}
+                >
+                    <span>Explorer</span>
+                    <span className="mono" style={{ fontSize: 10, opacity: 0.6 }}>
+                        {entries.length}
+                    </span>
+                </div>
+                <div
+                    className={`side-nav-item ${view === "canvas" ? "active" : ""}`}
+                    onClick={() => onViewChange?.("canvas")}
+                >
+                    <span>Brain Studio ✦</span>
+                    <span className="status keep" style={{ fontSize: 9, padding: "2px 5px" }}>
+                        2.0
+                    </span>
+                </div>
+            </div>
+
+            {/* Search and Action Bar */}
+            <Stack gap="xs" p="sm" style={{ borderBottom: "1px solid var(--line)" }}>
                 <TextInput
                     variant="surreal"
-                    placeholder="Search files…"
+                    placeholder="Search filesystem…"
                     autoComplete="off"
                     value={query}
                     leftSection={<Icon path={iconSearch} size="sm" />}
@@ -79,8 +118,7 @@ export function Sidebar({
                 <Group gap="xs" grow>
                     <Button
                         size="xs"
-                        variant="light"
-                        color="obsidian"
+                        className="btn-pink"
                         leftSection={<Icon path={iconPlus} size="sm" />}
                         onClick={() => onCreate(false)}
                     >
@@ -88,8 +126,7 @@ export function Sidebar({
                     </Button>
                     <Button
                         size="xs"
-                        variant="light"
-                        color="obsidian"
+                        className="btn-outline"
                         leftSection={<Icon path={iconFolderPlus} size="sm" />}
                         onClick={() => onCreate(true)}
                     >
@@ -97,18 +134,18 @@ export function Sidebar({
                     </Button>
                     <Button
                         size="xs"
-                        variant="light"
-                        color="obsidian"
+                        className="btn-outline"
                         aria-label="Reload the tree"
                         title="Reload the tree"
                         onClick={onRefresh}
-                        style={{ flexGrow: 0 }}
+                        style={{ flexGrow: 0, padding: "0 8px" }}
                     >
                         <Icon path={iconRefresh} size="sm" />
                     </Button>
                 </Group>
             </Stack>
 
+            {/* Flat / Search Result Tree */}
             <ScrollArea flex={1} p="xs">
                 {found ? (
                     found.results.length ? (
@@ -137,6 +174,12 @@ export function Sidebar({
                     />
                 )}
             </ScrollArea>
+
+            {/* Bottom Status Info */}
+            <div className="side-footer">
+                <div className="status-indicator">SurrealDB 3.x Online</div>
+                <div>ACID · Zero-Copy Branching</div>
+            </div>
         </Box>
     );
 }

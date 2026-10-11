@@ -1,4 +1,4 @@
-import { ActionIcon, Badge, Group, SegmentedControl, Text, Tooltip } from "@mantine/core";
+import { ActionIcon, Group, SegmentedControl, Text, Tooltip } from "@mantine/core";
 import {
     BreadcrumbButton,
     Icon,
@@ -41,10 +41,15 @@ export function Toolbar({
 }) {
     if (!current)
         return (
-            <Group className="no-print" h={48} px="md" justify="space-between" style={border}>
-                <Text c="dimmed" size="sm">
-                    {view === "canvas" ? "Spatial Brain Studio Canvas" : "Nothing open"}
-                </Text>
+            <Group className="toolbar-header no-print" justify="space-between">
+                <Group gap="sm">
+                    <Text size="xs" className="mono" style={{ color: "#fff", fontWeight: 600 }}>
+                        {view === "canvas" ? "Spatial Brain Studio" : "SurrealFS"}
+                    </Text>
+                    <span className={view === "canvas" ? "status keep" : "status new"}>
+                        {view === "canvas" ? "2D Graph" : "Overview"}
+                    </span>
+                </Group>
                 <SegmentedControl
                     size="xs"
                     value={view}
@@ -62,7 +67,7 @@ export function Toolbar({
     const known = new Set(entries.map((e) => e.path));
 
     return (
-        <Group className="no-print" h={48} px="md" gap="xs" wrap="nowrap" style={border}>
+        <Group className="toolbar-header no-print" gap="xs" wrap="nowrap">
             <Group gap={2} wrap="nowrap" style={{ overflow: "hidden" }}>
                 {segments.map((name, i) => {
                     const path = `/${segments.slice(0, i + 1).join("/")}`;
@@ -81,13 +86,9 @@ export function Toolbar({
                 })}
             </Group>
 
-            {dirty ? (
-                <Badge size="sm" color="yellow" variant="light">
-                    unsaved
-                </Badge>
-            ) : null}
+            {dirty ? <span className="status new">unsaved</span> : null}
 
-            <Text size="xs" c="dimmed" ff="monospace" style={{ whiteSpace: "nowrap" }}>
+            <Text size="xs" className="mono" style={{ color: "var(--mute)", whiteSpace: "nowrap" }}>
                 {current.is_folder ? "folder" : `${ct} · ${formatSize(current.size)}`}
             </Text>
 
@@ -116,7 +117,13 @@ export function Toolbar({
 
                 {view === "editor" && ct === "text/markdown" ? (
                     <Tooltip label="Print / save as PDF">
-                        <ActionIcon variant="light" color="obsidian" onClick={onPrint} aria-label="Print or save as PDF">
+                        <ActionIcon
+                            variant="light"
+                            color="obsidian"
+                            onClick={onPrint}
+                            aria-label="Print or save as PDF"
+                            style={{ border: "1px solid var(--line)" }}
+                        >
                             <Icon path={iconDownload} size="sm" />
                         </ActionIcon>
                     </Tooltip>
@@ -124,7 +131,14 @@ export function Toolbar({
 
                 {view === "editor" && !current.is_folder && isText(ct) ? (
                     <Tooltip label="Save (⌘S)">
-                        <ActionIcon variant="surreal" disabled={!dirty} onClick={onSave} aria-label="Save">
+                        <ActionIcon
+                            variant="filled"
+                            color="pink"
+                            disabled={!dirty}
+                            onClick={onSave}
+                            aria-label="Save"
+                            style={{ background: dirty ? "var(--pink)" : undefined }}
+                        >
                             <Icon path={iconFloppy} size="sm" />
                         </ActionIcon>
                     </Tooltip>
@@ -132,7 +146,13 @@ export function Toolbar({
 
                 {view === "editor" && (
                     <Tooltip label="Rename or move">
-                        <ActionIcon variant="light" color="obsidian" onClick={onRename} aria-label="Rename or move">
+                        <ActionIcon
+                            variant="light"
+                            color="obsidian"
+                            onClick={onRename}
+                            aria-label="Rename or move"
+                            style={{ border: "1px solid var(--line)" }}
+                        >
                             <Icon path={iconEdit} size="sm" />
                         </ActionIcon>
                     </Tooltip>
@@ -140,7 +160,13 @@ export function Toolbar({
 
                 {view === "editor" && (
                     <Tooltip label="Delete">
-                        <ActionIcon variant="light" color="red" onClick={onDelete} aria-label="Delete">
+                        <ActionIcon
+                            variant="light"
+                            color="red"
+                            onClick={onDelete}
+                            aria-label="Delete"
+                            style={{ border: "1px solid var(--line)" }}
+                        >
                             <Icon path={iconTrash} size="sm" />
                         </ActionIcon>
                     </Tooltip>
@@ -149,5 +175,3 @@ export function Toolbar({
         </Group>
     );
 }
-
-const border = { borderBottom: "1px solid var(--mantine-color-obsidian-7)", flexShrink: 0 };
