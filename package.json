@@ -1,0 +1,10 @@
+{
+  "name": "surrealfs",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "browser": "bun packages/sdk-ts/src/browser-server.ts",
+    "test:ts": "cd packages/sdk-ts && bun test",
+    "build:ui": "cd surrealfs/browser/ui && bun run build"
+  }
+}

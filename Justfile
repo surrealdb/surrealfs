@@ -45,6 +45,10 @@ ui-dev:
 browser *ARGS: ui
     uv run --extra browser python -m surrealfs.browser {{ARGS}}
 
+# Browse the filesystem in a web UI using native Bun on http://127.0.0.1:7933
+browser-bun *ARGS:
+    bun run browser {{ARGS}}
+
 # Run the MCP server over stdio, as an MCP client launches it.
 # `agent-memory` too: the repo .env this dotenv-loads carries a key, and a key without
 # that extra is refused. Drop it to see the filesystem-only surface.

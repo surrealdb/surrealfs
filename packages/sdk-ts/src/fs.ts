@@ -115,6 +115,22 @@ export class SurrealFs {
     return results;
   }
 
+  async lsRecursive(path: string = "/", maxDepth: number = 20): Promise<FileEntry[]> {
+    const results: FileEntry[] = [];
+    const walk = async (current: string, depth: number) => {
+      if (depth > maxDepth) return;
+      const entries = await this.ls(current);
+      for (const entry of entries) {
+        results.push(entry);
+        if (entry.isFolder) {
+          await walk(entry.path, depth + 1);
+        }
+      }
+    };
+    await walk(normalize(path), 1);
+    return results;
+  }
+
   async readText(path: string): Promise<string> {
     const clean = normalize(path);
     try {
