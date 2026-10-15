@@ -78,6 +78,30 @@ DEFINE FUNCTION OVERWRITE fn::sfs_is_member($group: string, $me: option<string>)
     RETURN $found IS NOT NONE;
 };
 
+-- Resolve effective caller identity: record auth always wins over $caller parameter.
+DEFINE FUNCTION OVERWRITE fn::sfs_caller($caller: option<string>) {
+    RETURN IF $auth IS NOT NONE
+        THEN fn::sfs_me()
+        ELSE IF $caller IS NOT NONE AND $caller != ''
+        THEN $caller
+        ELSE 'root'
+    END;
+};
+
+-- Segment-boundary prefix match so `/docs` matches `/docs` and `/docs/a.md`
+-- without matching `/docs-private/secret.md`.
+DEFINE FUNCTION OVERWRITE fn::sfs_under_prefix($path: string, $prefix: option<string>) {
+    IF $prefix IS NONE OR $prefix = '' OR $prefix = '/' {
+        RETURN true;
+    };
+    LET $clean = IF string::ends_with($prefix, '/')
+        THEN string::slice($prefix, 0, string::len($prefix) - 1)
+        ELSE $prefix
+    END;
+    RETURN $path = $clean OR string::starts_with($path, $clean + '/');
+};
+
+
 DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
     IF $parent IS NONE {
         RETURN NONE;
@@ -349,7 +373,7 @@ DEFINE FIELD OVERWRITE path ON file COMPUTED (
     ($this.parent.path || '') + '/' + <string>$this.filename
 ) TYPE string;
 DEFINE FIELD OVERWRITE is_folder ON TABLE file COMPUTED (
-    $this.file IS NONE AND $this.content IS NONE AND $this.symlink IS NONE
+    $this.file IS NONE AND $this.content IS NONE AND $this.symlink IS NONE AND ($this.content_type = 'inode/directory' OR $this.size IS NONE)
 );
 
 -- Who may traverse down to this row: NONE when every directory above it is
@@ -374,29 +398,29 @@ DEFINE FIELD OVERWRITE gate ON TABLE file TYPE option<string>
 -- precise: it has to stay permissive enough for a rename, which unix keys on
 -- the folder instead. These are what a content write actually touches.
 DEFINE FIELD OVERWRITE file       ON TABLE file TYPE option<bytes> DEFAULT NONE
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group);
 DEFINE FIELD OVERWRITE content    ON TABLE file TYPE option<string> DEFAULT NONE
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group);
 DEFINE FIELD OVERWRITE symlink    ON TABLE file TYPE option<file> DEFAULT NONE
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group);
 DEFINE FIELD OVERWRITE content_type ON TABLE file TYPE string
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group);
 DEFINE FIELD OVERWRITE meta        ON TABLE file TYPE option<object> FLEXIBLE DEFAULT NONE
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group);
 DEFINE FIELD OVERWRITE crdt        ON TABLE file TYPE bool DEFAULT false
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group);
 DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT ''
     PERMISSIONS FOR update WHERE false;
 DEFINE FIELD OVERWRITE size       ON TABLE file TYPE option<int> DEFAULT NONE
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group);
 DEFINE FIELD OVERWRITE language   ON TABLE file TYPE option<string> DEFAULT NONE
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group) OR $access = 'indexer';
 DEFINE FIELD OVERWRITE encoding   ON TABLE file TYPE option<string> DEFAULT 'utf-8'
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group) OR $access = 'indexer';
 DEFINE FIELD OVERWRITE is_generated ON TABLE file TYPE bool DEFAULT false
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group) OR $access = 'indexer';
 DEFINE FIELD OVERWRITE digest     ON TABLE file TYPE option<string> DEFAULT NONE
-    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me()) OR $access = 'indexer';
+    PERMISSIONS FOR update WHERE fn::sfs_w_grp(owner, mode, fn::sfs_me(), group) OR $access = 'indexer';
 
 -- Timestamps
 DEFINE FIELD OVERWRITE created_at ON TABLE file TYPE datetime VALUE time::now() READONLY;
@@ -624,7 +648,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_text(
 ) {
     LET $who = fn::sfs_searcher($me);
     LET $terms = array::distinct(search::analyze('fts_simple', $q));
-    RETURN SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+    RETURN SELECT id, filename, path, content_type, is_folder, owner, group, mode, gate,
             hash, generation, created_at, updated_at, content,
             IF content IS NOT NONE THEN string::len(content)
             ELSE IF file IS NOT NONE THEN bytes::len(file)
@@ -634,7 +658,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_text(
         WHERE content @1,OR@ $q
           AND ($match != 'all' OR array::len(array::intersect(
                   $terms, search::analyze('fts_simple', content))) = array::len($terms))
-          AND ($who = 'root' OR fn::sfs_can_read(gate, owner, mode, $who))
+          AND ($who = 'root' OR fn::sfs_can_read_grp(gate, owner, mode, $who, group))
         -- `path` breaks ties, matching `hits.sort(key=(-score, path))` in
         -- `fs.py`. Ties are common, not exotic: see the BM25 note above -- every
         -- score is 0.0 for a term held by more than about half the corpus, and
@@ -667,7 +691,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_semantic(
     $qvec: array<float>, $k: option<int>, $me: option<string>
 ) {
     LET $who = fn::sfs_searcher($me);
-    RETURN SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+    RETURN SELECT id, filename, path, content_type, is_folder, owner, group, mode, gate,
             hash, generation, created_at, updated_at, content,
             IF content IS NOT NONE THEN string::len(content)
             ELSE IF file IS NOT NONE THEN bytes::len(file)
@@ -675,14 +699,14 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_semantic(
             vector::distance::knn() AS distance
         FROM file
         WHERE embedding <|80,160|> $qvec
-          AND ($who = 'root' OR fn::sfs_can_read(gate, owner, mode, $who))
+          AND ($who = 'root' OR fn::sfs_can_read_grp(gate, owner, mode, $who, group))
         ORDER BY distance ASC
         LIMIT $k ?? 20;
 };
 
 -- Semantic search over fine-grained file sections
 DEFINE FUNCTION OVERWRITE fn::sfs_search_sections(
-    $qvec: array<float>, $k: option<int>, $me: option<string>
+    $qvec: array<float>, $k: option<int>, $me: option<string>, $path_prefix: option<string>
 ) {
     LET $who = fn::sfs_searcher($me);
     LET $lim = $k ?? 20;
@@ -695,7 +719,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_sections(
             vector::distance::knn() AS distance
         FROM file_section
         WHERE embedding <|80,160|> $qvec
-          AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who))
+          AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who, file_id.group))
+          AND fn::sfs_under_prefix(file_id.path, $path_prefix)
         ORDER BY distance ASC
         LIMIT $lim;
 };
@@ -749,8 +774,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_grep(
     RETURN SELECT id, filename, path, content
         FROM file
         WHERE content IS NOT NONE
-          AND ($who IS NONE OR fn::sfs_can_read(gate, owner, mode, $who))
-          AND ($path_prefix IS NONE OR string::starts_with(path, $path_prefix))
+          AND ($who = 'root' OR fn::sfs_can_read_grp(gate, owner, mode, $who, group))
+          AND fn::sfs_under_prefix(path, $path_prefix)
           AND string::matches(content, $pattern);
 };
 
@@ -761,7 +786,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_grep(
 -- Content Chunking & Manifest: file_chunk
 DEFINE TABLE OVERWRITE file_chunk SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me(), file.group)
         FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE file         ON file_chunk TYPE record<file>;
 DEFINE FIELD OVERWRITE chunk_index  ON file_chunk TYPE option<int>;
@@ -780,7 +805,9 @@ DEFINE INDEX OVERWRITE idx_hnsw_chunk_embedding ON file_chunk FIELDS embedding
 
 -- Content-Addressed Blob Storage (BLAKE3)
 DEFINE TABLE OVERWRITE blob SCHEMAFULL
-    PERMISSIONS FOR select, create, update, delete FULL;
+    PERMISSIONS
+        FOR select WHERE fn::sfs_me() = 'root' OR scope = fn::sfs_me()
+        FOR create, update, delete WHERE fn::sfs_me() = 'root' OR scope = fn::sfs_me();
 DEFINE FIELD OVERWRITE size       ON blob TYPE int;
 DEFINE FIELD OVERWRITE stored     ON blob TYPE int;
 DEFINE FIELD OVERWRITE codec      ON blob TYPE string;
@@ -794,7 +821,8 @@ DEFINE INDEX OVERWRITE idx_blob_scope ON blob FIELDS scope;
 
 -- Upload Sessions
 DEFINE TABLE OVERWRITE upload SCHEMAFULL
-    PERMISSIONS FOR select, create, update, delete FULL;
+    PERMISSIONS
+        FOR select, create, update, delete WHERE fn::sfs_me() = 'root' OR caller = fn::sfs_me();
 DEFINE FIELD OVERWRITE path            ON upload TYPE string;
 DEFINE FIELD OVERWRITE caller          ON upload TYPE string;
 DEFINE FIELD OVERWRITE scope           ON upload TYPE string;
@@ -806,7 +834,9 @@ DEFINE FIELD OVERWRITE expires_at      ON upload TYPE datetime DEFAULT time::now
 
 -- Disk Usage & Instant du
 DEFINE TABLE OVERWRITE usage SCHEMAFULL
-    PERMISSIONS FOR select, create, update, delete FULL;
+    PERMISSIONS
+        FOR select WHERE fn::sfs_me() = 'root' OR scope = fn::sfs_me()
+        FOR create, update, delete WHERE fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE scope         ON usage TYPE string;
 DEFINE FIELD OVERWRITE path          ON usage TYPE string;
 DEFINE FIELD OVERWRITE files         ON usage TYPE int DEFAULT 0;
@@ -817,7 +847,9 @@ DEFINE INDEX OVERWRITE idx_usage_scope_path ON usage FIELDS scope, path UNIQUE;
 
 -- Quotas
 DEFINE TABLE OVERWRITE quota SCHEMAFULL
-    PERMISSIONS FOR select, create, update, delete FULL;
+    PERMISSIONS
+        FOR select WHERE fn::sfs_me() = 'root' OR scope = fn::sfs_me()
+        FOR create, update, delete WHERE fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE scope         ON quota TYPE string;
 DEFINE FIELD OVERWRITE max_bytes     ON quota TYPE int;
 DEFINE FIELD OVERWRITE max_files     ON quota TYPE option<int>;
@@ -826,7 +858,7 @@ DEFINE INDEX OVERWRITE idx_quota_scope ON quota FIELDS scope UNIQUE;
 -- Section-level AST / Markdown Chunking: file_section
 DEFINE TABLE OVERWRITE file_section SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group)
         FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE file_id     ON file_section TYPE record<file>;
 DEFINE FIELD OVERWRITE section_idx ON file_section TYPE int;
@@ -842,7 +874,7 @@ DEFINE INDEX IF NOT EXISTS idx_section_hnsw ON file_section FIELDS embedding HNS
 -- Version History: file_version
 DEFINE TABLE OVERWRITE file_version SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(gate, owner, mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(IF file.id IS NOT NONE THEN fn::sfs_gate(file.parent) ELSE gate END, owner, mode, fn::sfs_me(), file.group)
         FOR create, update, delete WHERE false; -- Written strictly by EVENT triggers
 DEFINE FIELD OVERWRITE file        ON file_version TYPE record<file>;
 DEFINE FIELD OVERWRITE generation  ON file_version TYPE int;
@@ -921,7 +953,7 @@ DEFINE INDEX OVERWRITE idx_job_status ON sfs_job FIELDS status, locked_until;
 -- Code Symbol Index: symbol
 DEFINE TABLE OVERWRITE symbol SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group)
         FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE file_id    ON symbol TYPE record<file>;
 DEFINE FIELD OVERWRITE name       ON symbol TYPE string;
@@ -939,7 +971,7 @@ DEFINE INDEX OVERWRITE idx_symbol_qualified ON symbol FIELDS qualified;
 -- Hierarchical Folder Digests: folder_digest
 DEFINE TABLE OVERWRITE folder_digest SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(folder_id.parent), folder_id.owner, folder_id.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(folder_id.parent), folder_id.owner, folder_id.mode, fn::sfs_me(), folder_id.group)
         FOR create, update, delete WHERE $access = 'indexer' OR fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE folder_id     ON folder_digest TYPE record<file>;
 DEFINE FIELD OVERWRITE path          ON folder_digest TYPE string;
@@ -954,33 +986,33 @@ DEFINE INDEX OVERWRITE idx_folder_digest_folder ON folder_digest FIELDS folder_i
 -- Knowledge Graph Relations
 DEFINE TABLE OVERWRITE references   SCHEMAFULL TYPE RELATION IN file OUT file
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
-                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
-        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group)
+                     AND fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me(), out.group)
+        FOR create, delete WHERE fn::sfs_can_write_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group);
 
 DEFINE TABLE OVERWRITE supersedes   SCHEMAFULL TYPE RELATION IN file OUT file
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
-                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
-        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group)
+                     AND fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me(), out.group)
+        FOR create, delete WHERE fn::sfs_can_write_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group);
 
 DEFINE TABLE OVERWRITE derives_from SCHEMAFULL TYPE RELATION IN file OUT file
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
-                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
-        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group)
+                     AND fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me(), out.group)
+        FOR create, delete WHERE fn::sfs_can_write_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group);
 
 DEFINE TABLE OVERWRITE implements   SCHEMAFULL TYPE RELATION IN file OUT file
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
-                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
-        FOR create, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group)
+                     AND fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me(), out.group)
+        FOR create, delete WHERE fn::sfs_can_write_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group);
 
 DEFINE TABLE OVERWRITE links_to     SCHEMAFULL TYPE RELATION IN file OUT file
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
-                     AND fn::sfs_can_read(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me())
-        FOR create, update, delete WHERE fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group)
+                     AND fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, fn::sfs_me(), out.group)
+        FOR create, update, delete WHERE fn::sfs_can_write_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group);
 
 -- Entities & Mentions (Section 20.7)
 DEFINE TABLE OVERWRITE entity SCHEMAFULL
@@ -994,14 +1026,14 @@ DEFINE INDEX OVERWRITE idx_entity_name_kind ON entity FIELDS name, kind UNIQUE;
 
 DEFINE TABLE OVERWRITE mentions SCHEMAFULL TYPE RELATION IN file OUT entity
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me())
-        FOR create, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer' OR fn::sfs_can_write(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me());
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group)
+        FOR create, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer' OR fn::sfs_can_write_grp(fn::sfs_gate(in.parent), in.owner, in.mode, fn::sfs_me(), in.group);
 
 -- Tabular Data: file_row (Section 21.6)
 DEFINE TABLE OVERWRITE file_row SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
-        FOR create, update, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer' OR fn::sfs_can_write(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me());
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group)
+        FOR create, update, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer' OR fn::sfs_can_write_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group);
 DEFINE FIELD OVERWRITE file_id  ON file_row TYPE record<file>;
 DEFINE FIELD OVERWRITE sheet    ON file_row TYPE option<string> DEFAULT NONE;
 DEFINE FIELD OVERWRITE row_idx  ON file_row TYPE int;
@@ -1011,7 +1043,7 @@ DEFINE INDEX OVERWRITE idx_file_row_pos ON file_row FIELDS file_id, row_idx UNIQ
 -- Git commit history mapping (§21.5)
 DEFINE TABLE OVERWRITE git_commit SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE true
+        FOR select WHERE fn::sfs_me() IS NOT NONE
         FOR create, update, delete WHERE fn::sfs_me() = 'root' OR $access = 'indexer';
 DEFINE FIELD OVERWRITE sha          ON TABLE git_commit TYPE string;
 DEFINE FIELD OVERWRITE author_name  ON TABLE git_commit TYPE string;
@@ -1041,9 +1073,9 @@ DEFINE INDEX OVERWRITE idx_credential_lookup ON TABLE credential FIELDS kind, id
 -- Swarm Advisory Leases: file_lock
 DEFINE TABLE OVERWRITE file_lock SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me(), file.group)
         FOR create WHERE holder = fn::sfs_me()
-                     AND fn::sfs_can_write(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me())
+                     AND fn::sfs_can_write_grp(fn::sfs_gate(file.parent), file.owner, file.mode, fn::sfs_me(), file.group)
         FOR update, delete WHERE holder = fn::sfs_me() OR expires_at < time::now();
 DEFINE FIELD OVERWRITE file        ON file_lock TYPE record<file>;
 DEFINE FIELD OVERWRITE path        ON file_lock TYPE string;
@@ -1067,10 +1099,10 @@ DEFINE INDEX OVERWRITE idx_workspace_owner_name ON workspace FIELDS owner, name 
 -- Branch Tracking: file_branch
 DEFINE TABLE OVERWRITE file_branch SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(base_file.parent), base_file.owner, base_file.mode, fn::sfs_me())
+        FOR select WHERE base_file IS NONE OR fn::sfs_can_read_grp(fn::sfs_gate(base_file.parent), base_file.owner, base_file.mode, fn::sfs_me(), base_file.group)
         FOR create, update, delete WHERE workspace.owner = fn::sfs_me();
 DEFINE FIELD OVERWRITE workspace   ON file_branch TYPE record<workspace>;
-DEFINE FIELD OVERWRITE base_file   ON file_branch TYPE record<file>;
+DEFINE FIELD OVERWRITE base_file   ON file_branch TYPE option<record<file>>;
 DEFINE FIELD OVERWRITE path        ON file_branch TYPE string;
 DEFINE FIELD OVERWRITE branched_at ON file_branch TYPE datetime DEFAULT time::now();
 DEFINE FIELD OVERWRITE base_gen    ON file_branch TYPE int DEFAULT 1;
@@ -1080,7 +1112,7 @@ DEFINE INDEX OVERWRITE idx_branch_ws_path ON file_branch FIELDS workspace, path 
 -- CRDT Peer State
 DEFINE TABLE OVERWRITE file_crdt SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group)
         FOR create, update, delete WHERE peer_owner = fn::sfs_me();
 DEFINE FIELD OVERWRITE file_id     ON file_crdt TYPE record<file>;
 DEFINE FIELD OVERWRITE peer_id     ON file_crdt TYPE string;
@@ -1093,9 +1125,9 @@ DEFINE INDEX OVERWRITE idx_file_crdt ON file_crdt FIELDS file_id, peer_id UNIQUE
 -- CRDT Update Log (append-only)
 DEFINE TABLE OVERWRITE file_crdt_update SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group)
         FOR create WHERE author = fn::sfs_me()
-                     AND fn::sfs_can_write(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+                     AND fn::sfs_can_write_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group)
         FOR update, delete NONE;
 DEFINE FIELD OVERWRITE file_id      ON file_crdt_update TYPE record<file>;
 DEFINE FIELD OVERWRITE seq          ON file_crdt_update TYPE int;
@@ -1108,7 +1140,7 @@ DEFINE INDEX OVERWRITE idx_crdt_seq ON file_crdt_update FIELDS file_id, seq UNIQ
 -- CRDT Snapshot
 DEFINE TABLE OVERWRITE file_crdt_snapshot SCHEMAFULL
     PERMISSIONS
-        FOR select WHERE fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me())
+        FOR select WHERE fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, fn::sfs_me(), file_id.group)
         FOR create, update, delete WHERE author = fn::sfs_me() OR fn::sfs_me() = 'root';
 DEFINE FIELD OVERWRITE file_id    ON file_crdt_snapshot TYPE record<file>;
 DEFINE FIELD OVERWRITE upto       ON file_crdt_snapshot TYPE int;
@@ -1184,7 +1216,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_stat($path: string) {
 -- List children of a folder path
 DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
     IF $path = '/' {
-        RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+        RETURN (SELECT id, filename, path, content_type, is_folder, owner, group, mode, gate,
                        hash, generation, created_at, updated_at, meta, crdt,
                        IF size IS NOT NONE THEN size
                        ELSE IF content IS NOT NONE THEN string::len(content)
@@ -1198,7 +1230,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
-    RETURN (SELECT id, filename, path, content_type, is_folder, owner, mode, gate,
+    RETURN (SELECT id, filename, path, content_type, is_folder, owner, group, mode, gate,
                    hash, generation, created_at, updated_at, meta, crdt,
                    IF size IS NOT NONE THEN size
                    ELSE IF content IS NOT NONE THEN string::len(content)
@@ -1211,14 +1243,21 @@ DEFINE FUNCTION OVERWRITE fn::sfs_ls($path: string) {
 
 -- Atomic append to a text file
 DEFINE FUNCTION OVERWRITE fn::sfs_append(
-    $path: any, $suffix: string, $if_generation: any, $caller: any
+    $path: any, $suffix: string, $if_generation: option<int>, $caller: option<string>
 ) {
     LET $id = IF type::is_record($path) THEN $path ELSE fn::sfs_resolve($path) END;
     IF $id IS NONE { THROW 'sfs:not_found' };
+    LET $curr = (SELECT is_folder, gate, owner, group, mode FROM ONLY $id);
+    IF $curr IS NONE { THROW 'sfs:not_found' };
+    IF $curr.is_folder { THROW 'sfs:is_a_directory' };
+    LET $who = fn::sfs_caller($caller);
+    IF $who != 'root' AND !fn::sfs_can_write_grp($curr.gate, $curr.owner, $curr.mode, $who, $curr.group) {
+        THROW 'sfs:denied';
+    };
     LET $r = UPDATE $id SET content = (content ?? '') + $suffix
-        WHERE $if_generation = NONE OR $if_generation = NULL OR generation = $if_generation;
+        WHERE $if_generation IS NONE OR generation = $if_generation;
     IF array::len($r) = 0 { THROW 'sfs:conflict' };
-    RETURN (SELECT id, filename, path, content, content_type, is_folder, owner, mode, gate,
+    RETURN (SELECT id, filename, path, content, content_type, is_folder, owner, group, mode, gate,
                    hash, generation, created_at, updated_at, meta, crdt,
                    IF content IS NOT NONE THEN string::len(content)
                    ELSE IF file IS NOT NONE THEN bytes::len(file)
@@ -1234,7 +1273,11 @@ DEFINE FUNCTION OVERWRITE fn::sfs_acquire_lock(
     IF $file_id IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $who = fn::sfs_me() ?? $holder ?? 'root';
+    LET $who = fn::sfs_caller($holder);
+    LET $frow = (SELECT gate, owner, group, mode FROM ONLY $file_id);
+    IF $who != 'root' AND !fn::sfs_can_write_grp($frow.gate, $frow.owner, $frow.mode, $who, $frow.group) {
+        THROW 'sfs:denied';
+    };
     LET $ttl = $ttl_seconds ?? 60;
     LET $exp = time::now() + duration::from_secs($ttl);
     LET $existing = (SELECT * FROM ONLY file_lock WHERE file = $file_id);
@@ -1260,7 +1303,11 @@ DEFINE FUNCTION OVERWRITE fn::sfs_release_lock($path: string, $holder: option<st
     IF $file_id IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $who = fn::sfs_me() ?? $holder ?? 'root';
+    LET $who = fn::sfs_caller($holder);
+    LET $frow = (SELECT gate, owner, group, mode FROM ONLY $file_id);
+    IF $who != 'root' AND !fn::sfs_can_write_grp($frow.gate, $frow.owner, $frow.mode, $who, $frow.group) {
+        THROW 'sfs:denied';
+    };
     LET $existing = (SELECT * FROM ONLY file_lock WHERE file = $file_id);
     IF $existing IS NONE {
         RETURN true;
@@ -1273,10 +1320,17 @@ DEFINE FUNCTION OVERWRITE fn::sfs_release_lock($path: string, $holder: option<st
 };
 
 -- Atomic chmod
-DEFINE FUNCTION OVERWRITE fn::sfs_chmod($path: string, $mode: int) {
+DEFINE FUNCTION OVERWRITE fn::sfs_chmod($path: string, $mode: int, $caller: option<string>) {
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
+    };
+    IF $caller IS NOT NONE OR fn::sfs_me() IS NOT NONE {
+        LET $who = fn::sfs_caller($caller);
+        LET $frow = (SELECT owner FROM ONLY $id);
+        IF $who != 'root' AND $who != $frow.owner {
+            THROW 'sfs:denied';
+        };
     };
     LET $r = UPDATE $id SET mode = $mode;
     IF array::len($r) = 0 {
@@ -1286,8 +1340,26 @@ DEFINE FUNCTION OVERWRITE fn::sfs_chmod($path: string, $mode: int) {
 };
 
 -- Return version history for a path (newest first)
-DEFINE FUNCTION OVERWRITE fn::sfs_history($path: string, $limit: option<int>) {
+DEFINE FUNCTION OVERWRITE fn::sfs_history($path: string, $limit: option<int>, $caller: option<string>) {
     LET $lim = $limit ?? 20;
+    IF $caller IS NOT NONE OR fn::sfs_me() IS NOT NONE {
+        LET $who = fn::sfs_caller($caller);
+        IF $who != 'root' {
+            LET $id = fn::sfs_resolve($path);
+            IF $id IS NOT NONE {
+                LET $frow = (SELECT gate, owner, group, mode FROM ONLY $id);
+                IF !fn::sfs_can_read_grp($frow.gate, $frow.owner, $frow.mode, $who, $frow.group) {
+                    THROW 'sfs:denied';
+                };
+            };
+            LET $all = (SELECT id, file, generation, path, content_type, hash, author, owner, mode, gate, op, size, created_at FROM file_version WHERE path = $path ORDER BY created_at DESC, generation DESC LIMIT $lim);
+            LET $readable = array::filter($all, |$v| fn::sfs_can_read_grp($v.gate, $v.owner, $v.mode, $who, NONE));
+            IF array::len($all) > 0 AND array::len($readable) = 0 {
+                THROW 'sfs:denied';
+            };
+            RETURN $readable;
+        };
+    };
     RETURN (
         SELECT id, file, generation, path, content_type, hash, author, owner, mode, op, size, created_at
         FROM file_version
@@ -1298,24 +1370,56 @@ DEFINE FUNCTION OVERWRITE fn::sfs_history($path: string, $limit: option<int>) {
 };
 
 -- Fetch content of a specific historical version
-DEFINE FUNCTION OVERWRITE fn::sfs_version_content($path: string, $generation: int) {
-    LET $v = (SELECT content, file_bytes FROM ONLY file_version
+DEFINE FUNCTION OVERWRITE fn::sfs_version_content($path: string, $generation: int, $caller: option<string>) {
+    IF $caller IS NOT NONE OR fn::sfs_me() IS NOT NONE {
+        LET $who = fn::sfs_caller($caller);
+        IF $who != 'root' {
+            LET $id = fn::sfs_resolve($path);
+            IF $id IS NOT NONE {
+                LET $frow = (SELECT gate, owner, group, mode FROM ONLY $id);
+                IF !fn::sfs_can_read_grp($frow.gate, $frow.owner, $frow.mode, $who, $frow.group) {
+                    THROW 'sfs:denied';
+                };
+            };
+        };
+    };
+    LET $v = (SELECT content, file_bytes, gate, owner, mode FROM ONLY file_version
               WHERE path = $path AND generation = $generation
               LIMIT 1);
     IF $v IS NONE {
         THROW 'sfs:not_found';
+    };
+    IF $caller IS NOT NONE OR fn::sfs_me() IS NOT NONE {
+        LET $who = fn::sfs_caller($caller);
+        IF $who != 'root' AND !fn::sfs_can_read_grp($v.gate, $v.owner, $v.mode, $who, NONE) {
+            THROW 'sfs:denied';
+        };
     };
     RETURN $v;
 };
 
 -- Relate two files via a named relation edge
 DEFINE FUNCTION OVERWRITE fn::sfs_relate(
-    $from_path: string, $relation: string, $to_path: string
+    $from_path: string, $relation: string, $to_path: string, $caller: option<string>
 ) {
     LET $from_id = fn::sfs_resolve($from_path);
     IF $from_id IS NONE { THROW 'sfs:not_found' };
     LET $to_id = fn::sfs_resolve($to_path);
     IF $to_id IS NONE { THROW 'sfs:not_found' };
+
+    IF $caller IS NOT NONE OR fn::sfs_me() IS NOT NONE {
+        LET $who = fn::sfs_caller($caller);
+        IF $who != 'root' {
+            LET $from_row = (SELECT gate, owner, group, mode FROM ONLY $from_id);
+            IF !fn::sfs_can_write_grp($from_row.gate, $from_row.owner, $from_row.mode, $who, $from_row.group) {
+                THROW 'sfs:denied';
+            };
+            LET $to_row = (SELECT gate, owner, group, mode FROM ONLY $to_id);
+            IF !fn::sfs_can_read_grp($to_row.gate, $to_row.owner, $to_row.mode, $who, $to_row.group) {
+                THROW 'sfs:denied';
+            };
+        };
+    };
 
     IF $relation = 'references' {
         RELATE $from_id->references->$to_id;
@@ -1334,36 +1438,50 @@ DEFINE FUNCTION OVERWRITE fn::sfs_relate(
 };
 
 -- Backlinks pointing to a file
-DEFINE FUNCTION OVERWRITE fn::sfs_backlinks($path: string) {
+DEFINE FUNCTION OVERWRITE fn::sfs_backlinks($path: string, $caller: option<string>) {
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE { THROW 'sfs:not_found' };
-    LET $r1 = (SELECT in.path AS source_path, in.filename AS source_name, 'references' AS relation FROM references WHERE out = $id);
-    LET $r2 = (SELECT in.path AS source_path, in.filename AS source_name, 'supersedes' AS relation FROM supersedes WHERE out = $id);
-    LET $r3 = (SELECT in.path AS source_path, in.filename AS source_name, 'derives_from' AS relation FROM derives_from WHERE out = $id);
-    LET $r4 = (SELECT in.path AS source_path, in.filename AS source_name, 'implements' AS relation FROM implements WHERE out = $id);
-    LET $r5 = (SELECT in.path AS source_path, in.filename AS source_name, 'links_to' AS relation FROM links_to WHERE out = $id);
+    LET $who = IF $caller IS NOT NONE OR fn::sfs_me() IS NOT NONE THEN fn::sfs_caller($caller) ELSE 'root' END;
+    IF $who != 'root' {
+        LET $frow = (SELECT gate, owner, group, mode FROM ONLY $id);
+        IF !fn::sfs_can_read_grp($frow.gate, $frow.owner, $frow.mode, $who, $frow.group) {
+            THROW 'sfs:denied';
+        };
+    };
+    LET $r1 = (SELECT in.path AS source_path, in.filename AS source_name, 'references' AS relation FROM references WHERE out = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, $who, in.group)));
+    LET $r2 = (SELECT in.path AS source_path, in.filename AS source_name, 'supersedes' AS relation FROM supersedes WHERE out = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, $who, in.group)));
+    LET $r3 = (SELECT in.path AS source_path, in.filename AS source_name, 'derives_from' AS relation FROM derives_from WHERE out = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, $who, in.group)));
+    LET $r4 = (SELECT in.path AS source_path, in.filename AS source_name, 'implements' AS relation FROM implements WHERE out = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, $who, in.group)));
+    LET $r5 = (SELECT in.path AS source_path, in.filename AS source_name, 'links_to' AS relation FROM links_to WHERE out = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, $who, in.group)));
     RETURN array::flatten([$r1, $r2, $r3, $r4, $r5]);
 };
 
 -- Forward relations from a file
-DEFINE FUNCTION OVERWRITE fn::sfs_neighbors($path: string, $relation: option<string>) {
+DEFINE FUNCTION OVERWRITE fn::sfs_neighbors($path: string, $relation: option<string>, $caller: option<string>) {
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE { THROW 'sfs:not_found' };
+    LET $who = IF $caller IS NOT NONE OR fn::sfs_me() IS NOT NONE THEN fn::sfs_caller($caller) ELSE 'root' END;
+    IF $who != 'root' {
+        LET $frow = (SELECT gate, owner, group, mode FROM ONLY $id);
+        IF !fn::sfs_can_read_grp($frow.gate, $frow.owner, $frow.mode, $who, $frow.group) {
+            THROW 'sfs:denied';
+        };
+    };
     LET $rel = $relation;
     LET $r1 = IF $rel IS NONE OR $rel = 'references' THEN
-        (SELECT out.path AS target_path, out.filename AS target_name, 'references' AS relation FROM references WHERE in = $id)
+        (SELECT out.path AS target_path, out.filename AS target_name, 'references' AS relation FROM references WHERE in = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, $who, out.group)))
     ELSE [] END;
     LET $r2 = IF $rel IS NONE OR $rel = 'supersedes' THEN
-        (SELECT out.path AS target_path, out.filename AS target_name, 'supersedes' AS relation FROM supersedes WHERE in = $id)
+        (SELECT out.path AS target_path, out.filename AS target_name, 'supersedes' AS relation FROM supersedes WHERE in = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, $who, out.group)))
     ELSE [] END;
     LET $r3 = IF $rel IS NONE OR $rel = 'derives_from' THEN
-        (SELECT out.path AS target_path, out.filename AS target_name, 'derives_from' AS relation FROM derives_from WHERE in = $id)
+        (SELECT out.path AS target_path, out.filename AS target_name, 'derives_from' AS relation FROM derives_from WHERE in = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, $who, out.group)))
     ELSE [] END;
     LET $r4 = IF $rel IS NONE OR $rel = 'implements' THEN
-        (SELECT out.path AS target_path, out.filename AS target_name, 'implements' AS relation FROM implements WHERE in = $id)
+        (SELECT out.path AS target_path, out.filename AS target_name, 'implements' AS relation FROM implements WHERE in = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, $who, out.group)))
     ELSE [] END;
     LET $r5 = IF $rel IS NONE OR $rel = 'links_to' THEN
-        (SELECT out.path AS target_path, out.filename AS target_name, 'links_to' AS relation FROM links_to WHERE in = $id)
+        (SELECT out.path AS target_path, out.filename AS target_name, 'links_to' AS relation FROM links_to WHERE in = $id AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(out.parent), out.owner, out.mode, $who, out.group)))
     ELSE [] END;
     RETURN array::flatten([$r1, $r2, $r3, $r4, $r5]);
 };
@@ -1379,7 +1497,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_fork_workspace($src: string, $dst: string, $ow
         owner: $owner
     });
     IF $src = 'main' {
-        LET $files = (SELECT id, path, generation FROM file WHERE deleted_at IS NONE AND is_folder = false);
+        LET $files = (SELECT id, path, generation FROM file WHERE deleted_at IS NONE AND is_folder = false AND !string::starts_with(path, '/.workspaces/'));
         FOR $f IN $files {
             CREATE file_branch CONTENT {
                 workspace: $ws.id,
@@ -1422,8 +1540,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_diff_workspace($branch: string, $owner: string
             base_file.generation AS current_base_gen,
             current_file,
             current_file.generation AS branch_gen,
-            current_file.content != base_file.content AS modified,
-            base_file.generation != base_gen AS conflict
+            (base_file IS NONE OR current_file.content != base_file.content) AS modified,
+            (base_file IS NOT NONE AND base_file.generation != base_gen) AS conflict
         FROM file_branch
         WHERE workspace = $ws
     );
@@ -1440,12 +1558,19 @@ DEFINE FUNCTION OVERWRITE fn::sfs_merge_workspace($branch: string, $target: stri
         IF $d.conflict = true {
             THROW string::concat('sfs:conflict: concurrent change on ', $d.path);
         };
+        IF $d.base_file IS NONE AND fn::sfs_resolve($d.path) IS NOT NONE {
+            THROW string::concat('sfs:conflict: concurrent change on ', $d.path);
+        };
     };
     FOR $d IN $diffs {
         IF $d.modified = true {
             LET $new_content = $d.current_file.content;
             LET $target_id = $d.base_file;
-            UPDATE $target_id SET content = $new_content, updated_at = time::now();
+            IF $target_id IS NOT NONE {
+                UPDATE $target_id SET content = $new_content, updated_at = time::now();
+            } ELSE {
+                fn::sfs_write($d.path, $new_content, NONE, true, $owner, NONE);
+            };
         };
     };
     DELETE file_branch WHERE workspace = $ws;
@@ -1463,46 +1588,97 @@ DEFINE FUNCTION OVERWRITE fn::sfs_discard_workspace($branch: string, $owner: str
     RETURN { discarded: $branch, status: 'ok' };
 };
 
+-- Infer MIME content_type from filename extension when not explicitly provided
+DEFINE FUNCTION OVERWRITE fn::sfs_guess_mime($filename: string, $explicit: option<string>) {
+    IF $explicit IS NOT NONE AND string::len($explicit) > 0 {
+        RETURN $explicit;
+    };
+    LET $lower = string::lowercase($filename);
+    RETURN IF string::ends_with($lower, '.md') OR string::ends_with($lower, '.markdown') THEN 'text/markdown'
+        ELSE IF string::ends_with($lower, '.json') THEN 'application/json'
+        ELSE IF string::ends_with($lower, '.yaml') OR string::ends_with($lower, '.yml') THEN 'application/yaml'
+        ELSE IF string::ends_with($lower, '.toml') THEN 'application/toml'
+        ELSE IF string::ends_with($lower, '.csv') THEN 'text/csv'
+        ELSE IF string::ends_with($lower, '.tsv') THEN 'text/tab-separated-values'
+        ELSE IF string::ends_with($lower, '.html') OR string::ends_with($lower, '.htm') THEN 'text/html'
+        ELSE IF string::ends_with($lower, '.css') THEN 'text/css'
+        ELSE IF string::ends_with($lower, '.js') OR string::ends_with($lower, '.mjs') THEN 'text/javascript'
+        ELSE IF string::ends_with($lower, '.ts') OR string::ends_with($lower, '.tsx') THEN 'text/typescript'
+        ELSE IF string::ends_with($lower, '.py') THEN 'text/x-python'
+        ELSE IF string::ends_with($lower, '.rs') THEN 'text/x-rust'
+        ELSE IF string::ends_with($lower, '.sh') THEN 'text/x-shellscript'
+        ELSE IF string::ends_with($lower, '.xml') THEN 'application/xml'
+        ELSE IF string::ends_with($lower, '.svg') THEN 'image/svg+xml'
+        ELSE IF string::ends_with($lower, '.png') THEN 'image/png'
+        ELSE IF string::ends_with($lower, '.jpg') OR string::ends_with($lower, '.jpeg') THEN 'image/jpeg'
+        ELSE IF string::ends_with($lower, '.gif') THEN 'image/gif'
+        ELSE IF string::ends_with($lower, '.webp') THEN 'image/webp'
+        ELSE IF string::ends_with($lower, '.pdf') THEN 'application/pdf'
+        ELSE 'text/plain'
+    END;
+};
+
 -- Ensure parent directory chain segments exist
-DEFINE FUNCTION OVERWRITE fn::sfs_ensure_parents_seg($parent_id: any, $parent_key: string, $segments: array<string>, $caller: any) {
+DEFINE FUNCTION OVERWRITE fn::sfs_ensure_parents_seg($parent_id: option<record<file>>, $parent_key: string, $segments: array<string>, $caller: option<string>) {
     IF array::len($segments) = 0 {
         RETURN $parent_id;
     };
+    LET $who = fn::sfs_caller($caller);
     LET $head = $segments[0];
     LET $tail = array::slice($segments, 1);
     LET $found = (SELECT VALUE id FROM ONLY file WHERE parent_key = $parent_key AND filename = $head LIMIT 1);
-    LET $curr_id = IF $found IS NOT NONE THEN $found ELSE (CREATE ONLY file CONTENT {
+    IF $found IS NOT NONE {
+        LET $frow = (SELECT is_folder FROM ONLY $found);
+        IF !$frow.is_folder {
+            THROW 'sfs:not_a_directory';
+        };
+        RETURN fn::sfs_ensure_parents_seg($found, <string>$found, $tail, $who);
+    };
+    IF $parent_id IS NOT NONE AND $who != 'root' {
+        LET $prow = (SELECT path, gate, owner, group, mode FROM ONLY $parent_id);
+        IF $prow.path = '/home' AND $head != $who {
+            THROW 'sfs:denied';
+        };
+        IF !fn::sfs_can_write_grp($prow.gate, $prow.owner, $prow.mode, $who, $prow.group) {
+            THROW 'sfs:denied';
+        };
+    };
+    LET $curr_id = (CREATE ONLY file CONTENT {
         filename: $head,
         parent: $parent_id,
         content_type: 'inode/directory',
-        owner: fn::sfs_me() ?? $caller ?? 'root',
+        owner: $who,
         mode: 493,
         generation: 1
-    }).id END;
-    RETURN fn::sfs_ensure_parents_seg($curr_id, <string>$curr_id, $tail, $caller);
+    }).id;
+    RETURN fn::sfs_ensure_parents_seg($curr_id, <string>$curr_id, $tail, $who);
 };
 
-DEFINE FUNCTION OVERWRITE fn::sfs_ensure_parents($path: string, $caller: any) {
+DEFINE FUNCTION OVERWRITE fn::sfs_ensure_parents($path: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $raw = string::split($path, '/');
     LET $segments = array::filter($raw, |$v| string::len($v) > 0);
     IF array::len($segments) <= 1 {
         RETURN NONE;
     };
     LET $parent_segs = array::slice($segments, 0, array::len($segments) - 1);
-    RETURN fn::sfs_ensure_parents_seg(NONE, 'root', $parent_segs, $caller);
+    RETURN fn::sfs_ensure_parents_seg(NONE, 'root', $parent_segs, $who);
 } PERMISSIONS FULL;
 
 -- Read text content of a file
-DEFINE FUNCTION OVERWRITE fn::sfs_read($path: string, $caller: any) {
+DEFINE FUNCTION OVERWRITE fn::sfs_read($path: string, $caller: option<string>) {
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $row = (SELECT content, file, gate, mode, owner, group FROM ONLY $id);
+    LET $row = (SELECT content, file, gate, mode, owner, group, is_folder FROM ONLY $id);
     IF $row IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $me = $caller ?? fn::sfs_me();
+    IF $row.is_folder {
+        THROW 'sfs:is_a_directory';
+    };
+    LET $me = fn::sfs_caller($caller);
     IF $me != 'root' {
         IF !fn::sfs_can_read_grp($row.gate, $row.owner, $row.mode, $me, $row.group) {
             THROW 'sfs:denied';
@@ -1518,16 +1694,50 @@ DEFINE FUNCTION OVERWRITE fn::sfs_read($path: string, $caller: any) {
 } PERMISSIONS FULL;
 
 -- Create directory and optionally parents
-DEFINE FUNCTION OVERWRITE fn::sfs_mkdir($path: string, $parents: any, $caller: any) {
+DEFINE FUNCTION OVERWRITE fn::sfs_mkdir($path: string, $parents: option<bool>, $caller: option<string>) {
+    IF $path = '/' {
+        RETURN fn::sfs_stat('/');
+    };
+    LET $who = fn::sfs_caller($caller);
     LET $existing = fn::sfs_resolve($path);
     IF $existing IS NOT NONE {
+        LET $erow = (SELECT is_folder FROM ONLY $existing);
+        IF !$erow.is_folder OR $parents = false {
+            THROW 'sfs:already_exists';
+        };
         RETURN fn::sfs_stat($path);
     };
-    LET $parent_id = fn::sfs_ensure_parents($path, $caller);
     LET $raw = string::split($path, '/');
     LET $segments = array::filter($raw, |$v| string::len($v) > 0);
     LET $filename = $segments[array::len($segments) - 1];
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $parent_id = IF $parents = false {
+        IF array::len($segments) <= 1 {
+            NONE;
+        } ELSE {
+            LET $p_segs = array::slice($segments, 0, array::len($segments) - 1);
+            LET $pid = fn::sfs_resolve_seg('root', $p_segs);
+            IF $pid IS NONE {
+                THROW 'sfs:not_found';
+            };
+            $pid;
+        };
+    } ELSE {
+        fn::sfs_ensure_parents($path, $who);
+    };
+    IF $parent_id IS NOT NONE {
+        LET $prow = (SELECT path, is_folder, gate, owner, group, mode FROM ONLY $parent_id);
+        IF !$prow.is_folder {
+            THROW 'sfs:not_a_directory';
+        };
+        IF $who != 'root' {
+            IF $prow.path = '/home' AND $filename != $who {
+                THROW 'sfs:denied';
+            };
+            IF !fn::sfs_can_write_grp($prow.gate, $prow.owner, $prow.mode, $who, $prow.group) {
+                THROW 'sfs:denied';
+            };
+        };
+    };
     CREATE ONLY file CONTENT {
         filename: $filename,
         parent: $parent_id,
@@ -1543,34 +1753,69 @@ DEFINE FUNCTION OVERWRITE fn::sfs_mkdir($path: string, $parents: any, $caller: a
 DEFINE FUNCTION OVERWRITE fn::sfs_write(
     $path: string,
     $content: string,
-    $if_generation: any,
-    $create_parents: any,
-    $caller: any
+    $if_generation: option<int>,
+    $create_parents: option<bool>,
+    $caller: option<string>,
+    $content_type: option<string>
 ) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $who = fn::sfs_caller($caller);
     LET $existing = fn::sfs_resolve($path);
     IF $existing IS NOT NONE {
-        LET $curr = (SELECT generation, is_folder FROM ONLY $existing);
+        LET $curr = (SELECT generation, is_folder, gate, owner, group, mode, content_type FROM ONLY $existing);
         IF $curr.is_folder {
             THROW 'sfs:is_a_directory';
         };
-        IF $if_generation != NONE AND $if_generation != NULL AND $curr.generation != $if_generation {
+        IF $who != 'root' AND !fn::sfs_can_write_grp($curr.gate, $curr.owner, $curr.mode, $who, $curr.group) {
+            THROW 'sfs:denied';
+        };
+        IF $if_generation IS NOT NONE AND $curr.generation != $if_generation {
             THROW 'sfs:conflict';
         };
-        UPDATE $existing SET content = $content, file = NONE, updated_at = time::now();
+        LET $ct = $content_type ?? $curr.content_type;
+        UPDATE $existing SET content = $content, file = NONE, size = NONE, content_type = $ct, updated_at = time::now();
         RETURN fn::sfs_stat($path);
     };
-    IF $if_generation != NONE AND $if_generation != NULL {
+    IF $if_generation IS NOT NONE {
         THROW 'sfs:conflict';
     };
-    LET $parent_id = fn::sfs_ensure_parents($path, $caller);
     LET $raw = string::split($path, '/');
     LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+    IF array::len($segments) = 0 {
+        THROW 'sfs:is_a_directory';
+    };
     LET $filename = $segments[array::len($segments) - 1];
+    LET $parent_id = IF $create_parents = false {
+        IF array::len($segments) <= 1 {
+            NONE;
+        } ELSE {
+            LET $p_segs = array::slice($segments, 0, array::len($segments) - 1);
+            LET $pid = fn::sfs_resolve_seg('root', $p_segs);
+            IF $pid IS NONE {
+                THROW 'sfs:not_found';
+            };
+            $pid;
+        };
+    } ELSE {
+        fn::sfs_ensure_parents($path, $who);
+    };
+    IF $parent_id IS NOT NONE {
+        LET $prow = (SELECT path, is_folder, gate, owner, group, mode FROM ONLY $parent_id);
+        IF !$prow.is_folder {
+            THROW 'sfs:not_a_directory';
+        };
+        IF $who != 'root' {
+            IF $prow.path = '/home' {
+                THROW 'sfs:denied';
+            };
+            IF !fn::sfs_can_write_grp($prow.gate, $prow.owner, $prow.mode, $who, $prow.group) {
+                THROW 'sfs:denied';
+            };
+        };
+    };
     CREATE ONLY file CONTENT {
         filename: $filename,
         parent: $parent_id,
-        content_type: 'text/plain',
+        content_type: fn::sfs_guess_mime($filename, $content_type),
         content: $content,
         owner: $who,
         mode: 420,
@@ -1584,15 +1829,22 @@ DEFINE FUNCTION OVERWRITE fn::sfs_edit(
     $path: string,
     $old: string,
     $new: string,
-    $if_generation: any,
-    $caller: any
+    $if_generation: option<int>,
+    $caller: option<string>
 ) {
+    LET $who = fn::sfs_caller($caller);
     LET $existing = fn::sfs_resolve($path);
     IF $existing IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $curr = (SELECT content, generation FROM ONLY $existing);
-    IF $if_generation != NONE AND $if_generation != NULL AND $curr.generation != $if_generation {
+    LET $curr = (SELECT content, generation, is_folder, gate, owner, group, mode FROM ONLY $existing);
+    IF $curr.is_folder {
+        THROW 'sfs:is_a_directory';
+    };
+    IF $who != 'root' AND !fn::sfs_can_write_grp($curr.gate, $curr.owner, $curr.mode, $who, $curr.group) {
+        THROW 'sfs:denied';
+    };
+    IF $if_generation IS NOT NONE AND $curr.generation != $if_generation {
         THROW 'sfs:conflict';
     };
     LET $text = $curr.content ?? '';
@@ -1620,20 +1872,30 @@ DEFINE FUNCTION OVERWRITE fn::sfs_is_legal_hold($path: string) {
     RETURN false;
 };
 
-DEFINE FUNCTION OVERWRITE fn::sfs_set_legal_hold($path: string, $enabled: bool) {
+DEFINE FUNCTION OVERWRITE fn::sfs_set_legal_hold($path: string, $enabled: bool, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
+    };
+    LET $row = (SELECT owner FROM ONLY $id);
+    IF $who != 'root' AND $who != $row.owner {
+        THROW 'sfs:denied';
     };
     UPDATE $id SET meta.legal_hold = $enabled, updated_at = time::now();
     RETURN fn::sfs_stat($path);
 } PERMISSIONS FULL;
 
 -- Delete file or directory
-DEFINE FUNCTION OVERWRITE fn::sfs_rm($path: string, $recursive: any, $caller: any) {
+DEFINE FUNCTION OVERWRITE fn::sfs_rm($path: string, $recursive: option<bool>, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
+    };
+    LET $row = (SELECT gate, owner, group, mode FROM ONLY $id);
+    IF $who != 'root' AND !fn::sfs_can_write_grp($row.gate, $row.owner, $row.mode, $who, $row.group) {
+        THROW 'sfs:denied';
     };
     IF fn::sfs_is_legal_hold($path) {
         THROW 'sfs:legal_hold';
@@ -1643,12 +1905,22 @@ DEFINE FUNCTION OVERWRITE fn::sfs_rm($path: string, $recursive: any, $caller: an
         IF $recursive != true {
             THROW 'sfs:not_empty';
         };
-        LET $children = (SELECT id, path FROM file WHERE parent_key = <string>$id);
-        FOR $child IN $children {
-            IF fn::sfs_is_legal_hold($child.path) {
+        LET $descendants = (
+            SELECT id, path, meta, gate, owner, group, mode, string::len(path) AS plen
+            FROM file
+            WHERE string::starts_with(path, $path + '/')
+            ORDER BY plen DESC
+        );
+        FOR $d IN $descendants {
+            IF $d.meta.legal_hold = true {
                 THROW 'sfs:legal_hold';
             };
-            DELETE $child.id;
+            IF $who != 'root' AND !fn::sfs_can_write_grp($d.gate, $d.owner, $d.mode, $who, $d.group) {
+                THROW 'sfs:denied';
+            };
+        };
+        FOR $d IN $descendants {
+            DELETE $d.id;
         };
     };
     DELETE $id;
@@ -1656,21 +1928,42 @@ DEFINE FUNCTION OVERWRITE fn::sfs_rm($path: string, $recursive: any, $caller: an
 } PERMISSIONS FULL;
 
 -- Move file or directory
-DEFINE FUNCTION OVERWRITE fn::sfs_mv($src: string, $dst: string, $caller: any) {
+DEFINE FUNCTION OVERWRITE fn::sfs_mv($src: string, $dst: string, $caller: option<string>) {
+    IF $dst = $src OR string::starts_with($dst, $src + '/') {
+        THROW 'sfs:invalid_move';
+    };
+    LET $who = fn::sfs_caller($caller);
     LET $src_id = fn::sfs_resolve($src);
     IF $src_id IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $parent_id = fn::sfs_ensure_parents($dst, $caller);
+    LET $src_row = (SELECT gate, owner, group, mode FROM ONLY $src_id);
+    IF $who != 'root' AND !fn::sfs_can_write_grp($src_row.gate, $src_row.owner, $src_row.mode, $who, $src_row.group) {
+        THROW 'sfs:denied';
+    };
+    LET $existing_dst = fn::sfs_resolve($dst);
+    IF $existing_dst IS NOT NONE {
+        LET $dst_row = (SELECT gate, owner, group, mode FROM ONLY $existing_dst);
+        IF $who != 'root' AND !fn::sfs_can_write_grp($dst_row.gate, $dst_row.owner, $dst_row.mode, $who, $dst_row.group) {
+            THROW 'sfs:denied';
+        };
+        LET $dst_children = (SELECT count() FROM file WHERE parent_key = <string>$existing_dst GROUP ALL)[0].count ?? 0;
+        IF $dst_children > 0 {
+            THROW 'sfs:not_empty';
+        };
+        DELETE $existing_dst;
+    };
+    LET $parent_id = fn::sfs_ensure_parents($dst, $who);
+    IF $parent_id IS NOT NONE AND $who != 'root' {
+        LET $prow = (SELECT gate, owner, group, mode FROM ONLY $parent_id);
+        IF !fn::sfs_can_write_grp($prow.gate, $prow.owner, $prow.mode, $who, $prow.group) {
+            THROW 'sfs:denied';
+        };
+    };
     LET $raw = string::split($dst, '/');
     LET $segments = array::filter($raw, |$v| string::len($v) > 0);
     LET $dst_filename = $segments[array::len($segments) - 1];
-    
-    LET $existing_dst = fn::sfs_resolve($dst);
-    IF $existing_dst IS NOT NONE {
-        DELETE $existing_dst;
-    };
-    
+
     UPDATE $src_id SET filename = $dst_filename, parent = $parent_id, updated_at = time::now();
     RETURN fn::sfs_stat($dst);
 } PERMISSIONS FULL;
@@ -1679,32 +1972,89 @@ DEFINE FUNCTION OVERWRITE fn::sfs_mv($src: string, $dst: string, $caller: any) {
 DEFINE FUNCTION OVERWRITE fn::sfs_cp(
     $src: string,
     $dst: string,
-    $recursive: any,
-    $caller: any
+    $recursive: option<bool>,
+    $caller: option<string>
 ) {
+    IF $dst = $src OR string::starts_with($dst, $src + '/') {
+        THROW 'sfs:invalid_copy';
+    };
+    LET $who = fn::sfs_caller($caller);
     LET $src_id = fn::sfs_resolve($src);
     IF $src_id IS NONE {
         THROW 'sfs:not_found';
     };
     LET $src_row = (SELECT * FROM ONLY $src_id);
+    IF $who != 'root' AND !fn::sfs_can_read_grp($src_row.gate, $src_row.owner, $src_row.mode, $who, $src_row.group) {
+        THROW 'sfs:denied';
+    };
     IF $src_row.is_folder {
         IF $recursive != true {
             THROW 'sfs:is_a_directory';
         };
-        RETURN fn::sfs_mkdir($dst, true, $caller);
+        fn::sfs_mkdir($dst, true, $who);
+        LET $descendants = (
+            SELECT filename, path, is_folder, content_type, content, file, mode, gate, owner, group, string::len(path) AS plen
+            FROM file
+            WHERE string::starts_with(path, $src + '/')
+            ORDER BY plen ASC
+        );
+        FOR $d IN $descendants {
+            IF $who = 'root' OR fn::sfs_can_read_grp($d.gate, $d.owner, $d.mode, $who, $d.group) {
+                LET $rel = string::slice($d.path, string::len($src));
+                LET $target_path = $dst + $rel;
+                IF $d.is_folder {
+                    fn::sfs_mkdir($target_path, true, $who);
+                } ELSE {
+                    LET $p_id = fn::sfs_ensure_parents($target_path, $who);
+                    CREATE ONLY file CONTENT {
+                        filename: $d.filename,
+                        parent: $p_id,
+                        content_type: $d.content_type,
+                        content: $d.content,
+                        file: $d.file,
+                        owner: $who,
+                        mode: $d.mode,
+                        generation: 1
+                    };
+                };
+            };
+        };
+        RETURN fn::sfs_stat($dst);
     };
-    LET $parent_id = fn::sfs_ensure_parents($dst, $caller);
+    LET $existing_dst = fn::sfs_resolve($dst);
+    IF $existing_dst IS NOT NONE {
+        LET $drow = (SELECT is_folder, gate, owner, group, mode FROM ONLY $existing_dst);
+        IF $drow.is_folder {
+            THROW 'sfs:is_a_directory';
+        };
+        IF $who != 'root' AND !fn::sfs_can_write_grp($drow.gate, $drow.owner, $drow.mode, $who, $drow.group) {
+            THROW 'sfs:denied';
+        };
+        UPDATE $existing_dst SET
+            content_type = $src_row.content_type,
+            content = $src_row.content,
+            file = $src_row.file,
+            updated_at = time::now();
+        RETURN fn::sfs_stat($dst);
+    };
+    LET $parent_id = fn::sfs_ensure_parents($dst, $who);
+    IF $parent_id IS NOT NONE AND $who != 'root' {
+        LET $prow = (SELECT gate, owner, group, mode FROM ONLY $parent_id);
+        IF !fn::sfs_can_write_grp($prow.gate, $prow.owner, $prow.mode, $who, $prow.group) {
+            THROW 'sfs:denied';
+        };
+    };
     LET $raw = string::split($dst, '/');
     LET $segments = array::filter($raw, |$v| string::len($v) > 0);
     LET $dst_filename = $segments[array::len($segments) - 1];
-    
+
     CREATE ONLY file CONTENT {
         filename: $dst_filename,
         parent: $parent_id,
         content_type: $src_row.content_type,
         content: $src_row.content,
         file: $src_row.file,
-        owner: fn::sfs_me() ?? $caller ?? 'root',
+        owner: $who,
         mode: $src_row.mode,
         generation: 1
     };
@@ -1713,9 +2063,14 @@ DEFINE FUNCTION OVERWRITE fn::sfs_cp(
 
 -- Restore a past generation
 DEFINE FUNCTION OVERWRITE fn::sfs_restore($path: string, $version: int, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
+    };
+    LET $curr = (SELECT gate, owner, group, mode FROM ONLY $id);
+    IF $who != 'root' AND !fn::sfs_can_write_grp($curr.gate, $curr.owner, $curr.mode, $who, $curr.group) {
+        THROW 'sfs:denied';
     };
     LET $ver_row = (SELECT content, file_bytes FROM ONLY file_version WHERE path = $path AND generation = $version LIMIT 1);
     IF $ver_row IS NONE {
@@ -1727,13 +2082,20 @@ DEFINE FUNCTION OVERWRITE fn::sfs_restore($path: string, $version: int, $caller:
 
 -- Diff generation contents
 DEFINE FUNCTION OVERWRITE fn::sfs_diff($path: string, $gen_a: option<int>, $gen_b: option<int>, $caller: option<string>) {
-    LET $curr = fn::sfs_read($path, $caller);
-    IF $gen_a IS NONE {
-        RETURN '';
-    };
-    LET $va = (SELECT content FROM ONLY file_version WHERE path = $path AND generation = $gen_a LIMIT 1).content ?? '';
+    LET $who = fn::sfs_caller($caller);
+    LET $curr = fn::sfs_read($path, $who);
+    LET $stat = fn::sfs_stat($path);
+    LET $from_gen = $gen_a ?? 1;
+    LET $to_gen = $gen_b ?? $stat.generation;
+    LET $va = IF $gen_a IS NOT NONE THEN (SELECT content FROM ONLY file_version WHERE path = $path AND generation = $gen_a LIMIT 1).content ?? '' ELSE '' END;
     LET $vb = IF $gen_b IS NOT NONE THEN (SELECT content FROM ONLY file_version WHERE path = $path AND generation = $gen_b LIMIT 1).content ?? '' ELSE $curr END;
-    RETURN $vb;
+    RETURN {
+        path: $path,
+        from_generation: $from_gen,
+        to_generation: $to_gen,
+        from_content: $va,
+        to_content: $vb
+    };
 } PERMISSIONS FULL;
 
 -- Upload Begin: Calculate missing chunks for client dedup within scope
@@ -1741,9 +2103,9 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_begin(
     $path: string,
     $size: int,
     $chunk_ids: array<string>,
-    $caller: any
+    $caller: option<string>
 ) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $who = fn::sfs_caller($caller);
     LET $scope = $who;
     
     LET $existing_records = (
@@ -1781,12 +2143,16 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
     $stored_bytes: int,
     $codec: string,
     $data: bytes,
-    $caller: any
+    $caller: option<string>
 ) {
+    LET $who = fn::sfs_caller($caller);
     LET $up_rec = type::record($upload_id);
     LET $up = (SELECT * FROM ONLY $up_rec);
     IF $up IS NONE {
         THROW 'sfs:not_found: upload expired or not found';
+    };
+    IF $who != 'root' AND $up.caller != $who {
+        THROW 'sfs:denied';
     };
 
     LET $blob_id = type::record('blob', $chunk_id);
@@ -1812,10 +2178,10 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
 -- Upload Commit: Assemble manifest, set file metadata, update usage
 DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
     $upload_id: string,
-    $if_generation: any,
+    $if_generation: option<int>,
     $offsets: array<int>,
     $lengths: array<int>,
-    $caller: any
+    $caller: option<string>
 ) {
     LET $up_rec = type::record($upload_id);
     LET $up = (SELECT * FROM ONLY $up_rec);
@@ -1832,11 +2198,14 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
     LET $who = fn::sfs_me() ?? $caller ?? $up.caller ?? 'root';
     LET $existing = fn::sfs_resolve($path);
     LET $file_id = IF $existing IS NOT NONE {
-        LET $curr = (SELECT generation, is_folder FROM ONLY $existing);
+        LET $curr = (SELECT generation, is_folder, gate, owner, group, mode FROM ONLY $existing);
         IF $curr.is_folder {
             THROW 'sfs:is_a_directory';
         };
-        IF $if_generation != NONE AND $if_generation != NULL AND $curr.generation != $if_generation {
+        IF $who != 'root' AND !fn::sfs_can_write_grp($curr.gate, $curr.owner, $curr.mode, $who, $curr.group) {
+            THROW 'sfs:denied';
+        };
+        IF $if_generation IS NOT NONE AND $curr.generation != $if_generation {
             THROW 'sfs:conflict';
         };
         DELETE file_chunk WHERE file = $existing;
@@ -1848,6 +2217,12 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
         $existing;
     } ELSE {
         LET $parent_id = fn::sfs_ensure_parents($path, $who);
+        IF $parent_id IS NOT NONE AND $who != 'root' {
+            LET $prow = (SELECT gate, owner, group, mode FROM ONLY $parent_id);
+            IF !fn::sfs_can_write_grp($prow.gate, $prow.owner, $prow.mode, $who, $prow.group) {
+                THROW 'sfs:denied';
+            };
+        };
         LET $raw = string::split($path, '/');
         LET $segments = array::filter($raw, |$v| string::len($v) > 0);
         LET $filename = $segments[array::len($segments) - 1];
@@ -1857,7 +2232,6 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
             owner: $who,
             size: $up.size,
             content_type: 'application/octet-stream',
-            is_folder: false,
             created_at: time::now(),
             updated_at: time::now()
         });
@@ -1879,6 +2253,9 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
         UPDATE $b_rec SET refs += 1;
     };
 
+    LET $chunk_blobs = (SELECT blob.stored AS stored FROM file_chunk WHERE file = $file_id AND blob != NONE);
+    LET $stored_total = math::sum($chunk_blobs[*].stored) ?? $up.size;
+
     LET $existing_usage = (SELECT * FROM ONLY usage WHERE scope = $up.scope AND path = $path LIMIT 1);
     IF $existing_usage IS NONE {
         CREATE usage CONTENT {
@@ -1886,13 +2263,13 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
             path: $path,
             files: 1,
             logical_bytes: $up.size,
-            stored_bytes: $up.size,
+            stored_bytes: $stored_total,
             updated_at: time::now()
         };
     } ELSE {
         UPDATE $existing_usage.id SET
             logical_bytes = $up.size,
-            stored_bytes = $up.size,
+            stored_bytes = $stored_total,
             updated_at = time::now();
     };
 
@@ -1905,11 +2282,16 @@ DEFINE FUNCTION OVERWRITE fn::sfs_read_bytes_range(
     $path: string,
     $offset: int,
     $length: int,
-    $caller: any
+    $caller: option<string>
 ) {
+    LET $who = fn::sfs_caller($caller);
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
+    };
+    LET $row = (SELECT content, file, gate, owner, group, mode FROM ONLY $id);
+    IF $who != 'root' AND !fn::sfs_can_read_grp($row.gate, $row.owner, $row.mode, $who, $row.group) {
+        THROW 'sfs:denied';
     };
 
     LET $manifest = (
@@ -1930,7 +2312,6 @@ DEFINE FUNCTION OVERWRITE fn::sfs_read_bytes_range(
         };
     };
 
-    LET $row = (SELECT content, file FROM ONLY $id);
     IF $row.content IS NOT NONE {
         LET $sub = string::slice($row.content, $offset, $length);
         RETURN {
@@ -1964,11 +2345,11 @@ DEFINE FUNCTION OVERWRITE fn::sfs_gc_blobs($max_age_secs: int) {
 } PERMISSIONS FULL;
 
 -- Disk Usage (du): Instant usage query
-DEFINE FUNCTION OVERWRITE fn::sfs_du($path: string, $caller: any) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+DEFINE FUNCTION OVERWRITE fn::sfs_du($path: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $records = (
         SELECT * FROM usage 
-        WHERE scope = $who AND (path = $path OR string::starts_with(path, $path))
+        WHERE scope = $who AND fn::sfs_under_prefix(path, $path)
     );
     LET $total_files = math::sum($records[*].files) ?? 0;
     LET $total_logical = math::sum($records[*].logical_bytes) ?? 0;
@@ -1982,14 +2363,14 @@ DEFINE FUNCTION OVERWRITE fn::sfs_du($path: string, $caller: any) {
 } PERMISSIONS FULL;
 
 -- Code Symbol Retrieval
-DEFINE FUNCTION OVERWRITE fn::sfs_symbols($path: string, $caller: any) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+DEFINE FUNCTION OVERWRITE fn::sfs_symbols($path: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $fid = fn::sfs_resolve($path);
     IF $fid IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $file = (SELECT id, parent, owner, mode, is_folder FROM ONLY $fid);
-    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($file.parent), $file.owner, $file.mode, $who) {
+    LET $file = (SELECT id, parent, owner, group, mode, is_folder FROM ONLY $fid);
+    IF $who != 'root' AND !fn::sfs_can_read_grp(fn::sfs_gate($file.parent), $file.owner, $file.mode, $who, $file.group) {
         THROW 'sfs:denied_or_missing';
     };
     
@@ -2008,8 +2389,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_symbols($path: string, $caller: any) {
                 line_start,
                 line_end
             FROM symbol
-            WHERE string::starts_with(file_id.path, $path)
-              AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who))
+            WHERE fn::sfs_under_prefix(file_id.path, $path)
+              AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who, file_id.group))
             ORDER BY file_id.path, line_start ASC
         );
     } ELSE {
@@ -2033,8 +2414,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_symbols($path: string, $caller: any) {
 } PERMISSIONS FULL;
 
 -- Symbol Definition Lookup
-DEFINE FUNCTION OVERWRITE fn::sfs_definition($name: string, $caller: any) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+DEFINE FUNCTION OVERWRITE fn::sfs_definition($name: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     RETURN (
         SELECT 
             type::string(id) AS id,
@@ -2050,29 +2431,29 @@ DEFINE FUNCTION OVERWRITE fn::sfs_definition($name: string, $caller: any) {
             line_end
         FROM symbol
         WHERE (name = $name OR qualified = $name)
-          AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who))
+          AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who, file_id.group))
         ORDER BY line_start ASC
         LIMIT 20
     );
 } PERMISSIONS FULL;
 
 -- Hierarchical Folder Digest
-DEFINE FUNCTION OVERWRITE fn::sfs_digest($path: string, $caller: any) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+DEFINE FUNCTION OVERWRITE fn::sfs_digest($path: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $fid = fn::sfs_resolve($path);
     IF $fid IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $folder = (SELECT id, parent, owner, mode, is_folder FROM ONLY $fid);
+    LET $folder = (SELECT id, parent, owner, group, mode, is_folder FROM ONLY $fid);
     IF !$folder.is_folder {
         THROW 'sfs:not_a_directory';
     };
-    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($folder.parent), $folder.owner, $folder.mode, $who) {
+    IF $who != 'root' AND !fn::sfs_can_read_grp(fn::sfs_gate($folder.parent), $folder.owner, $folder.mode, $who, $folder.group) {
         THROW 'sfs:denied_or_missing';
     };
 
-    LET $children = (SELECT id, filename, is_folder, size, owner, mode, gate, updated_at, hash, meta FROM file WHERE parent_key = <string>$fid);
-    LET $readable = array::filter($children, |$c| $who = 'root' OR fn::sfs_can_read(fn::sfs_gate($fid), $c.owner, $c.mode, $who));
+    LET $children = (SELECT id, filename, is_folder, size, owner, group, mode, gate, updated_at, hash, meta FROM file WHERE parent_key = <string>$fid);
+    LET $readable = array::filter($children, |$c| $who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate($fid), $c.owner, $c.mode, $who, $c.group));
     LET $private_count = array::len($children) - array::len($readable);
 
     LET $cached = (SELECT * FROM ONLY folder_digest WHERE folder_id = $fid LIMIT 1);
@@ -2110,13 +2491,13 @@ DEFINE FUNCTION OVERWRITE fn::sfs_pack(
     $question: string,
     $budget: int,
     $scope: option<string>,
-    $caller: any
+    $caller: option<string>
 ) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $who = fn::sfs_caller($caller);
     LET $hits = fn::sfs_search_text($question, 30, 'any', $who);
     
     LET $scoped = IF $scope IS NOT NONE AND string::len($scope) > 0 {
-        array::filter($hits, |$h| string::starts_with($h.path, $scope))
+        array::filter($hits, |$h| fn::sfs_under_prefix($h.path, $scope))
     } ELSE {
         $hits
     };
@@ -2181,14 +2562,14 @@ DEFINE FUNCTION OVERWRITE fn::sfs_job_complete(
 } PERMISSIONS FULL;
 
 -- Entities Retrieval (Section 20.7)
-DEFINE FUNCTION OVERWRITE fn::sfs_entities($path: string, $caller: any) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+DEFINE FUNCTION OVERWRITE fn::sfs_entities($path: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $fid = fn::sfs_resolve($path);
     IF $fid IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $target = (SELECT id, parent, owner, mode, is_folder FROM ONLY $fid);
-    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($target.parent), $target.owner, $target.mode, $who) {
+    LET $target = (SELECT id, parent, owner, group, mode, is_folder FROM ONLY $fid);
+    IF $who != 'root' AND !fn::sfs_can_read_grp(fn::sfs_gate($target.parent), $target.owner, $target.mode, $who, $target.group) {
         THROW 'sfs:denied_or_missing';
     };
 
@@ -2200,8 +2581,8 @@ DEFINE FUNCTION OVERWRITE fn::sfs_entities($path: string, $caller: any) {
                 type::string(out.id) AS id,
                 in.path AS source_path
             FROM mentions
-            WHERE string::starts_with(in.path, $path)
-              AND ($who = 'root' OR fn::sfs_can_read(fn::sfs_gate(in.parent), in.owner, in.mode, $who))
+            WHERE fn::sfs_under_prefix(in.path, $path)
+              AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(in.parent), in.owner, in.mode, $who, in.group))
             ORDER BY name ASC
         );
     } ELSE {
@@ -2222,15 +2603,15 @@ DEFINE FUNCTION OVERWRITE fn::sfs_entities($path: string, $caller: any) {
 DEFINE FUNCTION OVERWRITE fn::sfs_query_table(
     $path: string,
     $limit: option<int>,
-    $caller: any
+    $caller: option<string>
 ) {
-    LET $who = fn::sfs_me() ?? $caller ?? 'root';
+    LET $who = fn::sfs_caller($caller);
     LET $fid = fn::sfs_resolve($path);
     IF $fid IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $target = (SELECT id, parent, owner, mode FROM ONLY $fid);
-    IF $who != 'root' AND !fn::sfs_can_read(fn::sfs_gate($target.parent), $target.owner, $target.mode, $who) {
+    LET $target = (SELECT id, parent, owner, group, mode FROM ONLY $fid);
+    IF $who != 'root' AND !fn::sfs_can_read_grp(fn::sfs_gate($target.parent), $target.owner, $target.mode, $who, $target.group) {
         THROW 'sfs:denied_or_missing';
     };
 
@@ -2278,24 +2659,30 @@ DEFINE FUNCTION OVERWRITE fn::sfs_create_share(
     $path: string,
     $mode: string,
     $duration_secs: option<int>,
-    $caller: string
+    $caller: option<string>
 ) {
+    LET $who = fn::sfs_caller($caller);
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
+    LET $row = (SELECT gate, owner, group, mode FROM ONLY $id);
+    IF $who != 'root' AND $who != $row.owner AND !fn::sfs_can_write_grp($row.gate, $row.owner, $row.mode, $who, $row.group) {
+        THROW 'sfs:denied';
+    };
     LET $tok = rand::string(32);
     LET $exp = IF $duration_secs IS NOT NONE AND $duration_secs > 0 THEN time::now() + (<duration>(type::string($duration_secs) + 's')) ELSE NONE END;
-    CREATE share SET path = $path, mode = ($mode ?? 'ro'), token = $tok, created_by = $caller, expires_at = $exp, revoked = false, created_at = time::now();
+    CREATE share SET path = $path, mode = ($mode ?? 'ro'), token = $tok, created_by = $who, expires_at = $exp, revoked = false, created_at = time::now();
     RETURN (SELECT * FROM ONLY share WHERE token = $tok LIMIT 1);
 } PERMISSIONS FULL;
 
-DEFINE FUNCTION OVERWRITE fn::sfs_revoke_share($token_or_id: string, $caller: string) {
+DEFINE FUNCTION OVERWRITE fn::sfs_revoke_share($token_or_id: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $sh = (SELECT * FROM ONLY share WHERE token = $token_or_id OR id = type::record('share', $token_or_id) LIMIT 1);
     IF $sh IS NONE {
         THROW 'sfs:not_found';
     };
-    IF $caller != 'root' AND $caller != $sh.created_by {
+    IF $who != 'root' AND $who != $sh.created_by {
         THROW 'sfs:denied';
     };
     UPDATE $sh.id SET revoked = true;
@@ -2313,10 +2700,11 @@ DEFINE FUNCTION OVERWRITE fn::sfs_resolve_share($tok: string) {
     RETURN $s;
 } PERMISSIONS FULL;
 
-DEFINE FUNCTION OVERWRITE fn::sfs_list_shares($caller: string) {
-    RETURN IF $caller = 'root'
+DEFINE FUNCTION OVERWRITE fn::sfs_list_shares($caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
+    RETURN IF $who = 'root'
         THEN (SELECT * FROM share WHERE revoked = false ORDER BY created_at DESC)
-        ELSE (SELECT * FROM share WHERE created_by = $caller AND revoked = false ORDER BY created_at DESC)
+        ELSE (SELECT * FROM share WHERE created_by = $who AND revoked = false ORDER BY created_at DESC)
     END;
 } PERMISSIONS FULL;
 
@@ -2351,7 +2739,11 @@ DEFINE FIELD OVERWRITE delivered_at ON webhook_delivery TYPE datetime DEFAULT ti
 DEFINE INDEX OVERWRITE idx_delivery_webhook ON webhook_delivery FIELDS webhook_id;
 
 -- Group Management Functions (Section 24.1)
-DEFINE FUNCTION OVERWRITE fn::sfs_create_group($name: string, $description: option<string>) {
+DEFINE FUNCTION OVERWRITE fn::sfs_create_group($name: string, $description: option<string>, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
+    IF $who != 'root' {
+        THROW 'sfs:denied';
+    };
     LET $existing = (SELECT * FROM ONLY user_group WHERE name = $name LIMIT 1);
     IF $existing IS NOT NONE {
         RETURN $existing;
@@ -2360,7 +2752,11 @@ DEFINE FUNCTION OVERWRITE fn::sfs_create_group($name: string, $description: opti
     RETURN (SELECT * FROM ONLY user_group WHERE name = $name LIMIT 1);
 } PERMISSIONS FULL;
 
-DEFINE FUNCTION OVERWRITE fn::sfs_add_group_member($group: string, $user: string) {
+DEFINE FUNCTION OVERWRITE fn::sfs_add_group_member($group: string, $user: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
+    IF $who != 'root' {
+        THROW 'sfs:denied';
+    };
     LET $grp = (SELECT * FROM ONLY user_group WHERE name = $group LIMIT 1);
     IF $grp IS NONE {
         CREATE user_group SET name = $group, created_at = time::now();
@@ -2373,7 +2769,11 @@ DEFINE FUNCTION OVERWRITE fn::sfs_add_group_member($group: string, $user: string
     RETURN true;
 } PERMISSIONS FULL;
 
-DEFINE FUNCTION OVERWRITE fn::sfs_remove_group_member($group: string, $user: string) {
+DEFINE FUNCTION OVERWRITE fn::sfs_remove_group_member($group: string, $user: string, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
+    IF $who != 'root' {
+        THROW 'sfs:denied';
+    };
     DELETE group_member WHERE group_name = $group AND user_id = $user;
     RETURN true;
 } PERMISSIONS FULL;
@@ -2386,13 +2786,14 @@ DEFINE FUNCTION OVERWRITE fn::sfs_get_user_groups($user: string) {
     RETURN (SELECT group_name FROM group_member WHERE user_id = $user ORDER BY group_name ASC).group_name;
 } PERMISSIONS FULL;
 
-DEFINE FUNCTION OVERWRITE fn::sfs_chgrp($path: string, $group: option<string>, $caller: any) {
+DEFINE FUNCTION OVERWRITE fn::sfs_chgrp($path: string, $group: option<string>, $caller: option<string>) {
+    LET $who = fn::sfs_caller($caller);
     LET $id = fn::sfs_resolve($path);
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
     LET $row = (SELECT owner FROM ONLY $id);
-    IF $caller != 'root' AND $caller != $row.owner {
+    IF $who != 'root' AND $who != $row.owner {
         THROW 'sfs:denied';
     };
     UPDATE $id SET group = $group, updated_at = time::now();
