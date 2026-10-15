@@ -1,9 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { type Subprocess, spawn } from "bun";
 import { Surreal } from "surrealdb";
 import {
   ConflictError,
   NotFoundError,
+  PermissionDeniedError,
+  SCHEMA_SQL,
   SurrealFs,
   applySchema,
   createSurrealFsTools,
@@ -14,6 +18,17 @@ import {
 } from "../src/index.js";
 
 describe("SurrealFS TypeScript SDK", () => {
+  describe("Schema Parity", () => {
+    test("SCHEMA_SQL matches surrealfs/schema/file.surql byte-for-byte", () => {
+      const canonicalPath = resolve(
+        import.meta.dir,
+        "../../../surrealfs/schema/file.surql"
+      );
+      const canonical = readFileSync(canonicalPath, "utf8");
+      expect(SCHEMA_SQL).toBe(canonical);
+    });
+  });
+
   describe("Path Utilities", () => {
     test("normalize handles relative, trailing slashes, and traversal", () => {
       expect(normalize("foo/bar")).toBe("/foo/bar");
@@ -134,7 +149,7 @@ describe("SurrealFS TypeScript SDK", () => {
       expect(content).not.toContain("Second line");
     });
 
-    test("mkdir, ls, and tree", async () => {
+    test("mkdir, ls, glob, and tree", async () => {
       await fs.mkdir("/projects/sub", { parents: true });
       await fs.writeText("/projects/sub/a.txt", "A");
       await fs.writeText("/projects/sub/b.txt", "B");
@@ -142,6 +157,12 @@ describe("SurrealFS TypeScript SDK", () => {
       const list = await fs.ls("/projects/sub");
       expect(list.length).toBe(2);
       expect(list.map((e) => e.filename).sort()).toEqual(["a.txt", "b.txt"]);
+
+      const globbed = await fs.glob("/projects/**/*.txt");
+      expect(globbed.map((e) => e.path).sort()).toEqual([
+        "/projects/sub/a.txt",
+        "/projects/sub/b.txt",
+      ]);
 
       const tree = await fs.tree("/projects");
       expect(tree).toContain("/projects/sub");
@@ -159,10 +180,14 @@ describe("SurrealFS TypeScript SDK", () => {
       expect(await fs.readText("/tmp/copied.txt")).toBe("move me");
     });
 
-    test("rm removes files and directories", async () => {
-      await fs.writeText("/trash/file.txt", "to delete");
+    test("rm and undelete", async () => {
+      await fs.writeText("/trash/file.txt", "recover me");
       await fs.rm("/trash/file.txt");
       expect(await fs.exists("/trash/file.txt")).toBe(false);
+
+      const recovered = await fs.undelete("/trash/file.txt");
+      expect(recovered.path).toBe("/trash/file.txt");
+      expect(await fs.readText("/trash/file.txt")).toBe("recover me");
 
       await fs.mkdir("/trash/dir", { parents: true });
       await fs.writeText("/trash/dir/inner.txt", "inner");
@@ -170,16 +195,107 @@ describe("SurrealFS TypeScript SDK", () => {
       expect(await fs.exists("/trash/dir")).toBe(false);
     });
 
-    test("history and restore", async () => {
+    test("history, diff, and restore", async () => {
       await fs.writeText("/history/doc.txt", "version 1\n");
       await fs.writeText("/history/doc.txt", "version 2\n");
+      await fs.writeText("/history/doc.txt", "version 3\n");
 
       const hist = await fs.history("/history/doc.txt");
-      expect(hist.length).toBeGreaterThanOrEqual(1);
+      expect(hist.length).toBeGreaterThanOrEqual(2);
+      expect(hist[0].size).toBeGreaterThan(0);
+      expect(hist[0].op).toBeDefined();
+
+      const diffText = await fs.diff("/history/doc.txt", 1, 2);
+      expect(diffText).toContain("-version 1");
+      expect(diffText).toContain("+version 2");
 
       await fs.restore("/history/doc.txt", 1);
       const restored = await fs.readText("/history/doc.txt");
       expect(restored).toBe("version 1\n");
+    });
+
+    test("chmod, chgrp, and immutable chown", async () => {
+      await fs.writeText("/perms/secret.txt", "top secret");
+      const modEntry = await fs.chmod("/perms/secret.txt", 0o640);
+      expect(modEntry.mode).toBe(0o640);
+
+      const grpEntry = await fs.chgrp("/perms/secret.txt", "eng");
+      expect(grpEntry.group).toBe("eng");
+
+      let chownThrew = false;
+      try {
+        await fs.chown("/perms/secret.txt", "bob");
+      } catch (err) {
+        chownThrew = true;
+        expect(err instanceof PermissionDeniedError).toBe(true);
+      }
+      expect(chownThrew).toBe(true);
+    });
+
+    test("writeBytes and readBytes roundtrip", async () => {
+      const payload = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const entry = await fs.writeBytes("/bin/logo.png", payload, {
+        contentType: "image/png",
+      });
+      expect(entry.path).toBe("/bin/logo.png");
+      expect(entry.size).toBe(payload.byteLength);
+
+      const out = await fs.readBytes("/bin/logo.png");
+      expect(Array.from(out)).toEqual(Array.from(payload));
+    });
+
+    test("relate and backlinks", async () => {
+      await fs.writeText("/graph/source.md", "See target");
+      await fs.writeText("/graph/target.md", "Target doc");
+
+      await fs.relate("/graph/source.md", "links_to", "/graph/target.md");
+      const links = await fs.backlinks("/graph/target.md");
+      expect(links.length).toBeGreaterThanOrEqual(1);
+      expect(links[0].sourcePath).toBe("/graph/source.md");
+      expect(links[0].relation).toBe("links_to");
+    });
+
+    test("search and searchSections", async () => {
+      // Fill corpus so BM25 IDF is positive
+      for (let i = 0; i < 8; i++) {
+        await fs.writeText(`/corpus/filler-${i}.md`, `Background document number ${i}`);
+      }
+      await fs.writeText(
+        "/corpus/quantum.md",
+        "Quantum entanglement telemetry protocol specifications for orbital links."
+      );
+
+      const hits = await fs.search("entanglement telemetry");
+      expect(hits.some((h) => h.path === "/corpus/quantum.md")).toBe(true);
+      const hit = hits.find((h) => h.path === "/corpus/quantum.md")!;
+      expect(hit.snippet).toContain("entanglement");
+
+      // Insert a 1536-dim section and query via searchSections
+      const vec = Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1.0 : 0.0));
+      const stat = await fs.stat("/corpus/quantum.md");
+      await db.query(
+        `CREATE file_section CONTENT {
+          file_id: $fid,
+          section_idx: 0,
+          heading: 'Quantum Protocol',
+          content: 'Orbital entanglement telemetry details',
+          line_start: 1,
+          line_end: 5,
+          source_hash: 'h1',
+          embedding: $vec
+        };`,
+        { fid: stat.id, vec }
+      );
+
+      const secHits = await fs.searchSections(vec, {
+        limit: 5,
+        pathPrefix: "/corpus",
+      });
+      expect(secHits.length).toBeGreaterThanOrEqual(1);
+      expect(secHits[0].path).toBe("/corpus/quantum.md");
+      expect(secHits[0].startLine).toBe(1);
+      expect(secHits[0].endLine).toBe(5);
+      expect(secHits[0].score).toBeGreaterThan(0.9);
     });
 
     test("advisory locking and conflict", async () => {
@@ -188,6 +304,7 @@ describe("SurrealFS TypeScript SDK", () => {
 
       const lockPath = "/shared/spec.md";
       await fsAlice.writeText(lockPath, "# Spec");
+      await fsAlice.chmod(lockPath, 0o666);
 
       const lease = await fsAlice.acquireLock(lockPath, {
         ttlSeconds: 30,
@@ -214,7 +331,7 @@ describe("SurrealFS TypeScript SDK", () => {
       await fsBob.releaseLock(lockPath);
     });
 
-    test("zero-copy workspace fork, diff, and merge", async () => {
+    test("zero-copy workspace fork, diff (modified + newly created), and merge", async () => {
       await fs.writeText("/repo/main.ts", "console.log('main');");
 
       // Fork workspace
@@ -224,24 +341,35 @@ describe("SurrealFS TypeScript SDK", () => {
       const workspaces = await fs.listWorkspaces();
       expect(workspaces.some((ws) => ws.name === "feature-ts")).toBe(true);
 
-      // Modify in workspace
+      // Modify existing file AND create a brand-new file in workspace
       await fs.writeWorkspaceText(
         "feature-ts",
         "/repo/main.ts",
         "console.log('feature');"
       );
+      await fs.writeWorkspaceText(
+        "feature-ts",
+        "/repo/new_helper.ts",
+        "export const helper = 42;"
+      );
 
       const diff = await fs.diffWorkspace("feature-ts");
       const modified = diff.filter((d) => d.modified);
-      expect(modified.length).toBe(1);
-      expect(modified[0].modified).toBe(true);
-      expect(modified[0].conflict).toBe(false);
+      expect(modified.some((d) => d.path === "/repo/main.ts")).toBe(true);
+      expect(
+        modified.some(
+          (d) => d.path === "/repo/new_helper.ts" && d.status === "added"
+        )
+      ).toBe(true);
 
       // Merge workspace
       const merge = await fs.mergeWorkspace("feature-ts", "main");
       expect(merge.status).toBe("ok");
 
       expect(await fs.readText("/repo/main.ts")).toBe("console.log('feature');");
+      expect(await fs.readText("/repo/new_helper.ts")).toBe(
+        "export const helper = 42;"
+      );
     });
 
     test("agent actor mailbox FIFO claim and complete", async () => {
@@ -265,6 +393,12 @@ describe("SurrealFS TypeScript SDK", () => {
       expect(tools.ls).toBeDefined();
       expect(tools.read_file).toBeDefined();
       expect(tools.write_file).toBeDefined();
+      expect(tools.cp).toBeDefined();
+      expect(tools.chmod).toBeDefined();
+      expect(tools.restore).toBeDefined();
+      expect(tools.undelete).toBeDefined();
+      expect(tools.relate).toBeDefined();
+      expect(tools.backlinks).toBeDefined();
 
       const writeRes = await tools.write_file.execute({
         path: "/ai/test.txt",
@@ -280,15 +414,25 @@ describe("SurrealFS TypeScript SDK", () => {
     });
 
     test("grep searches lines by text pattern and regex", async () => {
-      await fs.writeText("/code/app.ts", "const port = 8080;\nconst host = 'localhost';\nconsole.log(port);");
-      await fs.writeText("/code/server.py", "port = 8080\nhost = '0.0.0.0'\nprint(port)");
+      await fs.writeText(
+        "/code/app.ts",
+        "const port = 8080;\nconst host = 'localhost';\nconsole.log(port);"
+      );
+      await fs.writeText(
+        "/code/server.py",
+        "port = 8080\nhost = '0.0.0.0'\nprint(port)"
+      );
 
       const matches = await fs.grep("8080", { pathPrefix: "/code" });
       expect(matches.length).toBe(2);
-      expect(matches.some((m) => m.path === "/code/app.ts" && m.lineNumber === 1)).toBe(true);
-      expect(matches.some((m) => m.path === "/code/server.py" && m.lineNumber === 1)).toBe(true);
+      expect(
+        matches.some((m) => m.path === "/code/app.ts" && m.lineNumber === 1)
+      ).toBe(true);
+      expect(
+        matches.some((m) => m.path === "/code/server.py" && m.lineNumber === 1)
+      ).toBe(true);
 
-      const tsOnly = await fs.grep("port", { glob: "*.ts" });
+      const tsOnly = await fs.grep("port", { pathPrefix: "/code", glob: "*.ts" });
       expect(tsOnly.length).toBe(2);
       expect(tsOnly.every((m) => m.path.endsWith(".ts"))).toBe(true);
 

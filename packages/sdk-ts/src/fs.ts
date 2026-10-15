@@ -4,9 +4,13 @@
 
 import { type RecordId, Surreal, Table } from "surrealdb";
 import {
+  AlreadyExistsError,
   ConflictError,
+  InvalidPathError,
+  IsADirectoryError,
   mapSurrealError,
   NotFoundError,
+  PermissionDeniedError,
   SurrealFsError,
 } from "./errors.js";
 import {
@@ -22,7 +26,7 @@ import {
   type WorkspaceDiff,
   type WorkspaceEntry,
 } from "./models.js";
-import { globToRegex, normalize, parentPath } from "./paths.js";
+import { fileName, globToRegex, normalize } from "./paths.js";
 
 export interface SurrealFsOptions {
   user?: string;
@@ -34,6 +38,83 @@ export interface SurrealFsServerOptions {
   token?: string;
   user?: string;
   branch?: string;
+}
+
+export interface WriteOptions {
+  ifGeneration?: number;
+  createParents?: boolean;
+  contentType?: string;
+}
+
+const INLINE_MAX_BYTES = 262_144;
+const CHUNK_SIZE_BYTES = 1_048_576;
+
+function makeSnippet(content: string, query: string, width: number = 240): string {
+  if (!content) return "";
+  const flat = content.split(/\s+/).join(" ").trim();
+  if (flat.length <= width) return flat;
+
+  const terms = (query.toLowerCase().match(/\w+/g) ?? []).filter((t) => t.length > 0);
+  const lower = flat.toLowerCase();
+  const positions: number[] = [];
+  for (const t of terms) {
+    const pos = lower.indexOf(t);
+    if (pos >= 0) positions.push(pos);
+  }
+  if (positions.length === 0) {
+    return `${flat.slice(0, width)}...`;
+  }
+  const hit = Math.min(...positions);
+  const start = Math.max(0, hit - Math.floor(width / 3));
+  const end = Math.min(flat.length, start + width);
+  const prefix = start > 0 ? "..." : "";
+  const suffix = end < flat.length ? "..." : "";
+  return `${prefix}${flat.slice(start, end)}${suffix}`;
+}
+
+function formatUnifiedDiff(
+  path: string,
+  fromGen: number,
+  toGen: number,
+  fromContent: string,
+  toContent: string
+): string {
+  const fromLines = fromContent ? fromContent.split(/\r?\n/) : [];
+  const toLines = toContent ? toContent.split(/\r?\n/) : [];
+  const out: string[] = [
+    `--- ${path} (gen ${fromGen})`,
+    `+++ ${path} (gen ${toGen})`,
+    `@@ -1,${fromLines.length} +1,${toLines.length} @@`,
+  ];
+  const maxLen = Math.max(fromLines.length, toLines.length);
+  for (let i = 0; i < maxLen; i++) {
+    const a = i < fromLines.length ? fromLines[i] : undefined;
+    const b = i < toLines.length ? toLines[i] : undefined;
+    if (a === b && a !== undefined) {
+      out.push(` ${a}`);
+    } else {
+      if (a !== undefined) out.push(`-${a}`);
+      if (b !== undefined) out.push(`+${b}`);
+    }
+  }
+  return out.join("\n");
+}
+
+function toBytes(val: unknown): Uint8Array | null {
+  if (val === null || val === undefined) return null;
+  if (val instanceof Uint8Array) return val;
+  if (val instanceof ArrayBuffer) return new Uint8Array(val);
+  if (ArrayBuffer.isView(val)) {
+    return new Uint8Array(val.buffer, val.byteOffset, val.byteLength);
+  }
+  if (Array.isArray(val)) return new Uint8Array(val);
+  return null;
+}
+
+function validateBranchName(branch: string): void {
+  if (!branch || branch.includes("/") || branch === "." || branch === "..") {
+    throw new InvalidPathError(branch, `Invalid workspace branch name: ${branch}`);
+  }
 }
 
 class ServerRpcClient {
@@ -122,6 +203,7 @@ export class SurrealFs {
   }
 
   setBranch(branch: string): void {
+    validateBranchName(branch);
     this.branch = branch;
   }
 
@@ -129,8 +211,12 @@ export class SurrealFs {
     sql: string,
     vars: Record<string, unknown> = {}
   ): Promise<T> {
+    const cleanVars: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(vars)) {
+      cleanVars[k] = v === null ? undefined : v;
+    }
     try {
-      const results = await this.db.query<unknown[]>(sql, vars);
+      const results = await this.db.query<unknown[]>(sql, cleanVars);
       if (Array.isArray(results) && results.length > 0) {
         return results[0] as T;
       }
@@ -150,7 +236,8 @@ export class SurrealFs {
       if (!res || (typeof res === "object" && Object.keys(res).length === 0)) {
         throw new NotFoundError(clean);
       }
-      return parseFileEntry(res as Record<string, unknown>);
+      const entry = parseFileEntry(res as Record<string, unknown>);
+      return entry;
     } catch (err) {
       throw mapSurrealError(err, clean);
     }
@@ -161,7 +248,9 @@ export class SurrealFs {
       await this.stat(path);
       return true;
     } catch (err) {
-      if (err instanceof NotFoundError) return false;
+      if (err instanceof NotFoundError || err instanceof PermissionDeniedError) {
+        return false;
+      }
       throw err;
     }
   }
@@ -177,6 +266,35 @@ export class SurrealFs {
       return res.map((r) => parseFileEntry(r as Record<string, unknown>));
     } catch (err) {
       throw mapSurrealError(err, clean);
+    }
+  }
+
+  async glob(pattern: string): Promise<FileEntry[]> {
+    const cleanPattern = normalize(pattern);
+    const rx = globToRegex(cleanPattern);
+    try {
+      const rows = await this.queryRaw<Record<string, unknown>[]>(
+        `
+        RETURN {
+          LET $who = fn::sfs_caller($caller);
+          RETURN (
+            SELECT id, filename, path, content_type, is_folder, owner, group, mode, gate,
+                   hash, generation, created_at, updated_at, size, meta, crdt
+            FROM file
+            WHERE deleted_at IS NONE
+              AND ($who = 'root' OR fn::sfs_can_read_grp(gate, owner, mode, $who, group))
+            ORDER BY path ASC
+          );
+        };
+        `,
+        { caller: this.user }
+      );
+      if (!Array.isArray(rows)) return [];
+      return rows
+        .map((r) => parseFileEntry(r))
+        .filter((entry) => rx.test(entry.path));
+    } catch (err) {
+      throw mapSurrealError(err, cleanPattern);
     }
   }
 
@@ -214,6 +332,12 @@ export class SurrealFs {
 
   async readText(path: string): Promise<string> {
     const clean = normalize(path);
+    if (this.branch !== "main" && !clean.startsWith("/.workspaces/")) {
+      const branchPath = `/.workspaces/${this.branch}${clean}`;
+      if (await this.exists(branchPath)) {
+        return await this.readText(branchPath);
+      }
+    }
     try {
       const res = await this.queryRaw<unknown>(
         "RETURN fn::sfs_read($path, $caller);",
@@ -229,15 +353,184 @@ export class SurrealFs {
     }
   }
 
+  async readBytes(path: string): Promise<Uint8Array> {
+    const clean = normalize(path);
+    try {
+      const res = await this.queryRaw<unknown>(
+        "RETURN fn::sfs_read($path, $caller);",
+        { path: clean, caller: this.user }
+      );
+      const directBytes = toBytes(res);
+      if (directBytes !== null) {
+        return directBytes;
+      }
+      if (typeof res === "string" && res.length > 0) {
+        return new TextEncoder().encode(res);
+      }
+      if (res && typeof res === "object") {
+        const rec = res as Record<string, unknown>;
+        const inlineBytes = toBytes(rec.file);
+        if (inlineBytes !== null) {
+          return inlineBytes;
+        }
+        if (typeof rec.content === "string" && rec.content.length > 0) {
+          return new TextEncoder().encode(rec.content);
+        }
+      }
+      const entry = await this.stat(clean);
+      if (entry.size === 0) {
+        return new Uint8Array(0);
+      }
+      const chunkBytes = await this.queryRaw<unknown>(
+        "RETURN fn::sfs_read_bytes_range($path, 0, $length, $caller);",
+        { path: clean, length: Math.max(entry.size, 104_857_600), caller: this.user }
+      );
+      const decoded = toBytes(chunkBytes);
+      if (decoded !== null) {
+        return decoded;
+      }
+      return new Uint8Array(0);
+    } catch (err) {
+      throw mapSurrealError(err, clean);
+    }
+  }
+
+  async writeBytes(
+    path: string,
+    data: Uint8Array,
+    options: WriteOptions = {}
+  ): Promise<FileEntry> {
+    const clean = normalize(path);
+    if (clean === "/") {
+      throw new IsADirectoryError(clean);
+    }
+    const name = fileName(clean);
+    try {
+      if (data.byteLength <= INLINE_MAX_BYTES) {
+        const res = await this.queryRaw<Record<string, unknown>>(
+          `
+          RETURN {
+            LET $who = fn::sfs_caller($caller);
+            LET $parent_id = IF $parents {
+                fn::sfs_ensure_parents($path, $who)
+            } ELSE {
+                LET $parts = array::filter(string::split($path, '/'), |$s| $s != '');
+                LET $dir_parts = array::slice($parts, 0, array::len($parts) - 1);
+                IF array::len($dir_parts) == 0 {
+                    NONE
+                } ELSE {
+                    LET $pid = fn::sfs_resolve('/' + array::join($dir_parts, '/'));
+                    IF $pid IS NONE { THROW 'sfs:not_found' };
+                    $pid
+                }
+            };
+            IF !fn::sfs_home_ok($parent_id, $filename, $who) {
+                THROW 'sfs:denied';
+            };
+            LET $pkey = IF $parent_id IS NONE { 'root' } ELSE { <string>$parent_id };
+            LET $existing = (SELECT * FROM ONLY file WHERE parent_key = $pkey AND filename = $filename LIMIT 1);
+            IF $existing IS NOT NONE AND $existing.is_folder AND $existing.deleted_at IS NONE {
+                THROW 'sfs:is_a_directory';
+            };
+            IF $if_gen IS NOT NONE {
+                LET $actual = IF $existing IS NONE OR $existing.deleted_at IS NOT NONE { 0 } ELSE { $existing.generation };
+                IF $actual != $if_gen {
+                    THROW 'sfs:conflict';
+                };
+            };
+            LET $mime = fn::sfs_guess_mime($filename, $content_type);
+            IF $existing IS NONE {
+                IF $parent_id IS NOT NONE AND $who != 'root' {
+                    LET $prow = (SELECT gate, owner, group, mode FROM ONLY $parent_id);
+                    IF !fn::sfs_can_write_grp($prow.gate, $prow.owner, $prow.mode, $who, $prow.group) {
+                        THROW 'sfs:denied';
+                    };
+                };
+                CREATE ONLY file CONTENT {
+                    filename: $filename,
+                    parent: $parent_id,
+                    content: NONE,
+                    file: <bytes>$data,
+                    size: $size,
+                    content_type: $mime,
+                    owner: $who,
+                    generation: 1
+                };
+            } ELSE {
+                IF $existing.deleted_at IS NONE AND $who != 'root' AND !fn::sfs_can_write_grp($existing.gate, $existing.owner, $existing.mode, $who, $existing.group) {
+                    THROW 'sfs:denied';
+                };
+                UPDATE ONLY $existing.id MERGE {
+                    content: NONE,
+                    file: <bytes>$data,
+                    size: $size,
+                    content_type: $mime,
+                    deleted_at: NONE,
+                    updated_at: time::now()
+                };
+            };
+            RETURN fn::sfs_stat($path);
+          };
+          `,
+          {
+            path: clean,
+            filename: name,
+            data,
+            size: data.byteLength,
+            if_gen: options.ifGeneration ?? null,
+            parents: options.createParents ?? true,
+            content_type: options.contentType ?? null,
+            caller: this.user,
+          }
+        );
+        return parseFileEntry(res);
+      }
+
+      const session = await this.queryRaw<Record<string, unknown>>(
+        "RETURN fn::sfs_upload_begin($path, $content_type, $total_size, $caller);",
+        {
+          path: clean,
+          content_type: options.contentType ?? "application/octet-stream",
+          total_size: data.byteLength,
+          caller: this.user,
+        }
+      );
+      const sessionId = session.id;
+      let idx = 0;
+      for (let offset = 0; offset < data.byteLength; offset += CHUNK_SIZE_BYTES) {
+        const chunk = data.subarray(
+          offset,
+          Math.min(offset + CHUNK_SIZE_BYTES, data.byteLength)
+        );
+        await this.queryRaw(
+          "RETURN fn::sfs_upload_chunk($session_id, $chunk_idx, <bytes>$data);",
+          {
+            session_id: sessionId,
+            chunk_idx: idx,
+            data: chunk,
+          }
+        );
+        idx += 1;
+      }
+      const committed = await this.queryRaw<Record<string, unknown>>(
+        "RETURN fn::sfs_upload_commit($session_id, $caller);",
+        { session_id: sessionId, caller: this.user }
+      );
+      return parseFileEntry(committed);
+    } catch (err) {
+      throw mapSurrealError(err, clean);
+    }
+  }
+
   async writeText(
     path: string,
     content: string,
-    options: { ifGeneration?: number; createParents?: boolean } = {}
+    options: WriteOptions = {}
   ): Promise<FileEntry> {
-    if (this.branch !== "main" && !path.startsWith("/.workspaces/")) {
-      return await this.writeWorkspaceText(this.branch, path, content);
-    }
     const clean = normalize(path);
+    if (this.branch !== "main" && !clean.startsWith("/.workspaces/")) {
+      return await this.writeWorkspaceText(this.branch, clean, content);
+    }
     const existing = await this.stat(clean).catch(() => null);
     if (existing?.crdt) {
       const { doc, nextSeq, baseGen } = await this.loadCrdtDoc(clean);
@@ -255,13 +548,14 @@ export class SurrealFs {
     }
     try {
       const res = await this.queryRaw<unknown>(
-        "RETURN fn::sfs_write($path, $content, $if_gen, $parents, $caller);",
+        "RETURN fn::sfs_write($path, $content, $if_gen, $parents, $caller, $content_type);",
         {
           path: clean,
           content,
           if_gen: options.ifGeneration ?? null,
           parents: options.createParents ?? true,
           caller: this.user,
+          content_type: options.contentType ?? null,
         }
       );
       return parseFileEntry(res as Record<string, unknown>);
@@ -273,9 +567,10 @@ export class SurrealFs {
   async appendText(
     path: string,
     suffix: string,
-    options: { ifGeneration?: number } = {}
+    options: { ifGeneration?: number } | number = {}
   ): Promise<FileEntry> {
     const clean = normalize(path);
+    const opts = typeof options === "number" ? { ifGeneration: options } : options;
     const existing = await this.stat(clean).catch(() => null);
     if (existing?.crdt) {
       const { doc, nextSeq, baseGen } = await this.loadCrdtDoc(clean);
@@ -295,7 +590,7 @@ export class SurrealFs {
         {
           path: clean,
           suffix,
-          if_gen: options.ifGeneration ?? null,
+          if_gen: opts.ifGeneration ?? null,
           caller: this.user,
         }
       );
@@ -309,27 +604,57 @@ export class SurrealFs {
     path: string,
     oldText: string,
     newText: string,
-    options: { ifGeneration?: number } = {}
+    options: { ifGeneration?: number; replaceAll?: boolean } = {}
   ): Promise<FileEntry> {
     const clean = normalize(path);
-    const existing = await this.stat(clean).catch(() => null);
-    if (existing?.crdt) {
+    if (!oldText) {
+      throw new InvalidPathError(clean, "oldText must not be empty");
+    }
+    const existing = await this.stat(clean);
+    if (existing.crdt) {
       const { doc, nextSeq, baseGen } = await this.loadCrdtDoc(clean);
       const text = doc.getText("text");
       const str = text.toString();
       const idx = str.indexOf(oldText);
       if (idx === -1) {
-        throw new ConflictError(`Pattern not found in file: ${oldText}`);
+        throw new ConflictError(clean, `Pattern not found in file: ${oldText}`);
+      }
+      if (!options.replaceAll && str.indexOf(oldText, idx + oldText.length) !== -1) {
+        throw new ConflictError(
+          clean,
+          "oldText matches multiple locations; set replaceAll: true"
+        );
       }
       let delta = new Uint8Array(0);
       doc.on("update", (update: Uint8Array) => {
         delta = new Uint8Array(update);
       });
       doc.transact(() => {
-        text.delete(idx, oldText.length);
-        text.insert(idx, newText);
+        if (options.replaceAll) {
+          const updated = str.split(oldText).join(newText);
+          text.delete(0, str.length);
+          text.insert(0, updated);
+        } else {
+          text.delete(idx, oldText.length);
+          text.insert(idx, newText);
+        }
       });
       return await this.applyCrdtMutation(clean, delta, text.toString(), nextSeq, baseGen);
+    }
+
+    const currentContent = await this.readText(clean);
+    const firstIdx = currentContent.indexOf(oldText);
+    if (firstIdx === -1) {
+      throw new ConflictError(clean, `Pattern not found in file: ${oldText}`);
+    }
+    if (
+      !options.replaceAll &&
+      currentContent.indexOf(oldText, firstIdx + oldText.length) !== -1
+    ) {
+      throw new ConflictError(
+        clean,
+        "oldText matches multiple locations; set replaceAll: true"
+      );
     }
     try {
       const res = await this.queryRaw<unknown>(
@@ -424,9 +749,22 @@ export class SurrealFs {
   async chmod(path: string, mode: number): Promise<FileEntry> {
     const clean = normalize(path);
     try {
-      const res = await this.queryRaw<unknown>(
+      await this.queryRaw<unknown>(
         "RETURN fn::sfs_chmod($path, $mode, $caller);",
         { path: clean, mode, caller: this.user }
+      );
+      return await this.stat(clean);
+    } catch (err) {
+      throw mapSurrealError(err, clean);
+    }
+  }
+
+  async chgrp(path: string, group: string | null): Promise<FileEntry> {
+    const clean = normalize(path);
+    try {
+      const res = await this.queryRaw<unknown>(
+        "RETURN fn::sfs_chgrp($path, $group, $caller);",
+        { path: clean, group, caller: this.user }
       );
       return parseFileEntry(res as Record<string, unknown>);
     } catch (err) {
@@ -434,25 +772,20 @@ export class SurrealFs {
     }
   }
 
-  async chown(path: string, owner: string): Promise<FileEntry> {
+  async chown(path: string, _owner: string): Promise<FileEntry> {
     const clean = normalize(path);
-    try {
-      const res = await this.queryRaw<unknown>(
-        "RETURN fn::sfs_chown($path, $owner, $caller);",
-        { path: clean, owner, caller: this.user }
-      );
-      return parseFileEntry(res as Record<string, unknown>);
-    } catch (err) {
-      throw mapSurrealError(err, clean);
-    }
+    throw new PermissionDeniedError(
+      clean,
+      "owner is immutable in SurrealFS; use chgrp to change group"
+    );
   }
 
   async history(path: string, limit?: number): Promise<FileVersionEntry[]> {
     const clean = normalize(path);
     try {
       const rows = await this.queryRaw<unknown[]>(
-        "RETURN fn::sfs_history($path, $limit);",
-        { path: clean, limit: limit ?? 20 }
+        "RETURN fn::sfs_history($path, $limit, $caller);",
+        { path: clean, limit: limit ?? 20, caller: this.user }
       );
       if (!Array.isArray(rows)) return [];
       return rows.map((r: any) => ({
@@ -461,6 +794,8 @@ export class SurrealFs {
         createdAt: r.created_at ?? null,
         author: String(r.author ?? ""),
         hash: r.hash ?? null,
+        size: Number(r.size ?? 0),
+        op: String(r.op ?? "write"),
       }));
     } catch (err) {
       throw mapSurrealError(err, clean);
@@ -474,7 +809,7 @@ export class SurrealFs {
   ): Promise<string> {
     const clean = normalize(path);
     try {
-      const res = await this.queryRaw<unknown>(
+      const res = await this.queryRaw<any>(
         "RETURN fn::sfs_diff($path, $gen_a, $gen_b, $caller);",
         {
           path: clean,
@@ -483,6 +818,20 @@ export class SurrealFs {
           caller: this.user,
         }
       );
+      if (typeof res === "string") return res;
+      if (res && typeof res === "object") {
+        const fromGen = Number(res.from_generation ?? genA ?? 0);
+        const toGen = Number(res.to_generation ?? genB ?? 0);
+        const fromContent = String(res.from_content ?? "");
+        let toContent = String(res.to_content ?? "");
+        if (!toContent && genB !== undefined) {
+          const stat = await this.stat(clean);
+          if (stat.generation === genB) {
+            toContent = await this.readText(clean);
+          }
+        }
+        return formatUnifiedDiff(clean, fromGen, toGen, fromContent, toContent);
+      }
       return String(res ?? "");
     } catch (err) {
       throw mapSurrealError(err, clean);
@@ -502,25 +851,124 @@ export class SurrealFs {
     }
   }
 
+  async undelete(path: string): Promise<FileEntry> {
+    const clean = normalize(path);
+    if (await this.exists(clean)) {
+      throw new AlreadyExistsError(clean);
+    }
+    try {
+      const rows = await this.queryRaw<any[]>(
+        "SELECT * FROM file_version WHERE path = $path ORDER BY created_at DESC, generation DESC LIMIT 1;",
+        { path: clean }
+      );
+      const snap = Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+      if (!snap) {
+        throw new NotFoundError(clean, `No version snapshot found for ${clean}`);
+      }
+      const bytes = toBytes(snap.file_bytes ?? snap.file);
+      if (bytes !== null) {
+        return await this.writeBytes(clean, bytes);
+      }
+      return await this.writeText(clean, String(snap.content ?? ""));
+    } catch (err) {
+      throw mapSurrealError(err, clean);
+    }
+  }
+
   async search(
     query: string,
-    options: { limit?: number; match?: "any" | "all" } = {}
+    optionsOrLimit: { limit?: number; match?: "any" | "all" } | number = {},
+    matchArg?: "any" | "all"
   ): Promise<SearchHit[]> {
+    const opts =
+      typeof optionsOrLimit === "number"
+        ? { limit: optionsOrLimit, match: matchArg }
+        : optionsOrLimit;
     try {
       const rows = await this.queryRaw<unknown[]>(
-        "RETURN fn::sfs_search_text($query, $match, $limit, $caller);",
+        "RETURN fn::sfs_search_text($q, $k, $match, $me);",
         {
-          query,
-          match: options.match ?? "any",
-          limit: options.limit ?? 20,
-          caller: this.user,
+          q: query,
+          k: opts.limit ?? 20,
+          match: opts.match ?? "any",
+          me: this.user,
         }
       );
       if (!Array.isArray(rows)) return [];
       return rows.map((r: any) => ({
         path: String(r.path ?? ""),
         score: Number(r.score ?? 0),
-        snippet: String(r.snippet ?? ""),
+        snippet: r.snippet
+          ? String(r.snippet)
+          : makeSnippet(String(r.content ?? ""), query),
+        generation: Number(r.generation ?? 1),
+        updatedAt: r.updated_at ?? null,
+      }));
+    } catch (err) {
+      throw mapSurrealError(err);
+    }
+  }
+
+  async searchSemantic(
+    vector: number[],
+    optionsOrLimit: { limit?: number } | number = {}
+  ): Promise<SearchHit[]> {
+    const limit =
+      typeof optionsOrLimit === "number"
+        ? optionsOrLimit
+        : (optionsOrLimit.limit ?? 10);
+    try {
+      const rows = await this.queryRaw<unknown[]>(
+        "RETURN fn::sfs_search_semantic($qvec, $k, $me);",
+        {
+          qvec: vector,
+          k: limit,
+          me: this.user,
+        }
+      );
+      if (!Array.isArray(rows)) return [];
+      return rows.map((r: any) => ({
+        path: String(r.path ?? ""),
+        score: Number(r.score ?? 0),
+        snippet: r.snippet
+          ? String(r.snippet)
+          : makeSnippet(String(r.content ?? ""), ""),
+        generation: Number(r.generation ?? 1),
+        updatedAt: r.updated_at ?? null,
+      }));
+    } catch (err) {
+      throw mapSurrealError(err);
+    }
+  }
+
+  async searchHybrid(
+    query: string,
+    vector: number[],
+    optionsOrLimit: { limit?: number; match?: "any" | "all" } | number = {},
+    matchArg?: "any" | "all"
+  ): Promise<SearchHit[]> {
+    const opts =
+      typeof optionsOrLimit === "number"
+        ? { limit: optionsOrLimit, match: matchArg }
+        : optionsOrLimit;
+    try {
+      const rows = await this.queryRaw<unknown[]>(
+        "RETURN fn::sfs_hybrid_search($q, $qvec, $k, $match, $me);",
+        {
+          q: query,
+          qvec: vector,
+          k: opts.limit ?? 10,
+          match: opts.match ?? "any",
+          me: this.user,
+        }
+      );
+      if (!Array.isArray(rows)) return [];
+      return rows.map((r: any) => ({
+        path: String(r.path ?? ""),
+        score: Number(r.score ?? 0),
+        snippet: r.snippet
+          ? String(r.snippet)
+          : makeSnippet(String(r.content ?? ""), query),
         generation: Number(r.generation ?? 1),
         updatedAt: r.updated_at ?? null,
       }));
@@ -593,28 +1041,40 @@ export class SurrealFs {
 
   async searchSections(
     vector: number[],
-    options: { limit?: number; pathPrefix?: string } = {}
+    optionsOrLimit: { limit?: number; pathPrefix?: string } | number = {},
+    pathPrefixArg?: string
   ): Promise<SectionHit[]> {
+    const opts =
+      typeof optionsOrLimit === "number"
+        ? { limit: optionsOrLimit, pathPrefix: pathPrefixArg }
+        : optionsOrLimit;
+    const normPrefix = opts.pathPrefix ? normalize(opts.pathPrefix) : null;
     try {
       const rows = await this.queryRaw<unknown[]>(
-        "RETURN fn::sfs_search_sections($vector, $limit, $prefix);",
+        "RETURN fn::sfs_search_sections($qvec, $k, $me, $prefix);",
         {
-          vector,
-          limit: options.limit ?? 10,
-          prefix: options.pathPrefix ?? "",
+          qvec: vector,
+          k: opts.limit ?? 10,
+          me: this.user,
+          prefix: normPrefix,
         }
       );
       if (!Array.isArray(rows)) return [];
-      return rows.map((r: any) => ({
-        path: String(r.path ?? ""),
-        heading: String(r.heading ?? ""),
-        content: String(r.content ?? ""),
-        distance: Number(r.dist ?? 0),
-        score: Number(r.score ?? 0),
-        tokenCount: Number(r.token_count ?? 0),
-        startLine: Number(r.start_line ?? 0),
-        endLine: Number(r.end_line ?? 0),
-      }));
+      return rows.map((r: any) => {
+        const dist = Number(r.distance ?? r.dist ?? 0);
+        const score =
+          r.score !== undefined ? Number(r.score) : Math.max(0, 1.0 - dist);
+        return {
+          path: String(r.path ?? ""),
+          heading: String(r.heading ?? ""),
+          content: String(r.content ?? ""),
+          distance: dist,
+          score,
+          tokenCount: Number(r.token_count ?? 0),
+          startLine: Number(r.line_start ?? r.start_line ?? 0),
+          endLine: Number(r.line_end ?? r.end_line ?? 0),
+        };
+      });
     } catch (err) {
       throw mapSurrealError(err);
     }
@@ -642,20 +1102,26 @@ export class SurrealFs {
     }
   }
 
-  async backlinks(path: string): Promise<GraphRelation[]> {
+  async backlinks(path: string, relation?: string): Promise<GraphRelation[]> {
     const clean = normalize(path);
     try {
       const rows = await this.queryRaw<unknown[]>(
-        "RETURN fn::sfs_backlinks($path);",
-        { path: clean }
+        "RETURN fn::sfs_backlinks($path, $caller);",
+        { path: clean, caller: this.user }
       );
       if (!Array.isArray(rows)) return [];
-      return rows.map((r: any) => ({
-        source: String(r.source ?? ""),
-        relation: String(r.relation ?? ""),
-        target: String(r.target ?? ""),
-        createdAt: r.created_at ?? null,
-      }));
+      const mapped = rows.map((r: any) => {
+        const srcPath = String(r.source_path ?? r.source ?? r.path ?? "");
+        return {
+          source: srcPath,
+          sourcePath: srcPath,
+          sourceName: String(r.source_name ?? fileName(srcPath)),
+          relation: String(r.relation ?? ""),
+          target: clean,
+          createdAt: r.created_at ?? null,
+        };
+      });
+      return relation ? mapped.filter((m) => m.relation === relation) : mapped;
     } catch (err) {
       throw mapSurrealError(err, clean);
     }
@@ -720,6 +1186,8 @@ export class SurrealFs {
     dstBranch: string,
     srcBranch: string = "main"
   ): Promise<{ workspace: string; count: number }> {
+    validateBranchName(dstBranch);
+    validateBranchName(srcBranch);
     try {
       const res = await this.queryRaw<any>(
         "RETURN fn::sfs_fork_workspace($src, $dst, $owner);",
@@ -756,6 +1224,7 @@ export class SurrealFs {
   }
 
   async diffWorkspace(branch: string): Promise<WorkspaceDiff[]> {
+    validateBranchName(branch);
     try {
       const rows = await this.queryRaw<any[]>(
         "RETURN fn::sfs_diff_workspace($branch, $owner);",
@@ -764,10 +1233,17 @@ export class SurrealFs {
       if (!Array.isArray(rows)) return [];
       return rows.map((r: any) => ({
         path: String(r.path ?? ""),
+        status: r.status
+          ? String(r.status)
+          : r.base_file == null
+          ? "added"
+          : r.modified
+          ? "modified"
+          : "unchanged",
         modified: Boolean(r.modified),
         conflict: Boolean(r.conflict),
-        baseGen: Number(r.base_gen ?? 1),
-        currentGen: Number(r.current_gen ?? 1),
+        baseGen: Number(r.base_gen ?? 0),
+        currentGen: Number(r.branch_gen ?? r.current_gen ?? 1),
       }));
     } catch (err) {
       throw mapSurrealError(err, branch);
@@ -779,11 +1255,9 @@ export class SurrealFs {
     path: string,
     content: string
   ): Promise<FileEntry> {
+    validateBranchName(branch);
     const clean = normalize(path);
     try {
-      const branchPath = `/.workspaces/${branch}${clean}`;
-      const branchFile = await this.writeText(branchPath, content);
-
       const wsRows = await this.queryRaw<any[]>(
         "SELECT VALUE id FROM ONLY workspace WHERE name = $branch AND owner = $owner LIMIT 1;",
         { branch, owner: this.user }
@@ -791,19 +1265,25 @@ export class SurrealFs {
       const wsId = Array.isArray(wsRows) ? wsRows[0] : wsRows;
       if (!wsId) throw new NotFoundError(branch, `Workspace not found: ${branch}`);
 
+      const branchPath = `/.workspaces/${branch}${clean}`;
+      const branchFile = await this.writeText(branchPath, content);
+
       await this.queryRaw<unknown>(
         `
-        LET $existing = (SELECT * FROM ONLY file_branch WHERE workspace = $ws AND path = $path LIMIT 1);
-        IF $existing IS NOT NONE {
-            UPDATE $existing.id SET current_file = $branch_file;
-        } ELSE {
-            CREATE file_branch CONTENT {
-                workspace: $ws,
-                base_file: $branch_file,
-                path: $path,
-                base_gen: 1,
-                current_file: $branch_file
-            };
+        RETURN {
+          LET $existing = (SELECT * FROM ONLY file_branch WHERE workspace = $ws AND path = $path LIMIT 1);
+          IF $existing IS NOT NONE {
+              UPDATE $existing.id SET current_file = $branch_file;
+          } ELSE {
+              CREATE file_branch CONTENT {
+                  workspace: $ws,
+                  base_file: NONE,
+                  path: $path,
+                  base_gen: 0,
+                  current_file: $branch_file
+              };
+          };
+          RETURN true;
         };
         `,
         { ws: wsId, path: clean, branch_file: branchFile.id }
@@ -818,6 +1298,8 @@ export class SurrealFs {
     branch: string,
     target: string = "main"
   ): Promise<{ status: string }> {
+    validateBranchName(branch);
+    validateBranchName(target);
     try {
       const res = await this.queryRaw<any>(
         "RETURN fn::sfs_merge_workspace($branch, $target, $owner);",
@@ -835,6 +1317,7 @@ export class SurrealFs {
   }
 
   async discardWorkspace(branch: string): Promise<{ discarded: string }> {
+    validateBranchName(branch);
     try {
       const res = await this.queryRaw<any>(
         "RETURN fn::sfs_discard_workspace($branch, $owner);",
@@ -902,89 +1385,11 @@ export class SurrealFs {
     }
   }
 
-  async postMailbox(
-    agentId: string,
-    op: string,
-    payload: Record<string, unknown>,
-    priority: number = 0
-  ): Promise<string> {
-    const res = await this.queryRaw<any>(
-      `CREATE file_mailbox CONTENT {
-        agent_id: $agent_id,
-        op: $op,
-        payload: $payload,
-        priority: $priority,
-        state: 'pending',
-        created_at: time::now()
-      };`,
-      {
-        agent_id: agentId,
-        op,
-        payload,
-        priority,
-      }
-    );
-    const id = Array.isArray(res) && res.length > 0 ? res[0]?.id : res?.id;
-    return String(id ?? "");
-  }
-
-  async claimMailbox(
-    agentId: string,
-    workerId: string = "default",
-    leaseSeconds: number = 60
-  ): Promise<any | null> {
-    const sql = `
-      LET $target = (
-        SELECT id FROM file_mailbox 
-        WHERE agent_id = $agent 
-          AND (state = 'pending' OR (state = 'processing' AND lease_expires_at < time::now()))
-        ORDER BY priority DESC, created_at ASC 
-        LIMIT 1
-      )[0].id;
-
-      IF $target != NONE {
-        UPDATE $target SET 
-          state = 'processing',
-          worker_id = $worker,
-          claimed_at = time::now(),
-          lease_expires_at = time::now() + type::duration(string::concat($ttl, 's'));
-        SELECT * FROM ONLY $target;
-      } ELSE {
-        RETURN NONE;
-      };
-    `;
-    const res = await this.db.query<any[]>(sql, {
-      agent: agentId,
-      worker: workerId,
-      ttl: leaseSeconds,
-    });
-    if (Array.isArray(res) && res.length >= 2) {
-      return res[1] ?? null;
-    }
-    return null;
-  }
-
-  async completeMailbox(
-    messageId: string,
-    result: Record<string, unknown>
-  ): Promise<void> {
-    await this.db.query(
-      `UPDATE type::record($msg_id) SET 
-        state = 'completed',
-        completed_at = time::now(),
-        result = $res;`,
-      {
-        msg_id: messageId,
-        res: result,
-      }
-    );
-  }
-
   async watch(
     pathPattern: string,
     callback: (event: WatchEvent) => void
   ): Promise<{ unsubscribe: () => Promise<void> }> {
-    const regex = globToRegex(pathPattern);
+    const regex = globToRegex(normalize(pathPattern));
     const sub = await this.db.live(new Table("file"));
     const unsub = sub.subscribe((message) => {
       if (message.action === "KILLED") return;
@@ -1115,16 +1520,8 @@ export class SurrealFs {
     const res = await this.queryRaw<any>(sql, { path: clean });
     const Y = await import("yjs");
     const doc = new Y.Doc();
-    const toUint8Array = (val: any): Uint8Array | null => {
-      if (!val) return null;
-      if (val instanceof Uint8Array) return val;
-      if (val instanceof ArrayBuffer) return new Uint8Array(val);
-      if (ArrayBuffer.isView(val)) return new Uint8Array(val.buffer, val.byteOffset, val.byteLength);
-      if (Array.isArray(val)) return new Uint8Array(val);
-      return null;
-    };
 
-    const snapBytes = toUint8Array(res.snap_state);
+    const snapBytes = toBytes(res.snap_state);
     if (snapBytes && snapBytes.byteLength > 0) {
       Y.applyUpdate(doc, snapBytes);
     }
@@ -1134,7 +1531,7 @@ export class SurrealFs {
         if (Number(u.seq) > maxSeq) {
           maxSeq = Number(u.seq);
         }
-        const uBytes = toUint8Array(u.update_bytes);
+        const uBytes = toBytes(u.update_bytes);
         if (uBytes && uBytes.byteLength > 0) {
           Y.applyUpdate(doc, uBytes);
         }

@@ -11,6 +11,7 @@ export interface FileEntry {
   contentType: string;
   isFolder: boolean;
   owner: string;
+  group?: string | null;
   mode: number;
   gate: string;
   hash: string | null;
@@ -30,7 +31,11 @@ export interface FileVersionEntry {
   createdAt: string | Date | null;
   author: string;
   hash: string | null;
+  size: number;
+  op: string;
 }
+
+export type VersionEntry = FileVersionEntry;
 
 export interface SearchHit {
   path: string;
@@ -73,6 +78,7 @@ export interface WorkspaceEntry {
 
 export interface WorkspaceDiff {
   path: string;
+  status?: string;
   modified: boolean;
   conflict: boolean;
   baseGen: number;
@@ -88,6 +94,8 @@ export interface LockInfo {
 
 export interface GraphRelation {
   source: string;
+  sourcePath: string;
+  sourceName: string;
   relation: string;
   target: string;
   createdAt: string | Date | null;
@@ -101,6 +109,7 @@ export function parseFileEntry(raw: Record<string, unknown>): FileEntry {
     contentType: String(raw.content_type ?? raw.contentType ?? "application/octet-stream"),
     isFolder: Boolean(raw.is_folder ?? raw.isFolder),
     owner: String(raw.owner ?? "root"),
+    group: (raw.group as string) ?? null,
     mode: Number(raw.mode ?? 0o666),
     gate: String(raw.gate ?? "open"),
     hash: (raw.hash as string) ?? null,

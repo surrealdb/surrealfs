@@ -8,6 +8,7 @@ and agent mailboxes against the exact same SurrealDB instance.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -15,6 +16,36 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RUST_CLI_BIN = REPO_ROOT / "target" / "debug" / "surrealfs-rs"
+
+requires_cargo_and_bun = pytest.mark.skipif(
+    shutil.which("cargo") is None or shutil.which("bun") is None,
+    reason="cargo and bun are required for cross-language conformance tests",
+)
+
+
+def test_schema_sql_parity():
+    """Verify surrealfs/schema/file.surql matches packages/sdk-ts/src/schema_sql.ts."""
+    surql = (REPO_ROOT / "surrealfs" / "schema" / "file.surql").read_text("utf-8")
+    if shutil.which("bun") is not None:
+        res = subprocess.run(
+            [
+                "bun",
+                "-e",
+                "import { SCHEMA_SQL } from './packages/sdk-ts/src/index.ts'; "
+                "process.stdout.write(SCHEMA_SQL);",
+            ],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert res.stdout == surql
+    else:
+        ts_src = (
+            REPO_ROOT / "packages" / "sdk-ts" / "src" / "schema_sql.ts"
+        ).read_text("utf-8")
+        assert "export const SCHEMA_SQL = FILE_SCHEMA;" in ts_src
+
 
 
 def _ensure_rust_cli():
@@ -88,6 +119,7 @@ try {{
     return res.stdout
 
 
+@requires_cargo_and_bun
 @pytest.mark.asyncio
 async def test_cross_language_crud_roundtrip(fs, surreal_url, namespace):
     """Verify write in Python -> read in Rust -> append in TS -> read in Python."""
@@ -138,6 +170,7 @@ console.log('TS_APPEND_OK');
     assert "notes.txt" in filenames
 
 
+@requires_cargo_and_bun
 @pytest.mark.asyncio
 async def test_cross_language_advisory_locks(fs, surreal_url, namespace):
     """Verify advisory locking across Rust CLI, TS SDK, and Python."""
@@ -181,6 +214,7 @@ console.log('TS_UNLOCKED_OK');
     assert "TS_UNLOCKED_OK" in ts_out2
 
 
+@requires_cargo_and_bun
 @pytest.mark.asyncio
 async def test_cross_language_workspaces_and_mailboxes(fs, surreal_url, namespace):
     """Verify zero-copy workspace fork/diff/merge & mailboxes across languages."""
@@ -241,6 +275,7 @@ console.log('TS_MAILBOX_PROCESSED');
     assert len(messages_after) == 0
 
 
+@requires_cargo_and_bun
 @pytest.mark.asyncio
 async def test_cross_language_recursive_tree_and_grep(fs, surreal_url, namespace):
     """Verify recursive directory operations, tree traversal, and grep."""
@@ -276,6 +311,7 @@ console.log('TS_TREE_OK');
     assert not await fs.exists("/tree/sub/a.txt")
 
 
+@requires_cargo_and_bun
 @pytest.mark.asyncio
 async def test_cross_language_history_and_restore(fs, surreal_url, namespace):
     """Verify version history tracking and rollback across Rust, TS, and Python."""
@@ -313,6 +349,7 @@ console.log('HIST_LEN_' + hist.length);
     assert content == "Generation One Draft"
 
 
+@requires_cargo_and_bun
 @pytest.mark.asyncio
 async def test_cross_language_crdt_collaboration_and_chunking(
     fs, surreal_url, namespace

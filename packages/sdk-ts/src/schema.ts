@@ -3,9 +3,9 @@
  */
 
 import type { Surreal } from "surrealdb";
-import { FILE_SCHEMA, RECORD_AUTH_SCHEMA } from "./schema_sql.js";
+import { FILE_SCHEMA, RECORD_AUTH_SCHEMA, SCHEMA_SQL } from "./schema_sql.js";
 
-export { FILE_SCHEMA, RECORD_AUTH_SCHEMA };
+export { FILE_SCHEMA, RECORD_AUTH_SCHEMA, SCHEMA_SQL };
 
 export function schemaSql(options: { recordAuth?: boolean } = {}): string {
   return options.recordAuth

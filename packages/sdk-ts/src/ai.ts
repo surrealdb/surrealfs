@@ -59,11 +59,23 @@ export function createSurrealFsTools(fs: SurrealFs): Record<string, ToolDefiniti
         properties: {
           path: { type: "string", description: "Absolute path to write" },
           content: { type: "string", description: "UTF-8 text content" },
+          branch: { type: "string", description: "Optional workspace branch" },
         },
         required: ["path", "content"],
       },
-      execute: async ({ path, content }: { path: string; content: string }) => {
-        const entry = await fs.writeText(path, content);
+      execute: async ({
+        path,
+        content,
+        branch,
+      }: {
+        path: string;
+        content: string;
+        branch?: string;
+      }) => {
+        const entry =
+          branch && branch !== "main"
+            ? await fs.writeWorkspaceText(branch, path, content)
+            : await fs.writeText(path, content);
         return { path: entry.path, generation: entry.generation, size: entry.size };
       },
     },
@@ -92,6 +104,7 @@ export function createSurrealFsTools(fs: SurrealFs): Record<string, ToolDefiniti
           path: { type: "string", description: "Absolute path to edit" },
           old_text: { type: "string", description: "Exact text to find and replace" },
           new_text: { type: "string", description: "Replacement text" },
+          replace_all: { type: "boolean", description: "Replace all occurrences" },
         },
         required: ["path", "old_text", "new_text"],
       },
@@ -99,13 +112,132 @@ export function createSurrealFsTools(fs: SurrealFs): Record<string, ToolDefiniti
         path,
         old_text,
         new_text,
+        replace_all,
       }: {
         path: string;
         old_text: string;
         new_text: string;
+        replace_all?: boolean;
       }) => {
-        const entry = await fs.editText(path, old_text, new_text);
+        const entry = await fs.editText(path, old_text, new_text, {
+          replaceAll: replace_all,
+        });
         return { path: entry.path, generation: entry.generation };
+      },
+    },
+
+    cp: {
+      description: "Copy a file or directory to a destination path",
+      parameters: {
+        type: "object",
+        properties: {
+          src: { type: "string", description: "Source path" },
+          dst: { type: "string", description: "Destination path" },
+          recursive: { type: "boolean", description: "Copy directories recursively" },
+        },
+        required: ["src", "dst"],
+      },
+      execute: async ({
+        src,
+        dst,
+        recursive,
+      }: {
+        src: string;
+        dst: string;
+        recursive?: boolean;
+      }) => {
+        const entry = await fs.cp(src, dst, { recursive });
+        return { path: entry.path, generation: entry.generation };
+      },
+    },
+
+    chmod: {
+      description: "Change POSIX permission mode on a file or directory",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Target path" },
+          mode: { type: "number", description: "POSIX mode bits (e.g. 0o644)" },
+        },
+        required: ["path", "mode"],
+      },
+      execute: async ({ path, mode }: { path: string; mode: number }) => {
+        const entry = await fs.chmod(path, mode);
+        return { path: entry.path, mode: entry.mode };
+      },
+    },
+
+    restore: {
+      description: "Restore a file to a previous version generation",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to restore" },
+          generation: { type: "number", description: "Target generation number" },
+        },
+        required: ["path", "generation"],
+      },
+      execute: async ({ path, generation }: { path: string; generation: number }) => {
+        const entry = await fs.restore(path, generation);
+        return { path: entry.path, generation: entry.generation };
+      },
+    },
+
+    undelete: {
+      description: "Recover a deleted file from its most recent version snapshot",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to undelete" },
+        },
+        required: ["path"],
+      },
+      execute: async ({ path }: { path: string }) => {
+        const entry = await fs.undelete(path);
+        return { path: entry.path, generation: entry.generation };
+      },
+    },
+
+    relate: {
+      description: "Create a semantic knowledge graph edge between two files",
+      parameters: {
+        type: "object",
+        properties: {
+          source_path: { type: "string", description: "Source file path" },
+          relation: {
+            type: "string",
+            description: "Relation type (links_to, summarizes, derived_from, superseding)",
+          },
+          target_path: { type: "string", description: "Target file path" },
+        },
+        required: ["source_path", "relation", "target_path"],
+      },
+      execute: async ({
+        source_path,
+        relation,
+        target_path,
+      }: {
+        source_path: string;
+        relation: string;
+        target_path: string;
+      }) => {
+        await fs.relate(source_path, relation, target_path);
+        return { source: source_path, relation, target: target_path };
+      },
+    },
+
+    backlinks: {
+      description: "List incoming knowledge graph relations pointing to a file",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Target file path" },
+          relation: { type: "string", description: "Optional relation filter" },
+        },
+        required: ["path"],
+      },
+      execute: async ({ path, relation }: { path: string; relation?: string }) => {
+        return await fs.backlinks(path, relation);
       },
     },
 

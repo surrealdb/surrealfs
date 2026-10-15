@@ -34,6 +34,8 @@ export class AlreadyExistsError extends SurrealFsError {
   }
 }
 
+export { AlreadyExistsError as FileExistsError };
+
 export class DirectoryNotEmptyError extends SurrealFsError {
   constructor(public readonly path: string, message?: string) {
     super(message ?? `Directory not empty: ${path}`);
@@ -52,15 +54,35 @@ export class NotADirectoryError extends SurrealFsError {
   }
 }
 
+export class InvalidPathError extends SurrealFsError {
+  constructor(public readonly path: string, message?: string) {
+    super(message ?? `Invalid path: ${path}`);
+  }
+}
+
+export class LegalHoldError extends PermissionDeniedError {
+  constructor(path: string, message?: string) {
+    super(path, message ?? `File is under legal hold: ${path}`);
+  }
+}
+
 export function mapSurrealError(err: unknown, path: string = ""): Error {
   if (err instanceof SurrealFsError) return err;
   const msg = err instanceof Error ? err.message : String(err);
   const lower = msg.toLowerCase();
 
+  if (lower.includes("sfs:legal_hold") || lower.includes("legal hold")) {
+    return new LegalHoldError(path, msg);
+  }
   if (lower.includes("sfs:not_found") || lower.includes("not found")) {
     return new NotFoundError(path, msg);
   }
-  if (lower.includes("sfs:permission_denied") || lower.includes("permission denied")) {
+  if (
+    lower.includes("sfs:permission_denied") ||
+    lower.includes("sfs:denied") ||
+    lower.includes("sfs:denied_or_missing") ||
+    lower.includes("permission denied")
+  ) {
     return new PermissionDeniedError(path, msg);
   }
   if (
@@ -71,17 +93,38 @@ export function mapSurrealError(err: unknown, path: string = ""): Error {
   ) {
     return new ConflictError(path, msg);
   }
-  if (lower.includes("sfs:already_exists") || lower.includes("already exists")) {
+  if (
+    lower.includes("sfs:already_exists") ||
+    lower.includes("sfs:exists") ||
+    lower.includes("already exists")
+  ) {
     return new AlreadyExistsError(path, msg);
   }
   if (lower.includes("sfs:not_empty") || lower.includes("directory not empty")) {
     return new DirectoryNotEmptyError(path, msg);
   }
-  if (lower.includes("sfs:is_a_directory") || lower.includes("is a directory")) {
+  if (
+    lower.includes("sfs:is_a_directory") ||
+    lower.includes("sfs:is_folder") ||
+    lower.includes("is a directory")
+  ) {
     return new IsADirectoryError(path, msg);
   }
-  if (lower.includes("sfs:not_a_directory") || lower.includes("not a directory")) {
+  if (
+    lower.includes("sfs:not_a_directory") ||
+    lower.includes("sfs:not_folder") ||
+    lower.includes("not a directory")
+  ) {
     return new NotADirectoryError(path, msg);
+  }
+  if (
+    lower.includes("sfs:invalid_path") ||
+    lower.includes("sfs:invalid_name") ||
+    lower.includes("sfs:invalid_mode") ||
+    lower.includes("sfs:invalid_move") ||
+    lower.includes("sfs:invalid_copy")
+  ) {
+    return new InvalidPathError(path, msg);
   }
   return new SurrealFsError(msg);
 }
