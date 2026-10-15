@@ -2,9 +2,13 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::Arc;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::net::{TcpListener, TcpStream};
+#[cfg(not(target_arch = "wasm32"))]
 use tracing::debug;
 
 /// Incoming HTTP request (§22).
@@ -19,6 +23,41 @@ pub struct HttpRequest {
 }
 
 impl HttpRequest {
+    /// Construct an `HttpRequest` from method, target (path + optional `?query`), headers, and body.
+    pub fn from_parts(
+        method: &str,
+        full_target: &str,
+        headers: HashMap<String, String>,
+        body: Vec<u8>,
+    ) -> Self {
+        let (raw_path, raw_query) = match full_target.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (full_target, ""),
+        };
+        let path = urlencoding_decode(raw_path);
+        let mut query = HashMap::new();
+        if !raw_query.is_empty() {
+            for pair in raw_query.split('&') {
+                let mut kv = pair.splitn(2, '=');
+                let k = urlencoding_decode(kv.next().unwrap_or(""));
+                let v = urlencoding_decode(kv.next().unwrap_or(""));
+                query.insert(k, v);
+            }
+        }
+        let mut lower_headers = HashMap::with_capacity(headers.len());
+        for (k, v) in headers {
+            lower_headers.insert(k.to_ascii_lowercase(), v);
+        }
+        Self {
+            method: method.to_uppercase(),
+            path,
+            raw_query: raw_query.to_string(),
+            query,
+            headers: lower_headers,
+            body,
+        }
+    }
+
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .get(&name.to_ascii_lowercase())
@@ -27,6 +66,14 @@ impl HttpRequest {
 
     pub fn query_param(&self, name: &str) -> Option<&str> {
         self.query.get(name).map(|s| s.as_str())
+    }
+
+    pub fn clean_path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn query_params(&self) -> &HashMap<String, String> {
+        &self.query
     }
 }
 
@@ -47,6 +94,46 @@ impl HttpResponse {
             headers: HashMap::new(),
             body: Vec::new(),
         }
+    }
+
+    pub fn empty(status: u16) -> Self {
+        let status_text = match status {
+            200 => "OK",
+            202 => "Accepted",
+            204 => "No Content",
+            _ => "OK",
+        };
+        Self::new(status, status_text)
+    }
+
+    pub fn with_bytes(status: u16, body: Vec<u8>, content_type: &str) -> Self {
+        let status_text = match status {
+            200 => "OK",
+            201 => "Created",
+            _ => "OK",
+        };
+        Self::new(status, status_text)
+            .header("Content-Type", content_type)
+            .body(body)
+    }
+
+    pub fn json<T: serde::Serialize>(status: u16, payload: &T) -> Self {
+        let status_text = match status {
+            200 => "OK",
+            201 => "Created",
+            400 => "Bad Request",
+            401 => "Unauthorized",
+            403 => "Forbidden",
+            404 => "Not Found",
+            409 => "Conflict",
+            412 => "Precondition Failed",
+            423 => "Locked",
+            _ => "Error",
+        };
+        let body = serde_json::to_vec(payload).unwrap_or_else(|_| b"{}".to_vec());
+        Self::new(status, status_text)
+            .header("Content-Type", "application/json; charset=utf-8")
+            .body(body)
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Self {
@@ -147,12 +234,14 @@ impl HttpResponse {
 }
 
 /// Handler for processing HTTP requests asynchronously (§22).
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait HttpHandler: Send + Sync {
     async fn handle(&self, req: HttpRequest) -> HttpResponse;
 }
 
 /// Parses an incoming raw HTTP request from a TCP stream.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
     let mut buf = Vec::new();
     let mut temp = [0u8; 4096];
@@ -257,6 +346,7 @@ pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
 }
 
 /// Serializes and sends an HTTP response to a TCP stream.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn send_response(stream: &mut TcpStream, res: HttpResponse) -> std::io::Result<()> {
     let mut head = format!("HTTP/1.1 {} {}\r\n", res.status, res.status_text);
 
@@ -307,6 +397,7 @@ pub fn urlencoding_decode(input: &str) -> String {
 }
 
 /// Serves an HTTP handler on a given socket address.
+#[cfg(not(target_arch = "wasm32"))]
 pub async fn run_http_server<H: HttpHandler + 'static>(
     addr: &str,
     handler: Arc<H>,
@@ -337,3 +428,10 @@ pub async fn run_http_server<H: HttpHandler + 'static>(
         });
     }
 }
+
+/// Convenience helper to serve an owned `HttpHandler` on a TCP socket address.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn serve_http<H: HttpHandler + 'static>(addr: &str, handler: H) -> std::io::Result<()> {
+    run_http_server(addr, Arc::new(handler)).await
+}
+

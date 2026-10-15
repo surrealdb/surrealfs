@@ -5,22 +5,42 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "surrealfs-server"
+path = "src/main.rs"
+
 [dependencies]
 surrealfs-core = { path = "../surrealfs-core" }
-tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
-chrono.workspace = true
 blake3.workspace = true
 sha2.workspace = true
 hex.workspace = true
 hmac.workspace = true
 md-5.workspace = true
 base64.workspace = true
+regex.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio.workspace = true
+chrono.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.42", default-features = false, features = ["sync", "macros", "io-util"] }
+chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Headers", "Request", "Response", "ResponseInit"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

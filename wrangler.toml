@@ -1,0 +1,23 @@
+name = "surrealfs"
+main = "worker/index.mjs"
+compatibility_date = "2025-03-01"
+
+[build]
+command = "cargo build -p surrealfs-server --target wasm32-unknown-unknown --release"
+
+[assets]
+directory = "./surrealfs/browser/static"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[vars]
+SURREALDB_NS = "surrealfs"
+SURREALDB_DB = "main"
+SURREALFS_EMBED_MODEL = "text-embedding-3-small"
+SURREALFS_CHAT_MODEL = "claude-sonnet-4-6"
+# Set secrets via `wrangler secret put`:
+# - SURREALDB_URL (e.g., https://your-instance.cloud.surrealdb.com)
+# - SURREALDB_USER / SURREALDB_PASS or SURREALDB_TOKEN
+# - OPENAI_API_KEY (optional, enables server-side embeddings on file writes)
+# - ANTHROPIC_API_KEY (optional, enables server-side /api/chat agent)
+# - SURREALFS_SERVER_TOKEN (optional, shared bearer token for Layer 1 clients)

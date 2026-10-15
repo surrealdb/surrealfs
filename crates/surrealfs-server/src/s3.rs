@@ -402,7 +402,8 @@ impl S3Server {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl HttpHandler for S3Server {
     async fn handle(&self, req: HttpRequest) -> HttpResponse {
         // Authenticate S3 request if authorization header is provided (§22)

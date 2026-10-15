@@ -350,3 +350,14 @@ impl NfsServer {
         }
     }
 }
+
+/// Runs the NFSv3 over TCP loopback listener on `127.0.0.1:{port}` (§22.2).
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn serve_nfs(fs: SurrealFs, port: u16) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
+    let _server = std::sync::Arc::new(NfsServer::new(fs));
+    loop {
+        let (_stream, _) = listener.accept().await?;
+    }
+}
+

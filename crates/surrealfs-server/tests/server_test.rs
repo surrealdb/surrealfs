@@ -449,3 +449,111 @@ async fn test_credentials_and_authentication() {
     fs.revoke_credential("webdav", "alice").await.unwrap();
     assert!(auth.authenticate_basic(&header_val).await.is_err());
 }
+
+#[tokio::test]
+async fn test_unified_gateway_api_mcp_and_rpc() {
+    let fs = setup_test_fs().await;
+    let gateway = surrealfs_server::SurrealFsGateway::new(fs.clone());
+
+    // 1. Write file via REST API (/api/file)
+    let req = HttpRequest {
+        method: "POST".into(),
+        path: "/api/file".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: serde_json::to_vec(&serde_json::json!({
+            "path": "/notes/hello.md",
+            "content": "# Hello Gateway\n\nUnified Layer 2 test.",
+            "mkdir_parents": true
+        }))
+        .unwrap(),
+    };
+    let res = gateway.handle(req).await;
+    assert_eq!(res.status, 200);
+
+    // 2. Read file via REST API (/api/file?path=/notes/hello.md)
+    let mut query = HashMap::new();
+    query.insert("path".into(), "/notes/hello.md".into());
+    let req = HttpRequest {
+        method: "GET".into(),
+        path: "/api/file".into(),
+        raw_query: "path=/notes/hello.md".into(),
+        query,
+        headers: HashMap::new(),
+        body: Vec::new(),
+    };
+    let res = gateway.handle(req).await;
+    assert_eq!(res.status, 200);
+    let body_json: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+    assert_eq!(
+        body_json.get("content").and_then(|v| v.as_str()),
+        Some("# Hello Gateway\n\nUnified Layer 2 test.")
+    );
+
+    // 3. Streamable HTTP MCP (/mcp): tools/list + tools/call (cat)
+    let mcp_list_req = HttpRequest {
+        method: "POST".into(),
+        path: "/mcp".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {}
+        }))
+        .unwrap(),
+    };
+    let res = gateway.handle(mcp_list_req).await;
+    assert_eq!(res.status, 200);
+    let list_json: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+    let tools = list_json["result"]["tools"].as_array().unwrap();
+    assert!(tools.len() >= 15);
+
+    let mcp_call_req = HttpRequest {
+        method: "POST".into(),
+        path: "/mcp".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: serde_json::to_vec(&serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "cat",
+                "arguments": { "path": "/notes/hello.md" }
+            }
+        }))
+        .unwrap(),
+    };
+    let res = gateway.handle(mcp_call_req).await;
+    assert_eq!(res.status, 200);
+    let call_json: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+    let text = call_json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("Hello Gateway"));
+
+    // 4. Client RPC proxy (/api/rpc)
+    let rpc_req = HttpRequest {
+        method: "POST".into(),
+        path: "/api/rpc".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: serde_json::to_vec(&serde_json::json!({
+            "sql": "RETURN fn::sfs_read($path, $caller);",
+            "vars": { "path": "/notes/hello.md" }
+        }))
+        .unwrap(),
+    };
+    let res = gateway.handle(rpc_req).await;
+    assert_eq!(res.status, 200);
+    let rpc_json: serde_json::Value = serde_json::from_slice(&res.body).unwrap();
+    assert_eq!(
+        rpc_json["result"][0]["result"].as_str(),
+        Some("# Hello Gateway\n\nUnified Layer 2 test.")
+    );
+}
+
