@@ -66,4 +66,16 @@ public final class KeychainService: @unchecked Sendable {
         let status = SecItemDelete(query as CFDictionary)
         return status == errSecSuccess || status == errSecItemNotFound
     }
+    
+    public func saveSecret(_ secret: String, for profile: ConnectionProfile) -> Bool {
+        return saveSecret(secret, for: profile.id.uuidString)
+    }
+    
+    public func getSecret(for profile: ConnectionProfile) -> String? {
+        return getSecret(for: profile.id.uuidString) ?? getSecret(for: profile.username)
+    }
+    
+    public func deleteSecret(for profile: ConnectionProfile) -> Bool {
+        return deleteSecret(for: profile.id.uuidString)
+    }
 }

@@ -33,4 +33,24 @@ final class ProfileTests: XCTestCase {
         XCTAssertEqual(profile.username, decoded.username)
         XCTAssertEqual(profile.authLevel, decoded.authLevel)
     }
+    
+    func testProfileKeychainIsolation() {
+        let p1 = ConnectionProfile(name: "Server A", endpoint: "ws://a:8000", username: "root")
+        let p2 = ConnectionProfile(name: "Server B", endpoint: "ws://b:8000", username: "root")
+        let keychain = KeychainService()
+        
+        _ = keychain.saveSecret("secret-a", for: p1)
+        _ = keychain.saveSecret("secret-b", for: p2)
+        
+        XCTAssertEqual(keychain.getSecret(for: p1), "secret-a")
+        XCTAssertEqual(keychain.getSecret(for: p2), "secret-b")
+        
+        _ = keychain.deleteSecret(for: p1)
+        _ = keychain.deleteSecret(for: p2)
+    }
+    
+    func testTerminalAppleScriptEscapesSingleQuotes() {
+        let script = MountManager.terminalAppleScript(forPath: "/tmp/O'Reilly/mnt")
+        XCTAssertEqual(script, "tell application \"Terminal\" to do script \"cd '/tmp/O'\\''Reilly/mnt'\"")
+    }
 }

@@ -59,8 +59,10 @@ public final class SurrealClient: @unchecked Sendable {
             let authPayload: [String: Any]
             if profile.authLevel == .record {
                 authPayload = [
-                    "access": "account",
-                    "user": profile.username,
+                    "NS": profile.namespace,
+                    "DB": profile.database,
+                    "AC": "user",
+                    "name": profile.username,
                     "pass": pass
                 ]
             } else {
@@ -69,17 +71,53 @@ public final class SurrealClient: @unchecked Sendable {
                     "pass": pass
                 ]
             }
-            _ = try? await sendRpc(method: "signin", params: [authPayload])
+            do {
+                _ = try await sendRpc(method: "signin", params: [authPayload])
+            } catch {
+                queue.sync { _state = .error(message: error.localizedDescription) }
+                throw error
+            }
         }
         
         queue.sync { _state = .connected(endpoint: profile.endpoint) }
     }
     
     public func disconnect() {
-        queue.sync {
+        let pending: [Int: CheckedContinuation<Any, Error>] = queue.sync {
             webSocketTask?.cancel(with: .goingAway, reason: nil)
             webSocketTask = nil
             _state = .disconnected
+            let copy = pendingRequests
+            pendingRequests.removeAll()
+            return copy
+        }
+        let err = URLError(.networkConnectionLost)
+        for (_, cont) in pending {
+            cont.resume(throwing: err)
+        }
+    }
+    
+    public static func parseSearchResponse(_ response: Any) -> [SearchResult] {
+        let items: [[String: Any]]
+        if let envelope = response as? [[String: Any]],
+           let first = envelope.first,
+           let result = first["result"] as? [[String: Any]] {
+            items = result
+        } else if let direct = response as? [[String: Any]] {
+            items = direct
+        } else {
+            return []
+        }
+        
+        return items.map { item in
+            let path = item["path"] as? String ?? ""
+            return SearchResult(
+                path: path,
+                filename: (path as NSString).lastPathComponent,
+                snippet: item["snippet"] as? String ?? "",
+                score: item["score"] as? Double ?? 0.0,
+                matchType: "fulltext"
+            )
         }
     }
     
@@ -95,20 +133,7 @@ public final class SurrealClient: @unchecked Sendable {
         
         let sql = "RETURN fn::sfs_search_text($q, $limit, 'any', NONE);"
         let response = try await queryRaw(sql: sql, vars: ["q": query, "limit": limit])
-        
-        guard let items = response as? [[String: Any]] else {
-            return []
-        }
-        
-        return items.map { item in
-            SearchResult(
-                path: item["path"] as? String ?? "",
-                filename: (item["path"] as? String as? NSString)?.lastPathComponent ?? "",
-                snippet: item["snippet"] as? String ?? "",
-                score: item["score"] as? Double ?? 0.0,
-                matchType: "fulltext"
-            )
-        }
+        return Self.parseSearchResponse(response)
     }
     
     public func undo(path: String, generation: Int) async throws -> Bool {
@@ -129,11 +154,20 @@ public final class SurrealClient: @unchecked Sendable {
     }
     
     public func subscribeActivity(listener: @escaping @Sendable (AgentActivity) -> Void) -> UUID {
-        queue.sync {
-            let id = UUID()
-            liveQueryListeners[id] = listener
-            return id
+        let (id, isConn): (UUID, Bool) = queue.sync {
+            let newId = UUID()
+            liveQueryListeners[newId] = listener
+            if case .connected = _state {
+                return (newId, true)
+            }
+            return (newId, false)
         }
+        if isConn {
+            Task {
+                _ = try? await queryRaw(sql: "LIVE SELECT * FROM audit_log;")
+            }
+        }
+        return id
     }
     
     public func unsubscribeActivity(id: UUID) {
@@ -168,10 +202,10 @@ public final class SurrealClient: @unchecked Sendable {
             
             task.send(message) { [weak self] error in
                 if let error = error {
-                    self?.queue.sync {
-                        _ = self?.pendingRequests.removeValue(forKey: reqId)
+                    let removed: CheckedContinuation<Any, Error>? = self?.queue.sync {
+                        self?.pendingRequests.removeValue(forKey: reqId)
                     }
-                    continuation.resume(throwing: error)
+                    removed?.resume(throwing: error)
                 }
             }
         }
@@ -230,7 +264,7 @@ public final class SurrealClient: @unchecked Sendable {
            let actionStr = liveResult["action"] as? String,
            let record = liveResult["result"] as? [String: Any] {
             let path = record["path"] as? String ?? "/"
-            let author = record["author"] as? String ?? record["owner"] as? String ?? "agent"
+            let author = record["caller"] as? String ?? record["author"] as? String ?? record["owner"] as? String ?? "agent"
             let actionType: AgentActivity.ActionType
             switch actionStr.uppercased() {
             case "CREATE": actionType = .write
@@ -260,8 +294,15 @@ public final class SurrealClient: @unchecked Sendable {
     }
     
     private func handleConnectionFailure(_ error: Error) {
-        queue.sync {
+        let pending: [Int: CheckedContinuation<Any, Error>] = queue.sync {
             _state = .error(message: error.localizedDescription)
+            webSocketTask = nil
+            let copy = pendingRequests
+            pendingRequests.removeAll()
+            return copy
+        }
+        for (_, cont) in pending {
+            cont.resume(throwing: error)
         }
     }
 }

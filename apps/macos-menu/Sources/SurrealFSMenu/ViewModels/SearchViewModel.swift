@@ -13,7 +13,7 @@ public final class SearchViewModel: ObservableObject {
     private let client: SurrealClient
     private var searchCancellable: AnyCancellable?
     
-    public init(client: SurrealClient = SurrealClient()) {
+    public init(client: SurrealClient = MountManager.shared.client) {
         self.client = client
         
         $query

@@ -17,7 +17,7 @@ public final class AppViewModel: ObservableObject {
     private var activitySubId: UUID?
     
     public init(
-        client: SurrealClient = SurrealClient(),
+        client: SurrealClient = MountManager.shared.client,
         mountManager: MountManager = .shared,
         keychain: KeychainService = .shared
     ) {
@@ -66,10 +66,11 @@ public final class AppViewModel: ObservableObject {
     }
     
     public func connect() async {
-        let secret = keychain.getSecret(for: activeProfile.username)
+        let secret = keychain.getSecret(for: activeProfile)
         do {
             try await client.connect(profile: activeProfile, secret: secret)
             self.connectionState = client.state
+            _ = try? await client.queryRaw(sql: "LIVE SELECT * FROM audit_log;")
         } catch {
             self.connectionState = .error(message: error.localizedDescription)
         }

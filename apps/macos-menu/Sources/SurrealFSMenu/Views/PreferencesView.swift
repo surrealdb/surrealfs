@@ -74,7 +74,7 @@ public struct PreferencesView: View {
                         )
                         viewModel.profiles.append(newProf)
                         if !newProfilePass.isEmpty {
-                            _ = KeychainService.shared.saveSecret(newProfilePass, for: newProfileUser)
+                            _ = KeychainService.shared.saveSecret(newProfilePass, for: newProf)
                         }
                         newProfileName = ""
                         newProfilePass = ""
