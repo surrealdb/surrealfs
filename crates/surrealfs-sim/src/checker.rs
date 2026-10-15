@@ -1,6 +1,5 @@
 use anyhow::{bail, Result};
 use std::collections::{HashMap, HashSet};
-use surrealdb::types::Value as SValue;
 use surrealfs_core::SurrealFs;
 
 #[derive(Debug, serde::Deserialize)]
@@ -44,10 +43,10 @@ impl InvariantChecker {
             .query("SELECT id, path, parent, parent_key, is_folder FROM file;")
             .await?;
 
-        let raw_nodes: Vec<SValue> = res.take(0usize)?;
+        let raw_nodes: Vec<serde_json::Value> = res.take(0usize)?;
         let mut nodes: Vec<FileNode> = Vec::new();
         for v in raw_nodes {
-            if let Ok(node) = serde_json::from_value(v.into_json_value()) {
+            if let Ok(node) = serde_json::from_value(v) {
                 nodes.push(node);
             }
         }
@@ -104,10 +103,10 @@ impl InvariantChecker {
             .query("SELECT file, path, holder, expires_at FROM file_lock WHERE expires_at > time::now();")
             .await?;
 
-        let raw_locks: Vec<SValue> = res.take(0usize)?;
+        let raw_locks: Vec<serde_json::Value> = res.take(0usize)?;
         let mut active_locks: Vec<LockNode> = Vec::new();
         for v in raw_locks {
-            if let Ok(lock) = serde_json::from_value(v.into_json_value()) {
+            if let Ok(lock) = serde_json::from_value(v) {
                 active_locks.push(lock);
             }
         }

@@ -47,9 +47,9 @@ pub enum SurrealFsError {
 
 pub type Result<T> = std::result::Result<T, SurrealFsError>;
 
-impl From<surrealdb::Error> for SurrealFsError {
-    fn from(err: surrealdb::Error) -> Self {
-        let msg = err.to_string();
+impl SurrealFsError {
+    pub fn from_db_message(msg: impl Into<String>) -> Self {
+        let msg = msg.into();
         if msg.contains("sfs:not_found") || msg.contains("not found") {
             SurrealFsError::NotFound(msg)
         } else if msg.contains("sfs:legal_hold") {
@@ -73,6 +73,13 @@ impl From<surrealdb::Error> for SurrealFsError {
         } else {
             SurrealFsError::Database(msg)
         }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl From<surrealdb::Error> for SurrealFsError {
+    fn from(err: surrealdb::Error) -> Self {
+        Self::from_db_message(err.to_string())
     }
 }
 

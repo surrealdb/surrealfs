@@ -32,7 +32,8 @@ pub struct SourceDocument {
 }
 
 /// Connector interface for external services.
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 pub trait Connector: Send + Sync {
     /// Unique identifier for connector (e.g. "gdrive", "notion", "slack", "github").
     fn name(&self) -> &str;
@@ -123,7 +124,8 @@ impl GoogleDriveConnector {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl Connector for GoogleDriveConnector {
     fn name(&self) -> &str {
         "gdrive"
@@ -145,7 +147,8 @@ impl NotionConnector {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl Connector for NotionConnector {
     fn name(&self) -> &str {
         "notion"
@@ -167,7 +170,8 @@ impl GitHubConnector {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl Connector for GitHubConnector {
     fn name(&self) -> &str {
         "github"
@@ -189,7 +193,8 @@ impl SlackConnector {
     }
 }
 
-#[async_trait]
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl Connector for SlackConnector {
     fn name(&self) -> &str {
         "slack"

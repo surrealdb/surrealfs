@@ -13,12 +13,18 @@ use crate::paths::normalize_path;
 use crate::understanding::{
     compute_simhash, parse_tabular_records, simhash_similarity, ExtractedEntity,
 };
-use serde::de::DeserializeOwned;
+use serde::{de::DeserializeOwned, Serialize};
 use serde_json::Value;
+use std::future::Future;
+use std::pin::Pin;
+#[cfg(not(target_arch = "wasm32"))]
 use surrealdb::engine::remote::ws::{Client, Ws};
+#[cfg(not(target_arch = "wasm32"))]
 use surrealdb::opt::auth::Root;
-use surrealdb::types::Value as SValue;
+#[cfg(not(target_arch = "wasm32"))]
 use surrealdb::Surreal;
+
+pub type SValue = serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
@@ -44,8 +50,341 @@ impl Default for ConnectOptions {
 }
 
 fn value_to_serde<T: DeserializeOwned>(v: SValue) -> Result<T> {
-    let json_val = v.into_json_value();
-    serde_json::from_value(json_val).map_err(|e| SurrealFsError::Database(e.to_string()))
+    serde_json::from_value(v).map_err(|e| SurrealFsError::Database(e.to_string()))
+}
+
+fn deserialize_response_value<T: DeserializeOwned>(v: Value) -> Result<T> {
+    if v.is_null() {
+        if let Ok(parsed) = serde_json::from_value::<T>(Value::Null) {
+            return Ok(parsed);
+        }
+        if let Ok(parsed) = serde_json::from_value::<T>(Value::Array(Vec::new())) {
+            return Ok(parsed);
+        }
+    }
+    serde_json::from_value(v).map_err(|e| SurrealFsError::Database(e.to_string()))
+}
+
+/// Stateless 1-RTT HTTP JSON-RPC client for SurrealDB 3.x / SurrealDB Cloud Earth (`/rpc`).
+/// Works identically in Cloudflare Workers (`wasm32-unknown-unknown`) and native builds.
+#[derive(Debug, Clone)]
+pub struct HttpDbClient {
+    pub rpc_url: String,
+    pub ns: String,
+    pub db: String,
+    pub auth_header: Option<String>,
+    pub client: reqwest::Client,
+}
+
+impl HttpDbClient {
+    pub fn new(opts: &ConnectOptions) -> Self {
+        let raw = opts.url.trim().trim_end_matches('/');
+        let http_base = if let Some(rest) = raw.strip_prefix("ws://") {
+            format!("http://{}", rest)
+        } else if let Some(rest) = raw.strip_prefix("wss://") {
+            format!("https://{}", rest)
+        } else if raw.starts_with("http://") || raw.starts_with("https://") {
+            raw.to_string()
+        } else {
+            format!("http://{}", raw)
+        };
+        let http_base = http_base
+            .trim_end_matches("/rpc")
+            .trim_end_matches("/sql")
+            .trim_end_matches('/');
+        let rpc_url = format!("{}/rpc", http_base);
+
+        let auth_header = match (&opts.user, &opts.pass) {
+            (Some(u), Some(p)) => {
+                use base64::Engine;
+                let encoded =
+                    base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", u, p));
+                Some(format!("Basic {}", encoded))
+            }
+            (None, Some(token)) if !token.is_empty() => Some(format!("Bearer {}", token)),
+            _ => None,
+        };
+
+        Self {
+            rpc_url,
+            ns: opts.ns.clone(),
+            db: opts.db.clone(),
+            auth_header,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        sql: &str,
+        mut vars: serde_json::Map<String, Value>,
+    ) -> Result<DbResponse> {
+        vars.retain(|_, v| !v.is_null());
+        let params = if vars.is_empty() {
+            serde_json::json!([sql])
+        } else {
+            serde_json::json!([sql, Value::Object(vars)])
+        };
+        let body = serde_json::json!({
+            "id": 1,
+            "method": "query",
+            "params": params,
+        });
+
+        let mut req = self
+            .client
+            .post(&self.rpc_url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .header("Surreal-NS", &self.ns)
+            .header("Surreal-DB", &self.db)
+            .json(&body);
+
+        if let Some(ref auth) = self.auth_header {
+            req = req.header("Authorization", auth);
+        }
+
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SurrealFsError::Database(format!("HTTP RPC request failed: {}", e)))?;
+        let status = resp.status();
+        let json: Value = resp
+            .json()
+            .await
+            .map_err(|e| SurrealFsError::Database(format!("HTTP RPC invalid JSON: {}", e)))?;
+
+        if let Some(err_obj) = json.get("error") {
+            let msg = err_obj
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SurrealDB RPC error");
+            return Err(SurrealFsError::from_db_message(msg));
+        }
+
+        if !status.is_success() {
+            return Err(SurrealFsError::Database(format!(
+                "HTTP RPC status {}: {}",
+                status, json
+            )));
+        }
+
+        let statements = parse_rpc_statements(&json)?;
+        Ok(DbResponse::Json(statements))
+    }
+}
+
+/// Client for Layer 1 tools (`surrealfs` CLI, `surrealfs mount` FUSE/NFSv3) connecting
+/// to Layer 2 SurrealFS Server over HTTPS (`/api/rpc`) with zero direct DB credentials.
+#[derive(Debug, Clone)]
+pub struct RemoteServerClient {
+    pub rpc_url: String,
+    pub token: Option<String>,
+    pub caller: Option<String>,
+    pub client: reqwest::Client,
+}
+
+impl RemoteServerClient {
+    pub fn new(server_url: &str, token: Option<String>, caller: Option<String>) -> Self {
+        let clean = server_url
+            .trim()
+            .trim_start_matches("sfs+")
+            .trim_end_matches('/');
+        let base = if let Some(rest) = clean.strip_prefix("sfs://") {
+            format!("http://{}", rest)
+        } else if clean.starts_with("http://") || clean.starts_with("https://") {
+            clean.to_string()
+        } else {
+            format!("https://{}", clean)
+        };
+        let base = base.trim_end_matches("/api/rpc").trim_end_matches('/');
+        Self {
+            rpc_url: format!("{}/api/rpc", base),
+            token,
+            caller,
+            client: reqwest::Client::new(),
+        }
+    }
+
+    pub async fn execute(
+        &self,
+        sql: &str,
+        vars: serde_json::Map<String, Value>,
+    ) -> Result<DbResponse> {
+        let body = serde_json::json!({
+            "sql": sql,
+            "vars": vars,
+            "caller": self.caller,
+        });
+
+        let mut req = self
+            .client
+            .post(&self.rpc_url)
+            .header("Accept", "application/json")
+            .header("Content-Type", "application/json")
+            .json(&body);
+
+        if let Some(ref tok) = self.token {
+            req = req.header("Authorization", format!("Bearer {}", tok));
+        }
+        if let Some(ref caller) = self.caller {
+            req = req.header("X-SurrealFS-Caller", caller);
+        }
+
+        let resp = req.send().await.map_err(|e| {
+            SurrealFsError::Database(format!("SurrealFS server RPC failed: {}", e))
+        })?;
+        let status = resp.status();
+        let json: Value = resp.json().await.map_err(|e| {
+            SurrealFsError::Database(format!("SurrealFS server invalid JSON: {}", e))
+        })?;
+
+        if !status.is_success() {
+            let msg = json
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("SurrealFS server error");
+            return Err(SurrealFsError::from_db_message(msg));
+        }
+
+        let statements = parse_rpc_statements(&json)?;
+        Ok(DbResponse::Json(statements))
+    }
+}
+
+fn parse_rpc_statements(json: &Value) -> Result<Vec<Result<Value>>> {
+    let arr = json
+        .get("result")
+        .and_then(|v| v.as_array())
+        .or_else(|| json.as_array())
+        .ok_or_else(|| {
+            SurrealFsError::Database(format!("Unexpected RPC response envelope: {}", json))
+        })?;
+
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        let status = item
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("OK");
+        let res_val = item.get("result").cloned().unwrap_or(Value::Null);
+        if status.eq_ignore_ascii_case("ERR") {
+            let msg = res_val
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| res_val.to_string());
+            out.push(Err(SurrealFsError::from_db_message(msg)));
+        } else {
+            out.push(Ok(res_val));
+        }
+    }
+    Ok(out)
+}
+
+#[derive(Clone)]
+pub enum DbClient {
+    #[cfg(not(target_arch = "wasm32"))]
+    Ws(Surreal<Client>),
+    Http(HttpDbClient),
+    Remote(RemoteServerClient),
+}
+
+impl DbClient {
+    pub fn query(&self, sql: &str) -> QueryBuilder<'_> {
+        QueryBuilder {
+            client: self,
+            sql: sql.to_string(),
+            vars: serde_json::Map::new(),
+        }
+    }
+}
+
+pub struct QueryBuilder<'a> {
+    client: &'a DbClient,
+    sql: String,
+    vars: serde_json::Map<String, Value>,
+}
+
+impl<'a> QueryBuilder<'a> {
+    pub fn bind<K, V>(mut self, (key, val): (K, V)) -> Self
+    where
+        K: Into<String>,
+        V: Serialize,
+    {
+        let json_val = serde_json::to_value(val).unwrap_or(Value::Null);
+        self.vars.insert(key.into(), json_val);
+        self
+    }
+
+    pub async fn send(self) -> Result<DbResponse> {
+        match self.client {
+            #[cfg(not(target_arch = "wasm32"))]
+            DbClient::Ws(db) => {
+                let mut q = db.query(&self.sql);
+                for (k, v) in self.vars {
+                    if v.is_null() {
+                        q = q.bind((k, Option::<String>::None));
+                    } else {
+                        q = q.bind((k, v));
+                    }
+                }
+                let res = q.await?;
+                Ok(DbResponse::Ws(res))
+            }
+            DbClient::Http(http) => http.execute(&self.sql, self.vars).await,
+            DbClient::Remote(remote) => remote.execute(&self.sql, self.vars).await,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+#[cfg(target_arch = "wasm32")]
+type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
+
+impl<'a> std::future::IntoFuture for QueryBuilder<'a> {
+    type Output = Result<DbResponse>;
+    type IntoFuture = BoxFuture<'a, Result<DbResponse>>;
+
+    fn into_future(self) -> Self::IntoFuture {
+        Box::pin(self.send())
+    }
+}
+
+pub enum DbResponse {
+    #[cfg(not(target_arch = "wasm32"))]
+    Ws(surrealdb::IndexedResults),
+    Json(Vec<Result<Value>>),
+}
+
+impl DbResponse {
+    pub fn num_statements(&self) -> usize {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            DbResponse::Ws(res) => res.num_statements(),
+            DbResponse::Json(stmts) => stmts.len(),
+        }
+    }
+
+    pub fn take<T: DeserializeOwned>(&mut self, index: usize) -> Result<T> {
+        match self {
+            #[cfg(not(target_arch = "wasm32"))]
+            DbResponse::Ws(res) => {
+                let sval: surrealdb::types::Value = res.take(index)?;
+                let jval = sval.into_json_value();
+                deserialize_response_value(jval)
+            }
+            DbResponse::Json(stmts) => {
+                if index >= stmts.len() {
+                    return deserialize_response_value(Value::Null);
+                }
+                match &stmts[index] {
+                    Ok(v) => deserialize_response_value(v.clone()),
+                    Err(e) => Err(SurrealFsError::from_db_message(e.to_string())),
+                }
+            }
+        }
+    }
 }
 
 fn extract_bytes(val: Option<&Value>) -> Option<Vec<u8>> {
@@ -69,46 +408,121 @@ fn extract_bytes(val: Option<&Value>) -> Option<Vec<u8>> {
 
 #[derive(Clone)]
 pub struct SurrealFs {
-    pub(crate) db: Surreal<Client>,
+    pub(crate) db: DbClient,
     pub(crate) caller: Option<String>,
 }
 
 impl SurrealFs {
-    /// Connect to a remote SurrealDB instance via WebSocket.
+    /// Connect to SurrealDB (via WebSocket on native `ws://`/`wss://`, 1-RTT HTTP JSON-RPC on
+    /// `http://`/`https://` or `wasm32`, or Layer 2 SurrealFS Server on `sfs://`/`sfs+https://`).
     pub async fn connect(opts: ConnectOptions) -> Result<Self> {
-        let endpoint = opts
-            .url
-            .trim_start_matches("ws://")
-            .trim_start_matches("wss://");
-        let db = Surreal::new::<Ws>(endpoint).await?;
-
-        if let (Some(user), Some(pass)) = (&opts.user, &opts.pass) {
-            db.signin(Root {
-                username: user.clone(),
-                password: pass.clone(),
-            })
-            .await?;
+        let url_trimmed = opts.url.trim();
+        if url_trimmed.starts_with("sfs://")
+            || url_trimmed.starts_with("sfs+http://")
+            || url_trimmed.starts_with("sfs+https://")
+        {
+            return Self::connect_remote(
+                url_trimmed,
+                opts.pass.as_deref(),
+                opts.caller.as_deref().or(opts.user.as_deref()),
+            );
         }
 
-        db.use_ns(&opts.ns).use_db(&opts.db).await?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            Self::connect_http(opts)
+        }
 
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if url_trimmed.starts_with("http://") || url_trimmed.starts_with("https://") {
+                return Self::connect_http(opts);
+            }
+
+            let endpoint = url_trimmed
+                .trim_start_matches("ws://")
+                .trim_start_matches("wss://");
+            let db = Surreal::new::<Ws>(endpoint).await?;
+
+            if let (Some(user), Some(pass)) = (&opts.user, &opts.pass) {
+                db.signin(Root {
+                    username: user.clone(),
+                    password: pass.clone(),
+                })
+                .await?;
+            }
+
+            db.use_ns(&opts.ns).use_db(&opts.db).await?;
+
+            Ok(Self {
+                db: DbClient::Ws(db),
+                caller: opts.caller.or(opts.user),
+            })
+        }
+    }
+
+    /// Connect to SurrealDB 3.x / SurrealDB Cloud Earth using stateless 1-RTT HTTP JSON-RPC (`/rpc`).
+    pub fn connect_http(opts: ConnectOptions) -> Result<Self> {
+        let http = HttpDbClient::new(&opts);
         Ok(Self {
-            db,
+            db: DbClient::Http(http),
             caller: opts.caller.or(opts.user),
         })
     }
 
-    /// Return underlying Surreal client reference.
-    pub fn client(&self) -> &Surreal<Client> {
+    /// Connect to a Layer 2 SurrealFS Server over HTTPS (`/api/rpc`) without direct DB credentials.
+    pub fn connect_remote(
+        server_url: &str,
+        token: Option<&str>,
+        caller: Option<&str>,
+    ) -> Result<Self> {
+        let remote = RemoteServerClient::new(
+            server_url,
+            token.map(|s| s.to_string()),
+            caller.map(|s| s.to_string()),
+        );
+        Ok(Self {
+            db: DbClient::Remote(remote),
+            caller: caller.map(|s| s.to_string()),
+        })
+    }
+
+    /// Return underlying database client reference.
+    pub fn client(&self) -> &DbClient {
         &self.db
+    }
+
+    /// Return caller identity if set.
+    pub fn caller(&self) -> Option<&str> {
+        self.caller.as_deref()
     }
 
     /// Return a clone of this SurrealFs instance with a different caller identity.
     pub fn with_caller(&self, caller: impl Into<String>) -> Self {
+        let caller_str = caller.into();
+        let db = match &self.db {
+            #[cfg(not(target_arch = "wasm32"))]
+            DbClient::Ws(ws) => DbClient::Ws(ws.clone()),
+            DbClient::Http(http) => DbClient::Http(http.clone()),
+            DbClient::Remote(rem) => {
+                let mut r = rem.clone();
+                r.caller = Some(caller_str.clone());
+                DbClient::Remote(r)
+            }
+        };
         Self {
-            db: self.db.clone(),
-            caller: Some(caller.into()),
+            db,
+            caller: Some(caller_str),
         }
+    }
+
+    /// Apply SurrealFS database schema (`file.surql` + `record_auth.surql`).
+    pub async fn apply_schema(&self) -> Result<()> {
+        let schema_file = include_str!("../../../surrealfs/schema/file.surql");
+        let schema_auth = include_str!("../../../surrealfs/schema/record_auth.surql");
+        self.db.query(schema_file).await?;
+        self.db.query(schema_auth).await?;
+        Ok(())
     }
 
     /// Stat a file or directory.
@@ -121,8 +535,7 @@ impl SurrealFs {
             .await
         {
             Ok(r) => r,
-            Err(e) => {
-                let sfe: SurrealFsError = e.into();
+            Err(sfe) => {
                 if let SurrealFsError::NotFound(_) = sfe {
                     return Ok(None);
                 }
@@ -132,8 +545,7 @@ impl SurrealFs {
 
         match res.take::<Option<SValue>>(0usize) {
             Ok(entry) => entry.map(value_to_serde).transpose(),
-            Err(e) => {
-                let sfe: SurrealFsError = e.into();
+            Err(sfe) => {
                 if let SurrealFsError::NotFound(_) = sfe {
                     Ok(None)
                 } else {
@@ -1831,4 +2243,222 @@ impl SurrealFs {
     ) -> Result<crate::archive::ImportReport> {
         crate::archive::import_tree(self, target_prefix, archive_bytes, format).await
     }
+
+    /// Recursively list all files and folders under `path`.
+    pub async fn ls_recursive(&self, path: &str) -> Result<Vec<FileEntry>> {
+        let root = normalize_path(path);
+        let mut queue = std::collections::VecDeque::new();
+        queue.push_back(root);
+        let mut out = Vec::new();
+        while let Some(dir) = queue.pop_front() {
+            let children = self.ls(&dir).await?;
+            for entry in children {
+                if entry.is_folder {
+                    queue.push_back(entry.path.clone());
+                }
+                out.push(entry);
+            }
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
+    /// Semantic vector search over files (`fn::sfs_search_semantic`).
+    pub async fn search_semantic(&self, vector: &[f32], limit: usize) -> Result<Vec<SearchHit>> {
+        let mut res = self
+            .db
+            .query("RETURN fn::sfs_search_semantic($vec, $limit, $caller);")
+            .bind(("vec", vector.to_vec()))
+            .bind(("limit", limit as i64))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let hits: Vec<SValue> = res.take(0usize)?;
+        let mut out = Vec::new();
+        for hit_val in hits {
+            let hit: Value = value_to_serde(hit_val)?;
+            if let Ok(entry) = serde_json::from_value::<FileEntry>(hit.clone()) {
+                let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let snippet = hit
+                    .get("snippet")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| hit.get("content").and_then(|v| v.as_str()))
+                    .unwrap_or("")
+                    .chars()
+                    .take(200)
+                    .collect::<String>();
+                out.push(SearchHit {
+                    entry,
+                    score,
+                    snippet,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Hybrid full-text + vector RRF search (`fn::sfs_hybrid_search`).
+    pub async fn search_hybrid(
+        &self,
+        query: &str,
+        vector: Option<&[f32]>,
+        limit: usize,
+    ) -> Result<Vec<SearchHit>> {
+        let vec_val: Option<Vec<f32>> = vector.map(|v| v.to_vec());
+        let mut res = self
+            .db
+            .query("RETURN fn::sfs_hybrid_search($q, $vec, $limit, 'any', $caller);")
+            .bind(("q", query.to_string()))
+            .bind(("vec", vec_val))
+            .bind(("limit", limit as i64))
+            .bind(("caller", self.caller.clone()))
+            .await?;
+        let hits: Vec<SValue> = res.take(0usize)?;
+        let mut out = Vec::new();
+        for hit_val in hits {
+            let hit: Value = value_to_serde(hit_val)?;
+            if let Ok(entry) = serde_json::from_value::<FileEntry>(hit.clone()) {
+                let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let raw_snippet = hit
+                    .get("snippet")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty());
+                let snippet = match raw_snippet {
+                    Some(s) => s.to_string(),
+                    None => {
+                        let content = hit.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        build_snippet(content, query, 200)
+                    }
+                };
+                out.push(SearchHit {
+                    entry,
+                    score,
+                    snippet,
+                });
+            }
+        }
+        Ok(out)
+    }
+
+    /// Store vector embedding for a file.
+    pub async fn set_embedding(&self, path: &str, vector: &[f32], model: &str) -> Result<()> {
+        let norm = normalize_path(path);
+        let sql = r#"
+            RETURN {
+                LET $file_id = fn::sfs_resolve($path);
+                IF $file_id IS NONE { THROW 'sfs:not_found' };
+                UPDATE $file_id SET
+                    embedding = $vec,
+                    embedding_model = $model,
+                    embedded_at = time::now();
+                RETURN true;
+            };
+        "#;
+        self.db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("vec", vector.to_vec()))
+            .bind(("model", model.to_string()))
+            .await?;
+        Ok(())
+    }
+
+    /// Store markdown sections and optional section embeddings for a file.
+    pub async fn index_file_sections(
+        &self,
+        path: &str,
+        sections: &[(crate::understanding::MarkdownSection, Option<Vec<f32>>)],
+    ) -> Result<usize> {
+        let norm = normalize_path(path);
+        let mut items = Vec::with_capacity(sections.len());
+        for (idx, (sec, emb)) in sections.iter().enumerate() {
+            items.push(serde_json::json!({
+                "section_idx": idx as i64,
+                "heading": sec.heading,
+                "level": sec.level as i64,
+                "content": sec.content,
+                "line_start": sec.line_start as i64,
+                "line_end": sec.line_end as i64,
+                "embedding": emb,
+            }));
+        }
+        let sql = r#"
+            RETURN {
+                LET $file_id = fn::sfs_resolve($path);
+                IF $file_id IS NONE { THROW 'sfs:not_found' };
+                DELETE file_section WHERE file_id = $file_id;
+                FOR $sec IN $sections {
+                    CREATE file_section CONTENT {
+                        file_id: $file_id,
+                        section_idx: $sec.section_idx,
+                        heading: $sec.heading,
+                        level: $sec.level,
+                        content: $sec.content,
+                        line_start: $sec.line_start,
+                        line_end: $sec.line_end,
+                        embedding: $sec.embedding,
+                        updated_at: time::now()
+                    };
+                };
+                RETURN array::len($sections);
+            };
+        "#;
+        let mut res = self
+            .db
+            .query(sql)
+            .bind(("path", norm))
+            .bind(("sections", Value::Array(items)))
+            .await?;
+        let count: Option<i64> = res.take(0usize)?;
+        Ok(count.unwrap_or(0) as usize)
+    }
+
+    /// Execute a parameterized SurrealQL query and return statement results as JSON.
+    pub async fn raw_query(
+        &self,
+        sql: &str,
+        vars: serde_json::Map<String, Value>,
+    ) -> Result<Vec<Result<Value>>> {
+        let mut q = self.db.query(sql);
+        for (k, v) in vars {
+            q = q.bind((k, v));
+        }
+        let mut res = q.await?;
+        let n = res.num_statements();
+        let mut out = Vec::with_capacity(n);
+        for idx in 0..n {
+            match res.take::<SValue>(idx) {
+                Ok(sval) => out.push(value_to_serde(sval)),
+                Err(e) => out.push(Err(e)),
+            }
+        }
+        Ok(out)
+    }
 }
+
+fn build_snippet(content: &str, query: &str, window: usize) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+    let lower = content.to_lowercase();
+    let first_match = query
+        .split_whitespace()
+        .filter(|w| !w.is_empty())
+        .filter_map(|w| lower.find(&w.to_lowercase()))
+        .min()
+        .unwrap_or(0);
+    let chars: Vec<char> = content.chars().collect();
+    let char_pos = content[..first_match.min(content.len())].chars().count();
+    let half = window / 2;
+    let start = char_pos.saturating_sub(half);
+    let end = (start + window).min(chars.len());
+    let mut s: String = chars[start..end].iter().collect();
+    s = s.replace('\n', " ");
+    if start > 0 {
+        s = format!("…{}", s);
+    }
+    if end < chars.len() {
+        s.push('…');
+    }
+    s
+}
+

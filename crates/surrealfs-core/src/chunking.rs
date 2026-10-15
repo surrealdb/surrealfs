@@ -224,11 +224,14 @@ pub fn chunk_data(data: &[u8], config: Option<FastCdcConfig>) -> Vec<BlobChunk> 
         let hash = blake3::hash(chunk_bytes).to_hex().to_string();
         let chunk_id = format!("b3:{}", hash);
 
-        // Attempt transparent compression with zstd
+        // Attempt transparent compression with zstd on native targets
+        #[cfg(not(target_arch = "wasm32"))]
         let (stored_bytes, codec) = match zstd::encode_all(chunk_bytes, 3) {
             Ok(comp) if comp.len() < chunk_bytes.len() => (comp, "zstd".to_string()),
             _ => (chunk_bytes.to_vec(), "none".to_string()),
         };
+        #[cfg(target_arch = "wasm32")]
+        let (stored_bytes, codec) = (chunk_bytes.to_vec(), "none".to_string());
 
         result.push(BlobChunk {
             chunk_id,
@@ -256,7 +259,13 @@ pub fn compute_merkle_root(chunk_ids: &[String]) -> String {
 /// Decompresses chunk bytes according to the blob codec.
 pub fn decompress_chunk(data: &[u8], codec: &str) -> Result<Vec<u8>, std::io::Error> {
     match codec {
+        #[cfg(not(target_arch = "wasm32"))]
         "zstd" => zstd::decode_all(data),
+        #[cfg(target_arch = "wasm32")]
+        "zstd" => Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "zstd decompression is not supported on wasm32",
+        )),
         _ => Ok(data.to_vec()),
     }
 }

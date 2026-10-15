@@ -8,6 +8,7 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde_json::Value;
 use sha2::Sha256;
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -39,11 +40,16 @@ impl Default for WebhookDispatcher {
 impl WebhookDispatcher {
     /// Create a new WebhookDispatcher with default configuration.
     pub fn new() -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let client = Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_default();
+        #[cfg(target_arch = "wasm32")]
+        let client = Client::builder().build().unwrap_or_default();
+
         Self {
-            client: Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .unwrap_or_default(),
+            client,
             max_retries: 3,
             initial_backoff_ms: 100,
         }
@@ -77,14 +83,13 @@ impl WebhookDispatcher {
     ) -> Result<WebhookDeliveryRecord> {
         let body = serde_json::to_vec(payload)?;
         let sig = compute_signature(&webhook.secret, &body);
-        let timestamp = Utc::now().to_rfc3339();
+        let start_ts = Utc::now();
+        let timestamp = start_ts.to_rfc3339();
 
         let mut attempts = 0;
         let mut last_status = None;
         let mut last_err = None;
         let mut success = false;
-
-        let start_time = std::time::Instant::now();
 
         for attempt in 1..=self.max_retries {
             attempts = attempt;
@@ -116,12 +121,15 @@ impl WebhookDispatcher {
             }
 
             if attempt < self.max_retries {
-                let backoff = self.initial_backoff_ms * (1 << (attempt - 1));
-                tokio::time::sleep(Duration::from_millis(backoff)).await;
+                #[cfg(not(target_arch = "wasm32"))]
+                {
+                    let backoff = self.initial_backoff_ms * (1 << (attempt - 1));
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
+                }
             }
         }
 
-        let duration_ms = start_time.elapsed().as_millis() as u64;
+        let duration_ms = (Utc::now() - start_ts).num_milliseconds().max(0) as u64;
         debug!(
             "Webhook {} dispatched (event={}, attempts={}, success={}, duration={}ms)",
             webhook.url, event, attempts, success, duration_ms

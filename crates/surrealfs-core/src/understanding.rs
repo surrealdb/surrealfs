@@ -691,6 +691,73 @@ pub fn extract_entities_and_tags(text: &str) -> (Vec<String>, Vec<ExtractedEntit
     (tags, entities)
 }
 
+/// Convenience wrapper returning only extracted entities.
+pub fn extract_entities(text: &str) -> Vec<ExtractedEntity> {
+    extract_entities_and_tags(text).1
+}
+
+/// A parsed heading section from a Markdown document.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MarkdownSection {
+    pub heading: String,
+    pub level: usize,
+    pub content: String,
+    pub line_start: usize,
+    pub line_end: usize,
+}
+
+/// Splits Markdown text into sections delimited by ATX headings (`#` .. `######`).
+pub fn split_markdown_sections(content: &str) -> Vec<MarkdownSection> {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut sections = Vec::new();
+    let mut current_heading = "Introduction".to_string();
+    let mut current_level = 1usize;
+    let mut start_line = 1usize;
+    let mut buf: Vec<&str> = Vec::new();
+
+    for (idx, &line) in lines.iter().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('#') {
+            let hashes = trimmed.chars().take_while(|&c| c == '#').count();
+            if (1..=6).contains(&hashes) && trimmed.chars().nth(hashes) == Some(' ') {
+                let body = buf.join("\n").trim().to_string();
+                if !body.is_empty() {
+                    sections.push(MarkdownSection {
+                        heading: current_heading,
+                        level: current_level,
+                        content: body,
+                        line_start: start_line,
+                        line_end: line_no.saturating_sub(1).max(start_line),
+                    });
+                }
+                current_heading = trimmed[hashes..].trim().to_string();
+                current_level = hashes;
+                start_line = line_no;
+                buf.clear();
+                buf.push(line);
+                continue;
+            }
+        }
+        buf.push(line);
+    }
+
+    let body = buf.join("\n").trim().to_string();
+    if !body.is_empty() {
+        sections.push(MarkdownSection {
+            heading: current_heading,
+            level: current_level,
+            content: body,
+            line_start: start_line,
+            line_end: lines.len().max(start_line),
+        });
+    }
+    sections
+}
+
 fn fnv1a_64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for &b in bytes {

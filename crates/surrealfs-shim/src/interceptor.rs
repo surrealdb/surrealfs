@@ -1,4 +1,8 @@
-#![allow(clippy::missing_safety_doc)]
+#![allow(
+    clippy::missing_safety_doc,
+    unknown_lints,
+    invalid_runtime_symbol_definitions
+)]
 
 use crate::virtual_fs::{VirtualFs, MIN_VIRTUAL_FD};
 use libc::{mode_t, off_t, size_t, ssize_t, stat as libc_stat};

@@ -6,8 +6,6 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-surrealdb.workspace = true
-tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -15,7 +13,6 @@ anyhow.workspace = true
 async-trait.workspace = true
 tracing.workspace = true
 regex.workspace = true
-chrono.workspace = true
 futures.workspace = true
 yrs = "0.28.0"
 sha2.workspace = true
@@ -23,14 +20,25 @@ hex = "0.4.3"
 base64 = "0.22"
 hmac.workspace = true
 blake3.workspace = true
-zstd.workspace = true
 fastcdc.workspace = true
 tar = "0.4.46"
 flate2 = "1.1.10"
-reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
 aes-gcm = "0.11.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+surrealdb.workspace = true
+tokio.workspace = true
+chrono.workspace = true
+zstd.workspace = true
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
 getrandom = "0.2"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1.43", default-features = false, features = ["sync", "macros", "io-util"] }
+chrono = { version = "0.4", features = ["serde", "wasmbind"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["json"] }
+getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
