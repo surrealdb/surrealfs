@@ -328,15 +328,6 @@ def main(argv: list[str] | None = None) -> None:
     # mcp
     subparsers.add_parser("mcp", help="Run SurrealFS MCP server over stdio")
 
-    # browser
-    subparsers.add_parser("browser", help="Run SurrealFS browser web UI")
-
-    # embed
-    embed_parser = subparsers.add_parser("embed", help="Run embedding indexer daemon")
-    embed_parser.add_argument(
-        "--once", action="store_true", help="Run single pass and exit"
-    )
-
     args = parser.parse_args(argv)
 
     if not args.command:
@@ -370,15 +361,6 @@ def main(argv: list[str] | None = None) -> None:
         from .integrations.mcp import main as mcp_main
 
         mcp_main()
-    elif args.command == "browser":
-        from .browser.__main__ import main as browser_main
-
-        browser_main()
-    elif args.command == "embed":
-        from .embed import main as embed_main
-
-        embed_args = ["--once"] if args.once else []
-        embed_main(embed_args)
     else:
         parser.print_help()
         sys.exit(1)

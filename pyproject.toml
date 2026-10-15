@@ -28,8 +28,6 @@ dependencies = [
 
 [project.optional-dependencies]
 pydantic-ai = ["pydantic-ai-slim>=2.0"]
-# What `surrealfs.embed` needs, without the rest of the demo stack.
-embed = ["openai>=2.0"]
 # The MCP server (`surrealfs-mcp`), for any client that speaks MCP.
 #
 # `mcp>=2.1` is a real floor, not caution: `serve()` builds the lowlevel
@@ -53,17 +51,6 @@ agent-memory = ["httpx>=0.27"]
 # pulls `agent-memory` as well: a plugin whose whole point is the brain that was
 # resolved without httpx mirrored nothing, and said so only inside a tool result.
 claude = ["surrealfs[mcp,agent-memory]"]
-# The file browser (`surrealfs-browser`). starlette is listed explicitly because
-# it reaches the tree today only as a transitive of pydantic-ai's `web` extra,
-# and it is imported directly here. The page itself is a React SPA -- see
-# `surrealfs/browser/ui/` -- so nothing renders markdown on this side any more.
-browser = [
-    "starlette>=0.37",
-    "uvicorn>=0.30",
-    "pydantic-ai-slim[anthropic]>=2.0",
-    "python-dotenv>=1",
-    "openai>=2.0",
-]
 demo = [
     "pydantic-ai-slim[web,anthropic]>=2.0",
     "anthropic>=0.40",
@@ -75,7 +62,6 @@ crdt = ["pycrdt>=0.10.0"]
 
 [project.scripts]
 surrealfs = "surrealfs.__main__:main"
-surrealfs-browser = "surrealfs.browser.__main__:main"
 # What an MCP client launches over stdio. See
 # `surrealfs/integrations/mcp/README.md`.
 surrealfs-mcp = "surrealfs.integrations.mcp:main"

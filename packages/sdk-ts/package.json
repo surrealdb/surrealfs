@@ -19,8 +19,7 @@
   },
   "scripts": {
     "build": "tsc",
-    "test": "bun test",
-    "browser": "bun src/browser-server.ts"
+    "test": "bun test"
   },
   "keywords": [
     "surrealdb",

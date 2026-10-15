@@ -1,171 +1,12 @@
-"""Guards on the file browser: the JSON API the page is written against, the
-chat transcript round trip, and the signin payload each auth level produces."""
+"""Guards on the connection helper (`surrealfs.integrations._connect`) and
+`SurrealFs.from_server` client RPC transport."""
 
-from datetime import datetime
-
-import httpx
 import pytest
-from pydantic_ai.messages import (
-    FunctionToolCallEvent,
-    ModelMessagesTypeAdapter,
-    ModelRequest,
-    ModelResponse,
-    PartDeltaEvent,
-    PartStartEvent,
-    TextPart,
-    TextPartDelta,
-    ToolCallPart,
-    UserPromptPart,
-)
 from websockets.exceptions import ConnectionClosedError
 
-from surrealfs import browser
+from surrealfs import SurrealFs
+from surrealfs.fs import _ServerRpcClient
 from surrealfs.integrations import _connect
-
-
-def client(fs) -> httpx.AsyncClient:
-    """Talk to the app in this test's event loop.
-
-    Not starlette's `TestClient`: it drives the app from a thread with its own
-    loop, and a SurrealDB WebSocket belongs to the loop it was opened on -- the
-    same reason `serve()` runs uvicorn by hand instead of `uvicorn.run()`.
-    """
-    return httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=browser.build_app(fs)),
-        base_url="http://browser",
-    )
-
-
-async def test_the_json_api_the_page_is_written_against(fs):
-    """The page has no other contract with the server than these shapes."""
-    async with client(fs) as http:
-        made = await http.post(
-            "/api/file", json={"path": "/notes/a.md", "folder": False}
-        )
-        assert made.status_code == 200, made.text
-        assert made.json().keys() == {
-            "path",
-            "filename",
-            "is_folder",
-            "content_type",
-            "size",
-            "updated_at",
-        }
-        assert made.json()["content_type"] == "text/markdown"
-
-        # The tree is flat and recursive: the page builds the hierarchy itself,
-        # including the `/notes` folder, which was created implicitly.
-        tree = (await http.get("/api/tree")).json()
-        assert {"/notes", "/notes/a.md"} <= {e["path"] for e in tree}
-        assert [e["is_folder"] for e in tree if e["path"] == "/notes"] == [True]
-
-        again = await http.post(
-            "/api/file", json={"path": "/notes/a.md", "folder": False}
-        )
-        assert again.status_code == 409
-        assert "error" in again.json()
-
-        saved = await http.put(
-            "/api/file", json={"path": "/notes/a.md", "content": "# hi\n\nrefactor"}
-        )
-        assert saved.status_code == 200, saved.text
-        assert saved.json()["size"] == len("# hi\n\nrefactor")
-
-        assert (await http.get("/raw", params={"path": "/notes/a.md"})).text == (
-            "# hi\n\nrefactor"
-        )
-
-        found = (await http.get("/api/search", params={"q": "refactor"})).json()
-        assert found["hybrid"] is False  # no embedder was passed
-        assert [hit["path"] for hit in found["results"]] == ["/notes/a.md"]
-        assert "refactor" in found["results"][0]["snippet"]
-
-        moved = await http.post(
-            "/api/move", json={"src": "/notes/a.md", "dst": "/b.md"}
-        )
-        assert moved.json()["path"] == "/b.md"
-
-        gone = await http.request("DELETE", "/api/file", params={"path": "/b.md"})
-        assert gone.json() == {"removed": 1}
-
-
-async def test_a_non_empty_folder_needs_the_recursive_flag(fs):
-    """The 409 is what drives the page's second confirmation."""
-    async with client(fs) as http:
-        await http.post("/api/file", json={"path": "/x/y.md", "folder": False})
-        refused = await http.request("DELETE", "/api/file", params={"path": "/x"})
-        assert refused.status_code == 409
-
-        forced = await http.request(
-            "DELETE", "/api/file", params={"path": "/x", "recursive": "1"}
-        )
-        assert forced.json() == {"removed": 2}
-
-
-def test_the_page_is_the_built_react_bundle():
-    """`static/` is gitignored, so a fresh clone has no UI until `just ui` runs.
-
-    Nothing here can build it; assert the path the app serves, which is what
-    `serve()` checks before it binds a port.
-    """
-    assert browser.INDEX.name == "index.html"
-    assert browser.INDEX.parent == browser.STATIC
-
-
-def test_a_denial_is_a_403_not_a_server_error():
-    """`PermissionDenied` is an `OSError`, not a `ValueError`, so `on_error`'s
-    fallback turned every denial into a 500. Newly reachable: `--user` lets the
-    browser run as somebody other than root, and then any click into another
-    user's home takes this path."""
-    from surrealfs import NotFound, PermissionDenied
-
-    assert browser.on_error(None, PermissionDenied("nope")).status_code == 403
-    assert browser.on_error(None, NotFound("gone")).status_code == 404
-
-
-def test_stream_events_become_what_the_page_renders():
-    delta = PartDeltaEvent(index=0, delta=TextPartDelta(content_delta="hi"))
-    assert browser._stream_event(delta) == {"delta": "hi"}
-    # The opening text of a part arrives here, not as a delta -- skip this and
-    # every sentence loses its first word or two. A run that stops to call tools
-    # resumes in a *new* part, so keep the paragraph break.
-    start = PartStartEvent(index=0, part=TextPart(content="hi"))
-    assert browser._stream_event(start) == {"delta": "\n\nhi"}
-    call = FunctionToolCallEvent(ToolCallPart(tool_name="write_file"))
-    assert browser._stream_event(call) == {"tool": "write_file"}
-    assert browser._stream_event(object()) is None
-
-
-def test_a_stored_conversation_replays_two_responses_as_one_bubble():
-    history = [
-        ModelRequest(
-            parts=[
-                UserPromptPart(
-                    content="[The user has /a.md open in the file browser.]\n\nhi"
-                )
-            ]
-        ),
-        ModelResponse(parts=[ToolCallPart(tool_name="ls", args={})]),
-        ModelResponse(parts=[TextPart(content="**done**")]),
-    ]
-    stored = ModelMessagesTypeAdapter.dump_json(history)
-    bubbles = browser._transcript(ModelMessagesTypeAdapter.validate_json(stored))
-
-    assert [b["who"] for b in bubbles] == ["you", "agent"], bubbles
-    # The note about the open file rides on the message; a reloaded transcript
-    # shows what the user actually typed.
-    assert bubbles[0] == {"who": "you", "text": "hi"}
-    assert bubbles[1]["tools"] == ["ls"]
-    # Markdown, not HTML: the page renders the agent's reply itself.
-    assert bubbles[1]["text"] == "**done**"
-
-
-def test_session_paths_are_slugged_and_dated():
-    assert browser._session_path("Fix the README!").endswith("-fix-the-readme.json")
-    assert browser._session_path("¿?").endswith("-chat.json")
-    assert browser._session_path("x").startswith(
-        f"{browser.SESSIONS}/{datetime.now():%Y-%m-%d}/"
-    )
 
 
 @pytest.mark.parametrize(
@@ -234,51 +75,18 @@ async def _reopen_fake(db):
 
 
 @pytest.mark.asyncio
-async def test_browser_graph_activity_and_history(fs):
-    async with client(fs) as http:
-        # Create files
-        await http.post("/api/file", json={"path": "/brain/doc1.md", "folder": False})
-        await http.put(
-            "/api/file",
-            json={
-                "path": "/brain/doc1.md",
-                "content": "# Version 1 of doc1",
-            },
-        )
-        await http.put(
-            "/api/file",
-            json={
-                "path": "/brain/doc1.md",
-                "content": "# Version 2 of doc1",
-            },
-        )
+async def test_connect_uses_server_rpc_when_surrealfs_server_url_is_set(monkeypatch):
+    monkeypatch.setenv("SURREALFS_SERVER_URL", "https://fs.example.com")
+    monkeypatch.setenv("SURREALFS_TOKEN", "tok-123")
+    monkeypatch.setenv("SURREALFS_AGENT_USER", "alice")
 
-        # Graph API
-        g_resp = await http.get("/api/graph")
-        assert g_resp.status_code == 200
-        g_data = g_resp.json()
-        assert "nodes" in g_data and "edges" in g_data
-        node_ids = {n["id"] for n in g_data["nodes"]}
-        assert "/brain/doc1.md" in node_ids
+    handle = await _connect.connect()
+    assert isinstance(handle, _ServerRpcClient)
+    assert handle.rpc_url == "https://fs.example.com/api/rpc"
+    assert handle.token == "tok-123"
+    assert handle.user == "alice"
 
-        # Activity API
-        act_resp = await http.get("/api/activity")
-        assert act_resp.status_code == 200
-        act_data = act_resp.json()
-        assert "locks" in act_data and "recent_versions" in act_data
-        assert isinstance(act_data["locks"], list)
-        assert isinstance(act_data["recent_versions"], list)
-
-        # History API
-        hist_resp = await http.get("/api/history?path=/brain/doc1.md")
-        assert hist_resp.status_code == 200
-        hist_data = hist_resp.json()
-        assert len(hist_data) >= 1
-        assert "generation" in hist_data[0]
-
-        # Restore API
-        restore_resp = await http.post(
-            "/api/restore", json={"path": "/brain/doc1.md", "generation": 1}
-        )
-        assert restore_resp.status_code == 200
-        assert restore_resp.json()["path"] == "/brain/doc1.md"
+    fs = SurrealFs.from_server("sfs://127.0.0.1:8080", user="alice", token="tok-456")
+    assert isinstance(fs.db, _ServerRpcClient)
+    assert fs.db.rpc_url == "http://127.0.0.1:8080/api/rpc"
+    assert fs.user == "alice"

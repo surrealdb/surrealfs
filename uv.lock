@@ -1972,13 +1972,6 @@ dependencies = [
 agent-memory = [
     { name = "httpx" },
 ]
-browser = [
-    { name = "openai" },
-    { name = "pydantic-ai-slim", extra = ["anthropic"] },
-    { name = "python-dotenv" },
-    { name = "starlette" },
-    { name = "uvicorn" },
-]
 claude = [
     { name = "httpx" },
     { name = "mcp" },
@@ -1993,9 +1986,6 @@ demo = [
     { name = "openai" },
     { name = "pydantic-ai-slim", extra = ["anthropic", "web"] },
     { name = "uvicorn" },
-]
-embed = [
-    { name = "openai" },
 ]
 mcp = [
     { name = "mcp" },
@@ -2024,23 +2014,17 @@ requires-dist = [
     { name = "httpx", marker = "extra == 'agent-memory'", specifier = ">=0.27" },
     { name = "logfire", marker = "extra == 'demo'", specifier = ">=4.20" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2.1" },
-    { name = "openai", marker = "extra == 'browser'", specifier = ">=2.0" },
     { name = "openai", marker = "extra == 'demo'", specifier = ">=2.0" },
-    { name = "openai", marker = "extra == 'embed'", specifier = ">=2.0" },
     { name = "pycrdt", marker = "extra == 'crdt'", specifier = ">=0.10.0" },
     { name = "pydantic", specifier = ">=2.12" },
     { name = "pydantic-ai-slim", marker = "extra == 'pydantic-ai'", specifier = ">=2.0" },
-    { name = "pydantic-ai-slim", extras = ["anthropic"], marker = "extra == 'browser'", specifier = ">=2.0" },
     { name = "pydantic-ai-slim", extras = ["web", "anthropic"], marker = "extra == 'demo'", specifier = ">=2.0" },
-    { name = "python-dotenv", marker = "extra == 'browser'", specifier = ">=1" },
     { name = "python-dotenv", marker = "extra == 'mcp'", specifier = ">=1" },
-    { name = "starlette", marker = "extra == 'browser'", specifier = ">=0.37" },
     { name = "surrealdb", specifier = "==3.0.0b8" },
     { name = "surrealfs", extras = ["mcp", "agent-memory"], marker = "extra == 'claude'" },
-    { name = "uvicorn", marker = "extra == 'browser'", specifier = ">=0.30" },
     { name = "uvicorn", marker = "extra == 'demo'", specifier = ">=0.30" },
 ]
-provides-extras = ["pydantic-ai", "embed", "mcp", "agent-memory", "claude", "browser", "demo", "crdt"]
+provides-extras = ["pydantic-ai", "mcp", "agent-memory", "claude", "demo", "crdt"]
 
 [package.metadata.requires-dev]
 dev = [

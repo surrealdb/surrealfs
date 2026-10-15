@@ -15,10 +15,6 @@ db-persist:
 schema *ARGS:
     uv run python -m surrealfs.schema {{ARGS}}
 
-# Embed new and changed files, then keep polling for more. `--once` for a single pass.
-embed *ARGS:
-    uv run --extra embed python -m surrealfs.embed {{ARGS}}
-
 test:
     uv run pytest --quiet --no-summary
 
@@ -29,29 +25,30 @@ lint:
 fmt:
     uv run ruff format .
 
-# Run the note-taking chat agent on http://127.0.0.1:7932
-agent:
-    uv run --extra demo python examples/chat_agent.py
-
 # Build the browser's React UI into surrealfs/browser/static. Needs bun.
 ui:
     cd surrealfs/browser/ui && bun install && bun run build
 
-# The vite dev server, proxying /api and /raw to `just browser` on :7933.
+# The vite dev server, proxying /api and /raw to `just server` on :7933.
 ui-dev:
     cd surrealfs/browser/ui && bun install && bun run dev
 
-# Browse the filesystem in a web UI on http://127.0.0.1:7933
-browser *ARGS: ui
-    uv run --extra browser python -m surrealfs.browser {{ARGS}}
+# Run the unified Rust SurrealFS Server (REST API + WebDAV + S3 + MCP + Chat + Embeddings + Web UI) on http://127.0.0.1:7933
+server *ARGS: ui
+    cargo run -p surrealfs-server -- --bind 127.0.0.1:7933 {{ARGS}}
 
-# Browse the filesystem in a web UI using native Bun on http://127.0.0.1:7933
-browser-bun *ARGS:
-    bun run browser {{ARGS}}
+# Alias for `just server`
+browser *ARGS: (server ARGS)
+
+# Verify Cloudflare Worker Wasm compilation (`wasm32-unknown-unknown`)
+worker-check:
+    cargo check -p surrealfs-core -p surrealfs-server --target wasm32-unknown-unknown
+
+# Build UI + deploy SurrealFS Server Wasm Worker to Cloudflare Workers
+deploy *ARGS: ui
+    npx wrangler deploy {{ARGS}}
 
 # Run the MCP server over stdio, as an MCP client launches it.
-# `agent-memory` too: the repo .env this dotenv-loads carries a key, and a key without
-# that extra is refused. Drop it to see the filesystem-only surface.
 mcp:
     uv run --extra mcp --extra agent-memory surrealfs-mcp
 

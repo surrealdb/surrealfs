@@ -147,16 +147,3 @@ async def test_mcp_resources(ctx):
     with pytest.raises(ValueError, match="Unsupported URI scheme"):
         await read_resource(ctx, "file:///data/info.txt")
 
-
-def test_embed_env_loading(tmp_path, monkeypatch):
-    from surrealfs.embed import _load_env
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("SURREALDB_USER=indexer_custom\n", encoding="utf-8")
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("SURREALDB_USER", raising=False)
-
-    _load_env()
-    import os
-
-    assert os.environ.get("SURREALDB_USER") == "indexer_custom"
