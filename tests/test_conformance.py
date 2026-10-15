@@ -18,7 +18,15 @@ RUST_CLI_BIN = REPO_ROOT / "target" / "debug" / "surrealfs-rs"
 
 
 def _ensure_rust_cli():
-    if not RUST_CLI_BIN.exists():
+    crates_dir = REPO_ROOT / "crates"
+    need_build = not RUST_CLI_BIN.exists()
+    if not need_build and crates_dir.exists():
+        bin_mtime = RUST_CLI_BIN.stat().st_mtime
+        for rs_file in crates_dir.rglob("*.rs"):
+            if rs_file.stat().st_mtime > bin_mtime:
+                need_build = True
+                break
+    if need_build:
         subprocess.run(
             ["cargo", "build", "-p", "surrealfs-cli"],
             cwd=REPO_ROOT,

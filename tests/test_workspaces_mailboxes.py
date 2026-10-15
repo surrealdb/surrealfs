@@ -202,3 +202,28 @@ async def test_sandbox_context_manager_auto_discard_on_failure(fs: SurrealFs) ->
     assert await fs.read_text("/src/stable.py") == "stable_val = 42\n"
     workspaces = await fs.list_workspaces()
     assert not any(ws.name == "failing-agent" for ws in workspaces)
+
+
+@pytest.mark.asyncio
+async def test_workspace_new_file_creation_and_merge(fs: SurrealFs) -> None:
+    await fs.write_text("/src/existing.py", "x = 1\n")
+    await fs.fork_workspace("new-file-branch")
+
+    # Write a brand-new file that didn't exist at fork time
+    await fs.write_workspace_text("new-file-branch", "/src/brand_new.py", "y = 2\n")
+    diff = await fs.diff_workspace("new-file-branch")
+    by_path = {d["path"]: d for d in diff}
+    assert by_path["/src/brand_new.py"]["modified"] is True
+    assert by_path["/src/brand_new.py"]["conflict"] is False
+
+    merge_res = await fs.merge_workspace("new-file-branch")
+    assert merge_res["status"] == "ok"
+    assert await fs.read_text("/src/brand_new.py") == "y = 2\n"
+
+
+@pytest.mark.asyncio
+async def test_invalid_branch_name_rejected(fs: SurrealFs) -> None:
+    from surrealfs import InvalidPath
+
+    with pytest.raises(InvalidPath):
+        await fs.fork_workspace("bad branch; DROP TABLE file;")

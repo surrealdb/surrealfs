@@ -17,6 +17,7 @@ __all__ = [
     "FileVersionEntry",
     "GraphRelation",
     "GrepMatch",
+    "LockLease",
     "SearchHit",
     "SectionHit",
     "ShareEntry",
@@ -230,6 +231,12 @@ class GraphRelation:
         )
 
 
+def _record_key(val: Any) -> str:
+    if isinstance(val, RecordID):
+        return f"{val.table_name}:{val.id}"
+    return str(val or "")
+
+
 @dataclass(frozen=True, slots=True)
 class SectionHit:
     """A search hit targeting a specific section of a file."""
@@ -247,13 +254,52 @@ class SectionHit:
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> SectionHit:
+        raw_score = row.get("score")
+        if raw_score is None and row.get("distance") is not None:
+            score = max(0.0, 1.0 - float(row["distance"]))
+        else:
+            score = float(raw_score or 0.0)
         return cls(
             path=row.get("path") or "",
             heading=row.get("heading") or "",
             line_start=int(row.get("line_start") or 1),
             line_end=int(row.get("line_end") or 1),
             content=row.get("content") or "",
-            score=float(row.get("score") or 0.0),
+            score=score,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class LockLease:
+    """An active advisory lease on a file path."""
+
+    path: str
+    holder: str
+    acquired_at: datetime | None
+    expires_at: datetime | None
+    reason: str
+    ttl_seconds: int = 60
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any], ttl_seconds: int = 60) -> LockLease:
+        if isinstance(row, cls):
+            return row
+        acquired = row.get("acquired_at")
+        expires = row.get("expires_at")
+        if isinstance(acquired, datetime) and isinstance(expires, datetime):
+            ttl = max(0, int(round((expires - acquired).total_seconds())))
+        else:
+            ttl = int(row.get("ttl_seconds") or ttl_seconds)
+        return cls(
+            path=row.get("path") or "",
+            holder=row.get("holder") or "",
+            acquired_at=acquired,
+            expires_at=expires,
+            reason=row.get("reason") or "",
+            ttl_seconds=ttl,
         )
 
 
@@ -303,7 +349,7 @@ class ShareEntry:
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> ShareEntry:
         return cls(
-            id=str(row["id"]),
+            id=_record_key(row["id"]),
             path=row.get("path") or "",
             mode=row.get("mode") or "ro",
             token=row.get("token") or "",
@@ -330,7 +376,7 @@ class WebhookEntry:
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> WebhookEntry:
         return cls(
-            id=str(row["id"]),
+            id=_record_key(row["id"]),
             owner=row.get("owner") or "",
             path_pattern=row.get("path_pattern") or "",
             events=list(row.get("events") or []),

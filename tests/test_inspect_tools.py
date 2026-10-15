@@ -146,4 +146,3 @@ async def test_mcp_resources(ctx):
 
     with pytest.raises(ValueError, match="Unsupported URI scheme"):
         await read_resource(ctx, "file:///data/info.txt")
-

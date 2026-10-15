@@ -43,14 +43,18 @@ async def test_job_claim_and_complete(fs):
         assert job["status"] == "processing"
 
     # Complete the first job
-    job_id = str(claimed[0]["id"])
+    from surrealfs.fs import _parent_key
+
+    job_id = _parent_key(claimed[0]["id"])
     await fs.db.query(
         "RETURN fn::sfs_job_complete($job_id, NONE);",
         {"job_id": job_id},
     )
 
     # Verify status is completed
-    res = await fs.db.query(f"SELECT status FROM {job_id};")
+    res = await fs.db.query(
+        "SELECT status FROM type::record($job_id);", {"job_id": job_id}
+    )
     job_record = res[0] if isinstance(res, list) else res
     if isinstance(job_record, list) and len(job_record) > 0:
         job_record = job_record[0]

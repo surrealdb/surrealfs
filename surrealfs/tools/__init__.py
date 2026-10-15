@@ -21,9 +21,27 @@ from pydantic import BaseModel
 
 from . import args as _args
 from . import handlers as _handlers
+from .args import (
+    AcquireLeaseArgs,
+    ForkWorkspaceArgs,
+    MergeWorkspaceArgs,
+    ReleaseLeaseArgs,
+    SearchSectionsArgs,
+)
 from .handlers import ToolContext
 
-__all__ = ["TOOLS", "ToolContext", "ToolSpec", "get_tool", "select_tools"]
+__all__ = [
+    "TOOLS",
+    "AcquireLeaseArgs",
+    "ForkWorkspaceArgs",
+    "MergeWorkspaceArgs",
+    "ReleaseLeaseArgs",
+    "SearchSectionsArgs",
+    "ToolContext",
+    "ToolSpec",
+    "get_tool",
+    "select_tools",
+]
 
 _DOCS_DIR = Path(__file__).resolve().parent / "docs"
 

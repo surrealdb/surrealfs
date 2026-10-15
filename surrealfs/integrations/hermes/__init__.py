@@ -57,7 +57,7 @@ TOOLSET = "surrealfs"
 
 # Hermes registers tools in one flat namespace and *silently drops* a name that
 # is already claimed by another toolset, so `write_file` would lose to the
-# built-in disk one. A prefix keeps all fourteen, and tells the model which
+# built-in disk one. A prefix keeps all thirty-one, and tells the model which
 # filesystem it is addressing — Hermes' own `read_file`/`write_file` are the
 # real disk, `surrealfs_*` is the shared one in SurrealDB. Spelled out rather
 # than abbreviated so the name in the tool matches the name in its description.
@@ -167,4 +167,3 @@ async def _dispatch(name: str, args: dict[str, Any], *, semantic: bool) -> str:
     async with connected() as db:
         ctx = ToolContext(fs=SurrealFs(db, user=agent_user()), embed=None)
         return await call_tool(ctx, name, args, semantic=semantic)
-

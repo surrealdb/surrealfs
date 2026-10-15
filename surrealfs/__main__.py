@@ -53,7 +53,9 @@ async def _status_cmd(args: argparse.Namespace) -> int:
             fs = SurrealFs(db, user=agent_user())
 
             # Count files and active locks
-            files_res = await fs._query("RETURN count(SELECT id FROM file);")
+            files_res = await fs._query(
+                "RETURN count(SELECT id FROM file WHERE deleted_at IS NONE);"
+            )
             files_count = files_res if isinstance(files_res, int) else 0
 
             locks_query = (
@@ -129,14 +131,14 @@ async def _history_cmd(args: argparse.Namespace) -> int:
             print(f"No history found for {args.path}")
             return 0
         print(f"History for {args.path}:")
-        print(f"{'GEN':<5} {'OP':<8} {'AUTHOR':<15} {'CREATED AT':<25} {'SIZE/REASON'}")
+        print(f"{'GEN':<5} {'OP':<8} {'AUTHOR':<15} {'CREATED AT':<25} {'SIZE'}")
         print("-" * 75)
         for h in history:
             created = str(h.created_at or "")[:19]
             author = h.author or "unknown"
             op = getattr(h, "op", "write") or "write"
-            reason = getattr(h, "reason", "") or ""
-            print(f"{h.generation:<5} {op:<8} {author:<15} {created:<25} {reason}")
+            size_str = f"{h.size}B"
+            print(f"{h.generation:<5} {op:<8} {author:<15} {created:<25} {size_str}")
         return 0
 
 
@@ -345,8 +347,7 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "users":
         from .users import main as users_main
 
-        users_main(args.users_args)
-        sys.exit(0)
+        sys.exit(users_main(args.users_args))
     elif args.command == "lock":
         sys.exit(_run_coroutine(_lock_cmd(args)))
     elif args.command == "history":

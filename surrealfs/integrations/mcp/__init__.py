@@ -1,6 +1,6 @@
 """SurrealFS as an MCP server, for any client that speaks MCP.
 
-The surface is the same fifteen filesystem tools as every other integration,
+The surface is the same thirty-one filesystem tools as every other integration,
 generated from `surrealfs.tools`. It serves over stdio as `surrealfs-mcp`, so
 Claude Code, Claude Desktop, Cursor, Zed, Codex or a hand-rolled client all get
 the same thing.
@@ -14,7 +14,7 @@ Configuration is read from ``~/.config/surrealfs/env``, so none of the
 reads, has to be exported for this.
 
 Agent memory -- the hosted memory layer in `agent_memory.py` -- is optional, and
-nothing above needs it. Configure it and two things appear: a sixteenth tool,
+nothing above needs it. Configure it and two things appear: a thirty-second tool,
 `brain_recall`, and a mirror of every text file written through this server. The
 mirror lives in the dispatch path rather than in a tool the model is asked to call
 afterwards: a memory layer that depends on remembering to update it is not one.
@@ -63,7 +63,19 @@ CONFIG_NAME = "env"
 
 # The tools that leave new text behind for agent memory to read. `write_bytes` is
 # absent on purpose: agent memory indexes prose, and a base64 PNG is not prose.
-MIRRORED = frozenset({"write_file", "edit", "touch"})
+MIRRORED = frozenset(
+    {
+        "write_file",
+        "edit",
+        "touch",
+        "append",
+        "patch",
+        "restore",
+        "undelete",
+        "cp",
+        "mv",
+    }
+)
 
 RECALL_DESCRIPTION = """\
 Recall from agent memory, the memory layer behind SurrealFS. Ask it *before* reading
@@ -180,7 +192,7 @@ def _to_mirror(name: str, arguments: dict[str, Any], result: str) -> str | None:
     """The path to mirror after this call, or None."""
     if name not in MIRRORED or result.startswith("Error:"):
         return None
-    raw = arguments.get("path")
+    raw = arguments.get("dst") if name in ("cp", "mv") else arguments.get("path")
     if not isinstance(raw, str) or not raw:
         return None
     try:

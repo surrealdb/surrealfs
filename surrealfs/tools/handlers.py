@@ -14,7 +14,7 @@ from dataclasses import dataclass
 
 from ..errors import SurrealFsError
 from ..fs import SurrealFs
-from ..models import FileEntry
+from ..models import FileEntry, LockLease
 from .args import (
     AcquireLeaseArgs,
     AppendArgs,
@@ -126,6 +126,9 @@ async def tail(ctx: ToolContext, args: TailArgs) -> str:
 
 
 async def write_file(ctx: ToolContext, args: WriteFileArgs) -> str:
+    if args.branch:
+        entry = await ctx.fs.write_workspace_text(args.branch, args.path, args.content)
+        return f"Wrote {entry.size} bytes to {args.path} on branch {args.branch!r}"
     entry = await ctx.fs.write_text(
         args.path,
         args.content,
@@ -147,7 +150,12 @@ async def write_bytes(ctx: ToolContext, args: WriteBytesArgs) -> str:
         data = base64.b64decode(args.data_base64, validate=True)
     except (binascii.Error, ValueError) as exc:
         raise SurrealFsError(f"data_base64 is not valid base64: {exc}") from exc
-    entry = await ctx.fs.write_bytes(args.path, data, content_type=args.content_type)
+    entry = await ctx.fs.write_bytes(
+        args.path,
+        data,
+        content_type=args.content_type,
+        if_generation=args.if_generation,
+    )
     return f"Wrote {entry.size} bytes to {entry.path}"
 
 
@@ -285,13 +293,7 @@ async def search_sections(ctx: ToolContext, args: SearchSectionsArgs) -> str:
     if ctx.embed is None:
         return "Section search requires embedding to be configured."
     qvec = await ctx.embed(args.query)
-    hits = await ctx.fs.search_sections(qvec, limit=args.limit)
-    if args.path:
-        hits = [
-            h
-            for h in hits
-            if h.path == args.path or h.path.startswith(args.path.rstrip("/") + "/")
-        ]
+    hits = await ctx.fs.search_sections(qvec, limit=args.limit, path_prefix=args.path)
     if not hits:
         return f"No sections matching {args.query!r}"
     lines = []
@@ -303,9 +305,11 @@ async def search_sections(ctx: ToolContext, args: SearchSectionsArgs) -> str:
 
 
 async def acquire_lease(ctx: ToolContext, args: AcquireLeaseArgs) -> str:
-    lock = await ctx.fs.acquire_lock(
+
+    raw_lock = await ctx.fs.acquire_lock(
         args.path, ttl_seconds=args.ttl_seconds, reason=args.reason
     )
+    lock = LockLease.from_row(raw_lock, ttl_seconds=args.ttl_seconds)
     return (
         f"Acquired lease on {lock.path} for {lock.ttl_seconds}s "
         f"(holder: {lock.holder}, expires: {lock.expires_at})"
@@ -318,7 +322,7 @@ async def release_lease(ctx: ToolContext, args: ReleaseLeaseArgs) -> str:
 
 
 async def fork_workspace(ctx: ToolContext, args: ForkWorkspaceArgs) -> str:
-    await ctx.fs.fork_workspace(args.branch, source=args.source_branch)
+    await ctx.fs.fork_workspace(args.branch, src_branch=args.source_branch)
     return f"Forked workspace branch {args.branch!r} from {args.source_branch!r}"
 
 

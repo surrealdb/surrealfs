@@ -273,4 +273,3 @@ async def connected() -> AsyncIterator[Any]:
         yield db
     finally:
         await db.close()
-

@@ -10,6 +10,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 __all__ = [
+    "AcquireLeaseArgs",
     "AppendArgs",
     "BacklinksArgs",
     "CatArgs",
@@ -17,19 +18,23 @@ __all__ = [
     "CpArgs",
     "DiffArgs",
     "EditArgs",
+    "ForkWorkspaceArgs",
     "GlobArgs",
     "GrepArgs",
     "HeadArgs",
     "HistoryArgs",
     "LsArgs",
+    "MergeWorkspaceArgs",
     "MkdirArgs",
     "MvArgs",
     "ReadBytesArgs",
     "ReadRangeArgs",
     "RelateArgs",
+    "ReleaseLeaseArgs",
     "RestoreArgs",
     "RmArgs",
     "SearchArgs",
+    "SearchSectionsArgs",
     "TailArgs",
     "TouchArgs",
     "TreeArgs",
@@ -92,6 +97,9 @@ class WriteFileArgs(_Args):
     if_generation: int | None = Field(
         None, description="Expected generation counter for optimistic concurrency"
     )
+    branch: str | None = Field(
+        None, description="Optional workspace branch to write into"
+    )
 
 
 class AppendArgs(_Args):
@@ -107,6 +115,9 @@ class WriteBytesArgs(_Args):
     data_base64: str = Field(..., description="Base64-encoded file contents")
     content_type: str = Field(
         "application/octet-stream", description="Media type, e.g. image/png"
+    )
+    if_generation: int | None = Field(
+        None, description="Expected generation counter for optimistic concurrency"
     )
 
 

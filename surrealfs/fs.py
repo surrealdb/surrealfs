@@ -171,7 +171,7 @@ def _matches_meta(
 # COMPUTED, so selecting them costs a parent-chain walk per row -- worth it, and
 # the only way to get a path or an ancestry check at all.
 _FIELDS = (
-    "id, filename, path, content_type, is_folder, owner, mode, gate, "
+    "id, filename, path, content_type, is_folder, owner, group, mode, gate, "
     "hash, generation, created_at, updated_at, meta, crdt, "
     "IF content IS NOT NONE THEN string::len(content) "
     "ELSE IF file IS NOT NONE THEN bytes::len(file) "
@@ -209,6 +209,8 @@ def raise_for_status(raw: Any) -> list[Any]:
                 raise AlreadyExists(message)
             if "sfs:locked" in message:
                 raise ConflictError(message)
+            if "sfs:invalid_branch" in message:
+                raise InvalidPath(message)
             if "sfs:denied" in message or "sfs:denied_or_missing" in message:
                 raise PermissionDenied(message)
             # The kind sits at the top level on some versions and under
@@ -246,9 +248,7 @@ def _written(rows: Any, path: str, *, if_generation: int | None = None) -> Any:
 class _ServerRpcClient:
     """Stateless HTTP client talking to Layer 2 SurrealFS Server (/api/rpc)."""
 
-    def __init__(
-        self, url: str, *, user: str = ROOT, token: str | None = None
-    ) -> None:
+    def __init__(self, url: str, *, user: str = ROOT, token: str | None = None) -> None:
         clean = url.strip().rstrip("/")
         if clean.startswith("sfs+http://") or clean.startswith("sfs+https://"):
             clean = clean[4:]
@@ -341,7 +341,14 @@ class SurrealFs:
         table: Table name, if you renamed it in the schema.
     """
 
-    def __init__(self, db: Any, *, user: str, table: str = "file") -> None:
+    def __init__(
+        self,
+        db: Any,
+        *,
+        user: str,
+        table: str = "file",
+        groups: Sequence[str] = (),
+    ) -> None:
         if not _IDENT.match(table):
             raise InvalidPath(f"invalid table name: {table!r}")
         if not _USERNAME.match(user or ""):
@@ -350,6 +357,7 @@ class SurrealFs:
         self.table = table
         self.user = user
         self.is_root = user == ROOT
+        self.groups: set[str] = set(groups)
 
     @classmethod
     def from_server(
@@ -367,9 +375,11 @@ class SurrealFs:
     # ------------------------------------------------------------ permissions
 
     def _bits(self, entry: FileEntry) -> int:
-        """The octal digit that applies to this user. Mirrors `fn::sfs_bits`."""
+        """The octal digit that applies to this user. Mirrors `fn::sfs_bits_grp`."""
         if entry.owner == self.user:
             return (entry.mode >> 6) & 7
+        if entry.group and entry.group in self.groups:
+            return (entry.mode >> 3) & 7
         return entry.mode & 7
 
     def _reachable(self, entry: FileEntry) -> bool:
@@ -386,7 +396,33 @@ class SurrealFs:
         if entry.gate == "!closed":
             return False
         tokens = [t.strip() for t in entry.gate.split(",")]
-        return any(t == self.user or t == f"owner:{self.user}" for t in tokens)
+        for t in tokens:
+            if t == self.user or t == f"owner:{self.user}":
+                return True
+            if t.startswith("group:") and t[6:] in self.groups:
+                return True
+        return False
+
+    async def _ensure_group(self, entry: FileEntry) -> None:
+        if self.is_root:
+            return
+        candidates: list[str] = []
+        if entry.group and entry.group not in self.groups:
+            candidates.append(entry.group)
+        if entry.gate and "group:" in entry.gate:
+            for t in entry.gate.split(","):
+                t = t.strip()
+                if t.startswith("group:"):
+                    g = t[6:]
+                    if g and g not in self.groups and g not in candidates:
+                        candidates.append(g)
+        for grp in candidates:
+            is_mem = await self._query(
+                "RETURN fn::sfs_is_member($grp, $me);",
+                {"grp": grp, "me": self.user},
+            )
+            if is_mem:
+                self.groups.add(grp)
 
     def _allowed(self, entry: FileEntry, need: int) -> bool:
         if self.is_root:
@@ -427,7 +463,7 @@ class SurrealFs:
         `ls`, `glob` and both search arms return many rows without resolving any
         of them, so they cannot be filtered row by row in Python -- and `search`
         returns file *content*, which makes a missed filter a disclosure rather
-        than a cosmetic bug. The predicate is `fn::sfs_can_read` in
+        than a cosmetic bug. The predicate is `fn::sfs_can_read_grp` in
         `schema/file.surql`, so the rule is written once.
 
         Root gets the query untouched, which keeps its plans exactly as they
@@ -436,7 +472,7 @@ class SurrealFs:
         if self.is_root:
             return where, {}
         return (
-            f"({where}) AND fn::sfs_can_read(gate, owner, mode, $me)",
+            f"({where}) AND fn::sfs_can_read_grp(gate, owner, mode, $me, group)",
             {"me": self.user},
         )
 
@@ -492,7 +528,11 @@ class SurrealFs:
             f"WHERE parent_key = $k{last} AND filename = $s{last} LIMIT 1);"
         )
         row = await self._query("\n".join(lines), variables)
-        return self._shown(FileEntry.from_row(row)) if row else None
+        if not row:
+            return None
+        entry = FileEntry.from_row(row)
+        await self._ensure_group(entry)
+        return self._shown(entry)
 
     async def _resolve_reachable(self, path: str) -> FileEntry | None:
         """Resolve a path, or None -- refusing a row behind a closed ancestor.
@@ -1641,11 +1681,11 @@ class SurrealFs:
                 return total
             # Guard against a batch that never clears: without this, a staleness
             # predicate that stays true would spin forever.
-            fresh = [row for row in rows if str(row["id"]) not in seen]
+            fresh = [row for row in rows if _parent_key(row["id"]) not in seen]
             if not fresh:
                 return total
             for row in fresh:
-                seen.add(str(row["id"]))
+                seen.add(_parent_key(row["id"]))
                 vector = await embed(row["content"])
                 await self._query(
                     "UPDATE $id SET embedding = $vector, embedded_at = time::now(), "
@@ -1659,9 +1699,8 @@ class SurrealFs:
                     content_type=row.get("content_type") or "",
                 )
                 await self._query(
-                    "DELETE file_section WHERE file_id = $file_id "
-                    "AND section_idx >= $count;",
-                    {"file_id": row["id"], "count": len(sections)},
+                    "DELETE file_section WHERE file_id = $file_id;",
+                    {"file_id": row["id"]},
                 )
                 for s in sections:
                     s_vec = (
@@ -1698,13 +1737,20 @@ class SurrealFs:
         vector: Sequence[float],
         *,
         limit: int = 20,
+        path_prefix: str | None = None,
     ) -> list[SectionHit]:
         """Semantic search over fine-grained file sections."""
         if int(limit) <= 0:
             raise ValueError("limit must be positive")
+        prefix = paths.normalize(path_prefix) if path_prefix else None
         rows = await self._query(
-            "RETURN fn::sfs_search_sections($qvec, $k, $me);",
-            {"qvec": list(vector), "k": int(limit), "me": self.user},
+            "RETURN fn::sfs_search_sections($qvec, $k, $me, $prefix);",
+            {
+                "qvec": list(vector),
+                "k": int(limit),
+                "me": self.user,
+                "prefix": prefix,
+            },
         )
         return [SectionHit.from_row(r) for r in (rows or [])]
 
@@ -1712,10 +1758,20 @@ class SurrealFs:
         """List historical revisions of a file at `path`, newest first."""
         clean = paths.normalize(path)
         rows = await self._query(
-            "RETURN fn::sfs_history($path, $lim);",
-            {"path": clean, "lim": int(limit)},
+            "RETURN fn::sfs_history($path, $lim, $caller);",
+            {"path": clean, "lim": int(limit), "caller": self.user},
         )
         return [FileVersionEntry.from_row(r) for r in (rows or [])]
+
+    async def version_content(
+        self, path: str, generation: int
+    ) -> dict[str, Any] | None:
+        """Fetch the recorded content and metadata of a specific generation."""
+        clean = paths.normalize(path)
+        return await self._query(
+            "RETURN fn::sfs_version_content($path, $gen, $caller);",
+            {"path": clean, "gen": int(generation), "caller": self.user},
+        )
 
     async def diff(
         self, path: str, from_generation: int, to_generation: int | None = None
@@ -1723,8 +1779,8 @@ class SurrealFs:
         """Generate unified diff between two revisions or a revision and current."""
         clean = paths.normalize(path)
         from_row = await self._query(
-            "RETURN fn::sfs_version_content($path, $gen);",
-            {"path": clean, "gen": int(from_generation)},
+            "RETURN fn::sfs_version_content($path, $gen, $caller);",
+            {"path": clean, "gen": int(from_generation), "caller": self.user},
         )
         if not from_row:
             raise NotFound(f"Version {from_generation} of {clean} not found")
@@ -1732,8 +1788,8 @@ class SurrealFs:
 
         if to_generation is not None:
             to_row = await self._query(
-                "RETURN fn::sfs_version_content($path, $gen);",
-                {"path": clean, "gen": int(to_generation)},
+                "RETURN fn::sfs_version_content($path, $gen, $caller);",
+                {"path": clean, "gen": int(to_generation), "caller": self.user},
             )
             if not to_row:
                 raise NotFound(f"Version {to_generation} of {clean} not found")
@@ -1759,8 +1815,8 @@ class SurrealFs:
         """Restore a historical version of a file as a new generation."""
         clean = paths.normalize(path)
         row = await self._query(
-            "RETURN fn::sfs_version_content($path, $gen);",
-            {"path": clean, "gen": int(generation)},
+            "RETURN fn::sfs_version_content($path, $gen, $caller);",
+            {"path": clean, "gen": int(generation), "caller": self.user},
         )
         if not row:
             raise NotFound(f"Version {generation} of {clean} not found")
@@ -1786,6 +1842,18 @@ class SurrealFs:
         if not rows:
             raise NotFound(f"No version history found to undelete: {clean}")
         last = rows[0]
+        if not self.is_root:
+            v_entry = FileEntry(
+                id=last.get("file") or RecordID("file", "deleted"),
+                filename=paths.basename(clean),
+                path=clean,
+                content_type=last.get("content_type", "text/plain"),
+                is_folder=False,
+                owner=last.get("owner", "root"),
+                mode=int(last.get("mode", 0o600)),
+                gate=last.get("gate"),
+            )
+            self._check(v_entry, READ, "undelete")
         content = last.get("content")
         file_bytes = last.get("file_bytes")
         if content is not None:
@@ -1812,8 +1880,13 @@ class SurrealFs:
         from_clean = paths.normalize(from_path)
         to_clean = paths.normalize(to_path)
         await self._query(
-            "RETURN fn::sfs_relate($from, $rel, $to);",
-            {"from": from_clean, "rel": relation, "to": to_clean},
+            "RETURN fn::sfs_relate($from, $rel, $to, $caller);",
+            {
+                "from": from_clean,
+                "rel": relation,
+                "to": to_clean,
+                "caller": self.user,
+            },
         )
         return True
 
@@ -1821,8 +1894,8 @@ class SurrealFs:
         """List all inbound relations pointing to `path`."""
         clean = paths.normalize(path)
         rows = await self._query(
-            "RETURN fn::sfs_backlinks($path);",
-            {"path": clean},
+            "RETURN fn::sfs_backlinks($path, $caller);",
+            {"path": clean, "caller": self.user},
         )
         return [
             GraphRelation(
@@ -1841,8 +1914,8 @@ class SurrealFs:
         """List all outbound relations from `path`."""
         clean = paths.normalize(path)
         rows = await self._query(
-            "RETURN fn::sfs_neighbors($path, $rel);",
-            {"path": clean, "rel": relation},
+            "RETURN fn::sfs_neighbors($path, $rel, $caller);",
+            {"path": clean, "rel": relation, "caller": self.user},
         )
         return [
             GraphRelation(
@@ -1909,10 +1982,17 @@ class SurrealFs:
             with contextlib.suppress(Exception):
                 await self.release_lock(path)
 
+    @staticmethod
+    def _validate_branch(branch: str) -> None:
+        if not branch or not _USERNAME.match(branch):
+            raise InvalidPath(f"invalid workspace branch name: {branch!r}")
+
     async def fork_workspace(
         self, dst_branch: str, src_branch: str = "main"
     ) -> dict[str, Any]:
         """Fork a workspace into an isolated branch."""
+        self._validate_branch(dst_branch)
+        self._validate_branch(src_branch)
         row = await self._query(
             "RETURN fn::sfs_fork_workspace($src, $dst, $owner);",
             {"src": src_branch, "dst": dst_branch, "owner": self.user},
@@ -1931,6 +2011,7 @@ class SurrealFs:
 
     async def diff_workspace(self, branch: str) -> list[dict[str, Any]]:
         """Compute the diff between a workspace branch and its target."""
+        self._validate_branch(branch)
         rows = await self._query(
             "RETURN fn::sfs_diff_workspace($branch, $owner);",
             {"branch": branch, "owner": self.user},
@@ -1941,6 +2022,7 @@ class SurrealFs:
         self, branch: str, path: str, content: str
     ) -> FileEntry:
         """Write or update a file within an isolated workspace branch."""
+        self._validate_branch(branch)
         clean = paths.normalize(path)
         ws_rows = await self._query(
             "SELECT VALUE id FROM ONLY workspace "
@@ -1963,9 +2045,9 @@ class SurrealFs:
             } ELSE {
                 CREATE file_branch CONTENT {
                     workspace: $ws,
-                    base_file: $branch_file,
+                    base_file: NONE,
                     path: $path,
-                    base_gen: 1,
+                    base_gen: 0,
                     current_file: $branch_file
                 };
             };
@@ -1978,6 +2060,8 @@ class SurrealFs:
         self, branch: str, target: str = "main"
     ) -> dict[str, Any]:
         """Atomically merge a workspace branch back into the target."""
+        self._validate_branch(branch)
+        self._validate_branch(target)
         row = await self._query(
             "RETURN fn::sfs_merge_workspace($branch, $target, $owner);",
             {"branch": branch, "target": target, "owner": self.user},
@@ -1989,6 +2073,7 @@ class SurrealFs:
 
     async def discard_workspace(self, branch: str) -> dict[str, Any]:
         """Discard an isolated workspace branch and clean up its tracking rows."""
+        self._validate_branch(branch)
         row = await self._query(
             "RETURN fn::sfs_discard_workspace($branch, $owner);",
             {"branch": branch, "owner": self.user},
@@ -2033,7 +2118,7 @@ class SurrealFs:
         messages = [
             e for e in entries if not e.is_folder and not e.filename.startswith(".")
         ]
-        messages.sort(key=lambda e: (e.created_at or datetime.min, str(e.id)))
+        messages.sort(key=lambda e: (e.created_at or datetime.min, _parent_key(e.id)))
         return messages[:limit]
 
     async def claim_message(
@@ -2067,7 +2152,10 @@ class SurrealFs:
                 path = result.get("path")
                 if not path or not regex.match(path):
                     continue
-                entry = FileEntry.from_row(result) if action != "DELETE" else None
+                row_entry = FileEntry.from_row(result)
+                if not self._allowed(row_entry, READ):
+                    continue
+                entry = self._shown(row_entry) if action != "DELETE" else None
                 yield WatchEvent(action=action, path=path, entry=entry)
         finally:
             with contextlib.suppress(Exception):

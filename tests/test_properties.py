@@ -175,43 +175,65 @@ async def test_history_completeness_and_reversibility_invariant(fs: SurrealFs) -
     assert await fs.read_text(path) == v1
 
 
+@pytest.mark.asyncio
 @given(ops=filesystem_operations())
-@settings(max_examples=15, suppress_health_check=[HealthCheck.function_scoped_fixture])
-def test_hypothesis_operation_sequence_consistency(ops) -> None:
-    """Property test running generated mutation operations against reference model."""
-    # Pure-Python in-memory reference model of the tree
-    ref_tree: dict[str, str | dict] = {}
+@settings(
+    max_examples=10,
+    deadline=None,
+    suppress_health_check=[HealthCheck.function_scoped_fixture],
+)
+async def test_hypothesis_operation_sequence_consistency(fs: SurrealFs, ops) -> None:
+    """Property test running generated operations against SurrealFs and ref model."""
+    import uuid
 
-    def ref_write(path: str, content: str):
-        ref_tree[path] = content
+    prefix = f"/prop_{uuid.uuid4().hex[:8]}"
+    await fs.mkdir(prefix, parents=True, exist_ok=True)
+    ref_files: dict[str, str] = {}
+    ref_dirs: set[str] = {prefix}
 
-    def ref_mkdir(path: str):
-        ref_tree[path] = {}
-
-    def ref_rm(path: str):
-        keys_to_del = [k for k in ref_tree if k == path or k.startswith(path + "/")]
-        for k in keys_to_del:
-            del ref_tree[k]
-
-    def ref_mv(src: str, dst: str):
-        if src in ref_tree:
-            val = ref_tree.pop(src)
-            ref_tree[dst] = val
-
-    for op, path, content in ops:
+    for op, rel_path, content in ops:
+        leaf = posixpath.basename(rel_path)
+        path = f"{prefix}/{leaf}"
         if op == "write":
-            ref_write(path, content)
+            if path in ref_dirs:
+                with pytest.raises(IsADirectory):
+                    await fs.write_text(path, content)
+            else:
+                await fs.write_text(path, content)
+                ref_files[path] = content
         elif op == "mkdir":
-            ref_mkdir(path)
+            if path in ref_files or path in ref_dirs:
+                await fs.mkdir(path, exist_ok=True) if path in ref_dirs else None
+            else:
+                await fs.mkdir(path, exist_ok=True)
+                ref_dirs.add(path)
         elif op == "rm":
-            ref_rm(path)
+            if path in ref_files or path in ref_dirs:
+                await fs.rm(path, recursive=True)
+                ref_files.pop(path, None)
+                ref_dirs.discard(path)
         elif op == "mv":
-            ref_mv(path, path + "_moved")
+            dst = path + "_moved"
+            if (
+                (path in ref_files or path in ref_dirs)
+                and dst not in ref_files
+                and dst not in ref_dirs
+            ):
+                await fs.mv(path, dst)
+                if path in ref_files:
+                    ref_files[dst] = ref_files.pop(path)
+                if path in ref_dirs:
+                    ref_dirs.remove(path)
+                    ref_dirs.add(dst)
 
-    # Verify no cycle or corrupted keys in reference model
-    for p in ref_tree:
-        assert p.startswith("/")
-        assert not p.endswith("/")
+    entries = await fs.ls(prefix, recursive=True)
+    actual_files = {e.path for e in entries if not e.is_folder}
+    actual_dirs = {e.path for e in entries if e.is_folder} | {prefix}
+    assert actual_files == set(ref_files.keys())
+    assert actual_dirs == ref_dirs
+    for fpath, expected_text in ref_files.items():
+        assert await fs.read_text(fpath) == expected_text
+    await fs.rm(prefix, recursive=True)
 
 
 @given(

@@ -674,3 +674,45 @@ def test_format_mode():
     assert format_mode(0o700, is_folder=True) == "drwx------"
     assert format_mode(0o666) == "-rw-rw-rw-"
     assert format_mode(0o644) == "-rw-r--r--"
+
+
+async def test_history_version_content_and_undelete_enforce_read_permissions(tree):
+    """Unprivileged users cannot read history, version_content, or undelete files."""
+    alice, bob = tree
+    await alice.write_text("/projects/secret_hist.md", "v1 secret")
+    await alice.write_text("/projects/secret_hist.md", "v2 secret")
+    await alice.chmod("/projects/secret_hist.md", 0o600)
+
+    with pytest.raises(PermissionDenied):
+        await bob.history("/projects/secret_hist.md")
+    with pytest.raises(PermissionDenied):
+        await bob.version_content("/projects/secret_hist.md", 1)
+
+    await alice.rm("/projects/secret_hist.md")
+    with pytest.raises(PermissionDenied):
+        await bob.undelete("/projects/secret_hist.md")
+    recovered = await alice.undelete("/projects/secret_hist.md")
+    assert recovered.path == "/projects/secret_hist.md"
+
+
+async def test_group_permission_bits_and_search(db, as_user):
+    """Group members get group bits in Python and SurrealQL fn::sfs_can_read_grp."""
+    alice = as_user("alice")
+    bob = as_user("bob")
+    carol = as_user("carol")
+
+    await alice.mkdir("/team")
+    await alice.write_text("/team/design.md", "confidential architecture design")
+    await alice.chmod("/team/design.md", 0o640)
+    await db.query(
+        "RETURN fn::sfs_add_group_member('eng', 'alice', 'root');"
+        "RETURN fn::sfs_add_group_member('eng', 'bob', 'root');"
+        "RETURN fn::sfs_chgrp('/team/design.md', 'eng', 'alice');"
+    )
+
+    assert await bob.read_text("/team/design.md") == "confidential architecture design"
+    with pytest.raises(PermissionDenied):
+        await carol.read_text("/team/design.md")
+    assert len(await bob.search_text("confidential")) == 1
+    assert len(await carol.search_text("confidential")) == 0
+
