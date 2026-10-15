@@ -243,12 +243,97 @@ def _written(rows: Any, path: str, *, if_generation: int | None = None) -> Any:
     return row
 
 
+class _ServerRpcClient:
+    """Stateless HTTP client talking to Layer 2 SurrealFS Server (/api/rpc)."""
+
+    def __init__(
+        self, url: str, *, user: str = ROOT, token: str | None = None
+    ) -> None:
+        clean = url.strip().rstrip("/")
+        if clean.startswith("sfs+http://") or clean.startswith("sfs+https://"):
+            clean = clean[4:]
+        elif clean.startswith("sfs://"):
+            clean = "http://" + clean[6:]
+        elif not clean.startswith("http://") and not clean.startswith("https://"):
+            clean = "https://" + clean
+        if clean.endswith("/api/rpc"):
+            self.rpc_url = clean
+        else:
+            self.rpc_url = f"{clean}/api/rpc"
+        self.user = user
+        self.token = token
+
+    async def query_raw(
+        self, sql: str, variables: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        import httpx
+
+        raw_vars = dict(variables or {})
+        out_vars: dict[str, Any] = {}
+        preamble: list[str] = []
+
+        for k, v in raw_vars.items():
+            if isinstance(v, RecordID):
+                rec_key = f"_sfs_rec_{k}"
+                out_vars[rec_key] = f"{v.table_name}:{v.id}"
+                preamble.append(f"LET ${k} = type::record(${rec_key});")
+            elif isinstance(v, bytes):
+                bin_key = f"_sfs_bin_{k}"
+                out_vars[bin_key] = list(v)
+                preamble.append(f"LET ${k} = <bytes>${bin_key};")
+            elif isinstance(v, datetime):
+                out_vars[k] = v.isoformat()
+            elif k == "payload" and isinstance(v, dict):
+                payload_copy = dict(v)
+                patches: list[str] = []
+                if isinstance(payload_copy.get("parent"), RecordID):
+                    p_rec: RecordID = payload_copy.pop("parent")
+                    out_vars["_sfs_payload_parent"] = f"{p_rec.table_name}:{p_rec.id}"
+                    patches.append("parent: type::record($_sfs_payload_parent)")
+                if isinstance(payload_copy.get("file"), bytes):
+                    p_bin: bytes = payload_copy.pop("file")
+                    out_vars["_sfs_payload_file"] = list(p_bin)
+                    patches.append("file: <bytes>$_sfs_payload_file")
+                out_vars[k] = payload_copy
+                if patches:
+                    joined = ", ".join(patches)
+                    preamble.append(
+                        f"LET $payload = object::extend($payload, {{ {joined} }});"
+                    )
+            else:
+                out_vars[k] = v
+
+        full_sql = "\n".join([*preamble, sql]) if preamble else sql
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-SurrealFS-Caller": self.user,
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                self.rpc_url,
+                headers=headers,
+                json={"sql": full_sql, "vars": out_vars, "caller": self.user},
+            )
+            data = resp.json()
+            if resp.status_code >= 400 and "error" in data:
+                return {"error": {"message": str(data["error"])}}
+            return {"result": data.get("results", [])}
+
+    async def close(self) -> None:
+        pass
+
+
 class SurrealFs:
     """A hierarchical filesystem stored in a SurrealDB ``file`` table.
 
     Args:
         db: A connected ``AsyncSurreal`` handle (signed in, namespace/database
-            selected). Not owned by this object -- closing it is the caller's job.
+            selected) or a ``_ServerRpcClient``. Not owned by this object --
+            closing it is the caller's job.
         user: Who this filesystem acts as. Required, with no default: the
             database cannot tell us (every surface signs in as a system
             credential), and guessing wrong is either a lockout or a leak.
@@ -265,6 +350,19 @@ class SurrealFs:
         self.table = table
         self.user = user
         self.is_root = user == ROOT
+
+    @classmethod
+    def from_server(
+        cls,
+        url: str,
+        *,
+        user: str,
+        token: str | None = None,
+        table: str = "file",
+    ) -> SurrealFs:
+        """Connect to a Layer 2 SurrealFS Server over HTTPS (/api/rpc)."""
+        client = _ServerRpcClient(url, user=user, token=token)
+        return cls(client, user=user, table=table)
 
     # ------------------------------------------------------------ permissions
 

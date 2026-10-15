@@ -47,7 +47,6 @@ from pathlib import Path
 from typing import Any
 
 from surrealfs import SurrealFs
-from surrealfs.embed import make_embedder
 from surrealfs.integrations._connect import agent_user, connected
 from surrealfs.integrations.json_tools import call_tool
 from surrealfs.tools import TOOLS, ToolContext, select_tools
@@ -166,8 +165,6 @@ def _handler(name: str, *, semantic: bool) -> Callable[..., Awaitable[str]]:
 async def _dispatch(name: str, args: dict[str, Any], *, semantic: bool) -> str:
     """Connect, run one tool, and hand back its text."""
     async with connected() as db:
-        # The embedder is built per call, not cached: the OpenAI client binds its
-        # connection pool to the running loop, and this one closes with the call.
-        embed = make_embedder() if semantic else None
-        ctx = ToolContext(fs=SurrealFs(db, user=agent_user()), embed=embed)
+        ctx = ToolContext(fs=SurrealFs(db, user=agent_user()), embed=None)
         return await call_tool(ctx, name, args, semantic=semantic)
+

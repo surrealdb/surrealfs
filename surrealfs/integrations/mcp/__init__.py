@@ -237,25 +237,7 @@ async def serve() -> None:
         await apply_schema(db)
     except Exception as exc:  # noqa: BLE001 -- any DDL failure, same answer
         print(f"surrealfs-mcp: could not apply the schema: {exc}", file=sys.stderr)
-    embed = None
-    if semantic:
-        # Only when asked for. `surrealfs.embed` imports `openai` at module
-        # level, and that lives in the `embed` extra, not `mcp` -- importing
-        # it unconditionally made the server fail to start for everyone who
-        # installed the plugin, which a client reports only as "no such tools".
-        try:
-            from ...embed import make_embedder
-
-            embed = make_embedder()
-        except ImportError as exc:
-            print(
-                f"surrealfs-mcp: SURREALFS_SEMANTIC is set but {exc.name} is "
-                "missing, so `search` will be full-text only. Install: pip "
-                "install 'surrealfs[mcp,embed]'",
-                file=sys.stderr,
-            )
-            semantic = False
-    ctx = ToolContext(fs=SurrealFs(db, user=agent_user()), embed=embed)
+    ctx = ToolContext(fs=SurrealFs(db, user=agent_user()), embed=None)
     listed = [
         types.Tool(
             name=spec["name"],

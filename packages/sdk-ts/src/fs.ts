@@ -29,6 +29,75 @@ export interface SurrealFsOptions {
   branch?: string;
 }
 
+export interface SurrealFsServerOptions {
+  url: string;
+  token?: string;
+  user?: string;
+  branch?: string;
+}
+
+class ServerRpcClient {
+  private readonly rpcUrl: string;
+  private readonly token?: string;
+  private readonly user: string;
+
+  constructor(opts: SurrealFsServerOptions) {
+    const base = opts.url
+      .trim()
+      .replace(/^sfs\+https:\/\//, "https://")
+      .replace(/^sfs\+http:\/\//, "http://")
+      .replace(/^sfs:\/\//, "http://")
+      .replace(/\/+$/, "");
+    this.rpcUrl = `${base}/api/rpc`;
+    this.token = opts.token;
+    this.user = opts.user ?? "root";
+  }
+
+  async query<T = unknown[]>(
+    sql: string,
+    vars: Record<string, unknown> = {}
+  ): Promise<T> {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "X-SurrealFS-User": this.user,
+    };
+    if (this.token) {
+      headers["Authorization"] = `Bearer ${this.token}`;
+    }
+    const resp = await fetch(this.rpcUrl, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        sql,
+        vars,
+        caller: this.user,
+      }),
+    });
+    const body = (await resp.json()) as {
+      error?: string;
+      results?: Array<{ status?: string; result?: unknown }>;
+    };
+    if (!resp.ok || body.error) {
+      throw new Error(body.error || `Server RPC error (${resp.status})`);
+    }
+    const stmts = body.results ?? [];
+    const out: unknown[] = [];
+    for (const stmt of stmts) {
+      if (stmt.status === "ERR") {
+        throw new Error(String(stmt.result ?? "Query error"));
+      }
+      out.push(stmt.result);
+    }
+    return out as unknown as T;
+  }
+
+  async live(_table: unknown): Promise<never> {
+    throw new SurrealFsError(
+      "Live queries require a direct WebSocket connection; use polling with connectServer"
+    );
+  }
+}
+
 export class SurrealFs {
   readonly db: Surreal;
   readonly user: string;
@@ -38,6 +107,18 @@ export class SurrealFs {
     this.db = db;
     this.user = options.user ?? "root";
     this.branch = options.branch ?? "main";
+  }
+
+  /**
+   * Connect to a Layer 2 SurrealFS Server (Cloudflare Worker or `surrealfs-server`)
+   * over HTTPS (`/api/rpc`) without direct SurrealDB credentials.
+   */
+  static connectServer(options: SurrealFsServerOptions): SurrealFs {
+    const rpcClient = new ServerRpcClient(options) as unknown as Surreal;
+    return new SurrealFs(rpcClient, {
+      user: options.user,
+      branch: options.branch,
+    });
   }
 
   setBranch(branch: string): void {

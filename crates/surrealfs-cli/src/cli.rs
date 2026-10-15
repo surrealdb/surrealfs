@@ -317,6 +317,13 @@ pub enum Commands {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ServeCommands {
+    /// Run unified Layer 2 SurrealFS Gateway (REST API, MCP, WebDAV, S3, Chat, Embeddings)
+    Gateway {
+        #[arg(short, long, default_value = "127.0.0.1:8787")]
+        addr: String,
+        #[arg(long)]
+        static_dir: Option<String>,
+    },
     /// Run WebDAV protocol server (§22.1)
     Webdav {
         #[arg(short, long, default_value = "127.0.0.1:8080")]
@@ -463,6 +470,16 @@ pub enum CrdtCommands {
 
 impl Cli {
     pub async fn connect_fs(&self) -> Result<SurrealFs> {
+        if let Ok(server_url) = std::env::var("SURREALFS_SERVER_URL") {
+            if !server_url.trim().is_empty() {
+                let token = std::env::var("SURREALFS_TOKEN")
+                    .ok()
+                    .or_else(|| self.pass.clone());
+                let caller = self.caller.as_deref().or(self.user.as_deref());
+                return SurrealFs::connect_remote(&server_url, token.as_deref(), caller)
+                    .context("Failed to connect to remote SurrealFS Server");
+            }
+        }
         let opts = ConnectOptions {
             url: self.url.clone(),
             user: self.user.clone(),
@@ -824,6 +841,29 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
         Commands::Serve { action } => {
             let fs = cli.connect_fs().await?;
             match action {
+                ServeCommands::Gateway { addr, static_dir } => {
+                    output.push_str(&format!(
+                        "Starting SurrealFS Layer 2 Gateway on {}\n",
+                        addr
+                    ));
+                    let s_dir = static_dir
+                        .as_ref()
+                        .map(std::path::PathBuf::from)
+                        .or_else(|| {
+                            let def = std::path::PathBuf::from("surrealfs/browser/static");
+                            if def.is_dir() {
+                                Some(def)
+                            } else {
+                                None
+                            }
+                        });
+                    let gateway = surrealfs_server::SurrealFsGateway::new(fs)
+                        .with_embedder(surrealfs_server::Embedder::from_env())
+                        .with_chat(surrealfs_server::ChatConfig::from_env())
+                        .with_server_token(std::env::var("SURREALFS_SERVER_TOKEN").ok())
+                        .with_static_dir(s_dir);
+                    surrealfs_server::serve_http(addr, gateway).await?;
+                }
                 ServeCommands::Webdav { addr, prefix } => {
                     output.push_str(&format!(
                         "Starting WebDAV server on {} with prefix {}\n",

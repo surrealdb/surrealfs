@@ -2,7 +2,11 @@
  * @surrealdb/fs - SurrealFS TypeScript SDK
  */
 
-export { SurrealFs, type SurrealFsOptions } from "./fs.js";
+export {
+  SurrealFs,
+  type SurrealFsOptions,
+  type SurrealFsServerOptions,
+} from "./fs.js";
 export * from "./models.js";
 export * from "./errors.js";
 export * from "./paths.js";

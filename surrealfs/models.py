@@ -29,6 +29,38 @@ __all__ = [
 FOLDER_CONTENT_TYPE = "inode/directory"
 
 
+def _to_record_id(val: Any) -> Any:
+    if isinstance(val, RecordID):
+        return val
+    if isinstance(val, str) and ":" in val:
+        table, rec_id = val.split(":", 1)
+        return RecordID(table, rec_id)
+    if isinstance(val, dict) and "tb" in val and "id" in val:
+        return RecordID(str(val["tb"]), val["id"])
+    return val
+
+
+def _to_datetime(val: Any) -> datetime | None:
+    if val is None or isinstance(val, datetime):
+        return val
+    if isinstance(val, str):
+        try:
+            return datetime.fromisoformat(val.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
+def _to_bytes(val: Any) -> bytes | None:
+    if val is None or isinstance(val, bytes):
+        return val
+    if isinstance(val, bytearray):
+        return bytes(val)
+    if isinstance(val, list):
+        return bytes(int(x) & 0xFF for x in val)
+    return None
+
+
 def format_mode(mode: int, *, is_folder: bool = False) -> str:
     """Mode bits as ``ls -l`` writes them: ``drwxr-x---``."""
     out = ["d" if is_folder else "-"]
@@ -85,13 +117,13 @@ class FileEntry:
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> FileEntry:
         content = row.get("content")
-        data = row.get("file")
+        data = _to_bytes(row.get("file"))
         # `size` may be precomputed by the query (listings) or derived here.
         size = row.get("size")
         if size is None:
             size = len(content) if content is not None else len(data or b"")
         return cls(
-            id=row["id"],
+            id=_to_record_id(row["id"]),
             path=row.get("path", ""),
             filename=row.get("filename", ""),
             content_type=row.get("content_type", ""),
@@ -111,8 +143,8 @@ class FileEntry:
             data=data,
             meta=row.get("meta"),
             crdt=bool(row.get("crdt", False)),
-            created_at=row.get("created_at"),
-            updated_at=row.get("updated_at"),
+            created_at=_to_datetime(row.get("created_at")),
+            updated_at=_to_datetime(row.get("updated_at")),
         )
 
 

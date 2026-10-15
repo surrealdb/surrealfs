@@ -212,7 +212,7 @@ class _Reconnecting:
             await _authenticate(self._db)
 
 
-async def connect() -> AsyncSurreal:
+async def connect() -> Any:
     """Connect and authenticate, for a process that keeps the handle.
 
     The schema is *not* applied: a long-running program pointed at a shared
@@ -224,13 +224,20 @@ async def connect() -> AsyncSurreal:
     WebSocket belongs to the loop it was opened on -- so `await` this from inside
     the server's own loop, not from a separate `asyncio.run`.
     """
+    server_url = os.environ.get("SURREALFS_SERVER_URL", "").strip()
+    if server_url:
+        from ..fs import _ServerRpcClient
+
+        token = os.environ.get("SURREALFS_TOKEN", "").strip() or None
+        return _ServerRpcClient(server_url, user=agent_user(), token=token)
+
     db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
     await _authenticate(db)
     return _Reconnecting(db)
 
 
 @asynccontextmanager
-async def connected() -> AsyncIterator[AsyncSurreal]:
+async def connected() -> AsyncIterator[Any]:
     """Connect, authenticate, ensure the schema, and close again afterwards.
 
     One connection per call. Hermes offers no lifecycle hook to hang a long-lived
@@ -240,6 +247,14 @@ async def connected() -> AsyncIterator[AsyncSurreal]:
     on. Calls arrive at LLM pace, so the connect cost hides in the noise.
     """
     global _schema_applied
+
+    server_url = os.environ.get("SURREALFS_SERVER_URL", "").strip()
+    if server_url:
+        from ..fs import _ServerRpcClient
+
+        token = os.environ.get("SURREALFS_TOKEN", "").strip() or None
+        yield _ServerRpcClient(server_url, user=agent_user(), token=token)
+        return
 
     db = AsyncSurreal(os.environ.get("SURREALDB_URL", "ws://localhost:8000/rpc"))
     try:
@@ -258,3 +273,4 @@ async def connected() -> AsyncIterator[AsyncSurreal]:
         yield db
     finally:
         await db.close()
+

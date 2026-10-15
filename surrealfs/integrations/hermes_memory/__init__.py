@@ -616,7 +616,6 @@ class SurrealFsMemory(_Base):
 
     async def _recall(self, query: str) -> str:
         from surrealfs import SurrealFs  # deferred — see `_write`
-        from surrealfs.embed import make_embedder
         from surrealfs.integrations._connect import connected
 
         # The same call the `surrealfs_search` tool makes, deliberately. A
@@ -627,11 +626,7 @@ class SurrealFsMemory(_Base):
         # path that both surfaces improve together beats two.
         async with connected() as db:
             fs = SurrealFs(db, user=_agent_user())
-            # Whole filesystem, not just the memory folder: the notes the agent
-            # wrote itself under /preferences/ and /projects/ are the strongest
-            # signal in here. The vector is built from the whole sentence, since
-            # reading one is the single thing that arm does better.
-            vector = await make_embedder()(query) if _semantic() else None
+            vector = None
             # Over-fetch so the filtering below cannot cost a slot — it drops
             # whole classes of hit, not the odd one. `search_text` reads every
             # matching row's content whatever the limit, so a wider one is close
