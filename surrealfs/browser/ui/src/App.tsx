@@ -54,6 +54,23 @@ export function App() {
         draft.current = null;
     }, []);
 
+    const goHome = useCallback(async () => {
+        if (dirty && !(await confirm("Discard unsaved changes?", "Discard"))) return;
+        closeFile();
+        setView("editor");
+    }, [closeFile, confirm, dirty]);
+
+    const switchView = useCallback(
+        async (next: "editor" | "canvas") => {
+            if (next === view) return;
+            if (dirty && !(await confirm("Discard unsaved changes?", "Discard"))) return;
+            setDirty(false);
+            draft.current = null;
+            setView(next);
+        },
+        [confirm, dirty, view],
+    );
+
     /** Reload the flat tree. Returns it, since state lands a render later. */
     const loadTree = useCallback(
         async (keepSelection = true) => {
@@ -241,8 +258,8 @@ export function App() {
                 entries={entries}
                 current={current}
                 view={view}
-                onViewChange={setView}
-                onGoHome={closeFile}
+                onViewChange={(next) => void guard(switchView)(next)}
+                onGoHome={() => void guard(goHome)()}
                 onOpen={guard(openFile)}
                 onRefresh={guard(() => loadTree())}
                 onCreate={askCreate}
@@ -257,7 +274,7 @@ export function App() {
                     dirty={dirty}
                     view={view}
                     onMode={guard(switchMode)}
-                    onViewChange={setView}
+                    onViewChange={(next) => void guard(switchView)(next)}
                     onSave={guard(save)}
                     onRename={() =>
                         current &&
@@ -286,10 +303,10 @@ export function App() {
                         mode={mode}
                         onCreateFile={() => askCreate(false)}
                         onCreateFolder={() => askCreate(true)}
-                        onOpenCanvas={() => setView("canvas")}
-                        onEdit={(text) => {
-                            draft.current = text;
-                            setDirty(true);
+                        onOpenCanvas={() => void guard(switchView)("canvas")}
+                        onEdit={(text, isDirty) => {
+                            draft.current = isDirty ? text : null;
+                            setDirty(isDirty);
                         }}
                         onReady={() => {
                             if (!wantPrint.current) return;

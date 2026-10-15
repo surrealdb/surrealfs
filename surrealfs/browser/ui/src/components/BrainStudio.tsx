@@ -41,10 +41,13 @@ export function BrainStudio({
     // Timeline Scrubber state
     const [timelineIndex, setTimelineIndex] = useState<number>(0);
     const [restoring, setRestoring] = useState(false);
+    const pinnedTimelineRef = useRef(false);
 
     // Pan & Zoom
     const transformRef = useRef({ x: 0, y: 0, scale: 1 });
     const isDraggingRef = useRef(false);
+    const hasDraggedRef = useRef(false);
+    const dragOriginRef = useRef({ x: 0, y: 0 });
     const dragStartRef = useRef({ x: 0, y: 0 });
     const nodePositionsRef = useRef<Map<string, NodePosition>>(new Map());
 
@@ -55,10 +58,15 @@ export function BrainStudio({
                 json<GraphData>("/api/graph"),
                 json<ActivityData>("/api/activity"),
             ]);
+            // Order recent_versions chronologically (left = oldest, right = newest/Live)
+            const chronologicalVersions = [...aData.recent_versions].reverse();
             setGraphData(gData);
-            setActivity(aData);
-            if (aData.recent_versions.length > 0) {
-                setTimelineIndex(aData.recent_versions.length - 1);
+            setActivity({
+                locks: aData.locks,
+                recent_versions: chronologicalVersions,
+            });
+            if (chronologicalVersions.length > 0 && !pinnedTimelineRef.current) {
+                setTimelineIndex(chronologicalVersions.length - 1);
             }
         } catch (err) {
             onStatus?.((err as Error).message, true);
@@ -71,11 +79,17 @@ export function BrainStudio({
         return () => clearInterval(interval);
     }, [refreshData]);
 
-    // Initialize node physics positions
+    // Initialize node physics positions and prune deleted nodes
     useEffect(() => {
         const positions = nodePositionsRef.current;
         const width = 800;
         const height = 600;
+        const validIds = new Set(graphData.nodes.map((n) => n.id));
+        for (const id of Array.from(positions.keys())) {
+            if (!validIds.has(id)) {
+                positions.delete(id);
+            }
+        }
 
         graphData.nodes.forEach((node, idx) => {
             if (!positions.has(node.id)) {
@@ -102,10 +116,36 @@ export function BrainStudio({
             const ctx = canvas.getContext("2d");
             if (!ctx) return;
 
+            const dpr = window.devicePixelRatio || 1;
             const width = canvas.width;
             const height = canvas.height;
             const { x: panX, y: panY, scale } = transformRef.current;
             const positions = nodePositionsRef.current;
+
+            // Pairwise node repulsion so unconnected nodes don't overlap
+            const nodes = graphData.nodes;
+            for (let i = 0; i < nodes.length; i++) {
+                const posA = positions.get(nodes[i].id);
+                if (!posA) continue;
+                for (let j = i + 1; j < nodes.length; j++) {
+                    const posB = positions.get(nodes[j].id);
+                    if (!posB) continue;
+                    const dx = posB.x - posA.x;
+                    const dy = posB.y - posA.y;
+                    const distSq = dx * dx + dy * dy;
+                    const minSep = posA.radius + posB.radius + 36;
+                    if (distSq > 0 && distSq < minSep * minSep) {
+                        const dist = Math.sqrt(distSq) || 1;
+                        const repulse = ((minSep - dist) / minSep) * 0.6;
+                        const rx = (dx / dist) * repulse;
+                        const ry = (dy / dist) * repulse;
+                        posA.x -= rx;
+                        posA.y -= ry;
+                        posB.x += rx;
+                        posB.y += ry;
+                    }
+                }
+            }
 
             // Simple force-directed relaxation
             graphData.edges.forEach((edge) => {
@@ -130,6 +170,7 @@ export function BrainStudio({
             ctx.clearRect(0, 0, width, height);
 
             ctx.save();
+            ctx.scale(dpr, dpr);
             ctx.translate(panX, panY);
             ctx.scale(scale, scale);
 
@@ -214,27 +255,49 @@ export function BrainStudio({
         return () => cancelAnimationFrame(animId);
     }, [graphData, activity, filter]);
 
-    // Handle resize
+    // Handle resize and non-passive wheel zoom
     useEffect(() => {
         const resize = () => {
             const canvas = canvasRef.current;
             if (!canvas) return;
-            canvas.width = canvas.parentElement?.clientWidth || 800;
-            canvas.height = canvas.parentElement?.clientHeight || 600;
+            const dpr = window.devicePixelRatio || 1;
+            const clientWidth = canvas.parentElement?.clientWidth || 800;
+            const clientHeight = canvas.parentElement?.clientHeight || 600;
+            canvas.width = clientWidth * dpr;
+            canvas.height = clientHeight * dpr;
         };
         resize();
         window.addEventListener("resize", resize);
-        return () => window.removeEventListener("resize", resize);
+        const canvas = canvasRef.current;
+        const onWheel = (e: WheelEvent) => {
+            e.preventDefault();
+            const factor = e.deltaY < 0 ? 1.1 : 0.9;
+            transformRef.current.scale = Math.max(0.2, Math.min(3, transformRef.current.scale * factor));
+        };
+        canvas?.addEventListener("wheel", onWheel, { passive: false });
+        return () => {
+            window.removeEventListener("resize", resize);
+            canvas?.removeEventListener("wheel", onWheel);
+        };
     }, []);
 
     // Mouse drag pan & click interactions
     const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
         isDraggingRef.current = true;
+        hasDraggedRef.current = false;
+        dragOriginRef.current = { x: e.clientX, y: e.clientY };
         dragStartRef.current = { x: e.clientX, y: e.clientY };
     };
 
     const handleMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
         if (!isDraggingRef.current) return;
+        const totalMove = Math.hypot(
+            e.clientX - dragOriginRef.current.x,
+            e.clientY - dragOriginRef.current.y,
+        );
+        if (totalMove > 4) {
+            hasDraggedRef.current = true;
+        }
         const dx = e.clientX - dragStartRef.current.x;
         const dy = e.clientY - dragStartRef.current.y;
         dragStartRef.current = { x: e.clientX, y: e.clientY };
@@ -243,7 +306,10 @@ export function BrainStudio({
     };
 
     const handleMouseUp = (e: React.MouseEvent<HTMLCanvasElement>) => {
+        const wasDragging = hasDraggedRef.current;
         isDraggingRef.current = false;
+        hasDraggedRef.current = false;
+        if (wasDragging) return;
 
         // Check if a node was clicked
         const canvas = canvasRef.current;
@@ -269,12 +335,6 @@ export function BrainStudio({
         }
     };
 
-    const handleWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-        e.preventDefault();
-        const factor = e.deltaY < 0 ? 1.1 : 0.9;
-        transformRef.current.scale = Math.max(0.2, Math.min(3, transformRef.current.scale * factor));
-    };
-
     const handleRestoreVersion = async (version: FileVersionInfo) => {
         setRestoring(true);
         try {
@@ -282,6 +342,7 @@ export function BrainStudio({
                 path: version.path,
                 generation: version.generation,
             });
+            pinnedTimelineRef.current = false;
             onStatus?.(`Restored ${version.path} to generation ${version.generation}`);
             refreshData();
         } catch (err) {
@@ -301,7 +362,6 @@ export function BrainStudio({
                 onMouseDown={handleMouseDown}
                 onMouseMove={handleMouseMove}
                 onMouseUp={handleMouseUp}
-                onWheel={handleWheel}
                 style={{ width: "100%", height: "100%", cursor: "grab" }}
             />
 
@@ -445,7 +505,10 @@ export function BrainStudio({
                         min={0}
                         max={activity.recent_versions.length - 1}
                         value={timelineIndex}
-                        onChange={setTimelineIndex}
+                        onChange={(val) => {
+                            pinnedTimelineRef.current = val < activity.recent_versions.length - 1;
+                            setTimelineIndex(val);
+                        }}
                         label={(val) => `Version ${val + 1} of ${activity.recent_versions.length}`}
                     />
                 </Paper>

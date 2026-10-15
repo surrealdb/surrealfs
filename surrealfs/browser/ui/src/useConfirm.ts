@@ -10,18 +10,26 @@ import { useConfirmation } from "@surrealdb/ui";
  * the Close button, the X, escape and the overlay alike.
  */
 export function useConfirm(): (message: string, confirmText?: string) => Promise<boolean> {
-    const settle = useRef<(ok: boolean) => void>(() => {});
+    const settle = useRef<((ok: boolean) => void) | null>(null);
+    const finish = useCallback((ok: boolean) => {
+        const fn = settle.current;
+        settle.current = null;
+        fn?.(ok);
+    }, []);
     const ask = useConfirmation<{ message: string; confirmText: string }>({
         message: (v) => v.message,
         confirmText: (v) => v.confirmText,
         confirmProps: { color: "red" },
-        onConfirm: () => settle.current(true),
-        onDismiss: () => settle.current(false),
+        onConfirm: () => finish(true),
+        onDismiss: () => finish(false),
     });
 
     return useCallback(
         (message: string, confirmText = "Continue") =>
             new Promise<boolean>((resolve) => {
+                if (settle.current) {
+                    settle.current(false);
+                }
                 settle.current = resolve;
                 ask({ message, confirmText });
             }),

@@ -244,6 +244,13 @@ impl HttpHandler for SurrealFsGateway {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn serve_static_file(static_dir: &std::path::Path, clean_path: &str) -> Option<HttpResponse> {
+    if clean_path.split('/').any(|seg| seg == "..") {
+        return Some(HttpResponse::json(
+            403,
+            &json!({ "error": "Path traversal forbidden" }),
+        ));
+    }
+
     let rel = clean_path.trim_start_matches('/');
     let candidate = if rel.is_empty() {
         static_dir.join("index.html")
@@ -252,8 +259,43 @@ fn serve_static_file(static_dir: &std::path::Path, clean_path: &str) -> Option<H
     };
 
     let target = if candidate.is_file() {
+        if let (Ok(canon_dir), Ok(canon_file)) = (static_dir.canonicalize(), candidate.canonicalize()) {
+            if !canon_file.starts_with(&canon_dir) {
+                return Some(HttpResponse::json(
+                    403,
+                    &json!({ "error": "Path traversal forbidden" }),
+                ));
+            }
+        }
         candidate
     } else {
+        let has_asset_ext = candidate
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|ext| {
+                matches!(
+                    ext.to_ascii_lowercase().as_str(),
+                    "js" | "mjs"
+                        | "css"
+                        | "svg"
+                        | "png"
+                        | "jpg"
+                        | "jpeg"
+                        | "gif"
+                        | "webp"
+                        | "woff"
+                        | "woff2"
+                        | "ttf"
+                        | "ico"
+                        | "map"
+                )
+            });
+        if clean_path.starts_with("/assets/") || has_asset_ext {
+            return Some(HttpResponse::json(
+                404,
+                &json!({ "error": format!("Static asset not found: {}", clean_path) }),
+            ));
+        }
         let index = static_dir.join("index.html");
         if index.is_file() {
             index

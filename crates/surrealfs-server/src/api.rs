@@ -21,12 +21,14 @@ fn entry_json(e: &FileEntry) -> Value {
 fn error_status(err: &SurrealFsError) -> u16 {
     match err {
         SurrealFsError::NotFound(_) => 404,
-        SurrealFsError::AlreadyExists(_) => 409,
-        SurrealFsError::PermissionDenied(_) => 403,
-        SurrealFsError::Conflict(_) | SurrealFsError::Lock(_) => 409,
+        SurrealFsError::PermissionDenied(_) | SurrealFsError::LegalHold(_) => 403,
+        SurrealFsError::AlreadyExists(_)
+        | SurrealFsError::DirectoryNotEmpty(_)
+        | SurrealFsError::Conflict(_)
+        | SurrealFsError::Lock(_) => 409,
         SurrealFsError::InvalidPath(_)
         | SurrealFsError::IsADirectory(_)
-        | SurrealFsError::DirectoryNotEmpty(_) => 400,
+        | SurrealFsError::InvalidArguments(_) => 400,
         _ => 500,
     }
 }
@@ -378,14 +380,19 @@ async fn handle_graph(fs: &SurrealFs) -> HttpResponse {
         Ok(e) => e,
         Err(e) => return err_response(e),
     };
+    let readable_paths: std::collections::HashSet<&str> =
+        entries.iter().map(|e| e.path.as_str()).collect();
+
     let nodes: Vec<Value> = entries
         .iter()
         .map(|e| {
             json!({
                 "id": e.path,
                 "label": e.filename,
+                "path": e.path,
                 "is_folder": e.is_folder,
                 "size": e.size,
+                "updated_at": e.updated_at,
                 "content_type": e.content_type,
             })
         })
@@ -407,7 +414,9 @@ async fn handle_graph(fs: &SurrealFs) -> HttpResponse {
                         r.get("src").and_then(|v| v.as_str()),
                         r.get("dst").and_then(|v| v.as_str()),
                     ) {
-                        edges.push(json!({ "source": src, "target": dst, "kind": rel }));
+                        if readable_paths.contains(src) && readable_paths.contains(dst) {
+                            edges.push(json!({ "source": src, "target": dst, "relation": rel }));
+                        }
                     }
                 }
             }
@@ -417,11 +426,11 @@ async fn handle_graph(fs: &SurrealFs) -> HttpResponse {
     for e in &entries {
         if let Some(pos) = e.path.rfind('/') {
             let parent = if pos == 0 { "/" } else { &e.path[..pos] };
-            if parent != "/" {
+            if parent != "/" && readable_paths.contains(parent) {
                 edges.push(json!({
                     "source": parent,
                     "target": e.path,
-                    "kind": "contains",
+                    "relation": "contains",
                 }));
             }
         }
@@ -431,11 +440,28 @@ async fn handle_graph(fs: &SurrealFs) -> HttpResponse {
 }
 
 async fn handle_activity(fs: &SurrealFs) -> HttpResponse {
-    let locks = fs.list_locks().await.unwrap_or_default();
+    let readable_entries = fs.ls_recursive("/").await.unwrap_or_default();
+    let readable_paths: std::collections::HashSet<&str> =
+        readable_entries.iter().map(|e| e.path.as_str()).collect();
+    let is_root = fs.caller().is_none() || fs.caller() == Some("root");
+
+    let locks: Vec<_> = fs
+        .list_locks()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| is_root || readable_paths.contains(l.path.as_str()))
+        .collect();
+
+    let mut vars = Map::new();
+    vars.insert(
+        "caller".to_string(),
+        Value::String(fs.caller().unwrap_or("root").to_string()),
+    );
     let recent_versions = match fs
         .raw_query(
-            "SELECT file_id.path AS path, generation, author, created_at, size, op, reason FROM file_version ORDER BY created_at DESC LIMIT 20;",
-            Map::new(),
+            "SELECT path ?? file.path AS path, generation, author, created_at, size, op FROM file_version WHERE $caller = 'root' OR fn::sfs_can_read_grp(IF file.id IS NOT NONE THEN fn::sfs_gate(file.parent) ELSE gate END, owner, mode, $caller, file.group) ORDER BY created_at DESC LIMIT 20;",
+            vars,
         )
         .await
     {

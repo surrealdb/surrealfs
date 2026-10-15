@@ -109,6 +109,16 @@ export function Chat({
             }
             await onTurnDone();
         } catch (e) {
+            setBubbles((all) => {
+                const last = all[all.length - 1];
+                if (last && last.who === "agent" && !last.done) {
+                    if (!last.text && !(last.tools && last.tools.length > 0)) {
+                        return all.slice(0, -1);
+                    }
+                    return [...all.slice(0, -1), { ...last, done: true }];
+                }
+                return all;
+            });
             onError((e as Error).message);
         } finally {
             setBusy(false);

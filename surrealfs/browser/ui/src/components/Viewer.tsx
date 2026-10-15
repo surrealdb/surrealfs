@@ -45,7 +45,7 @@ export function Viewer({
     onCreateFile?: () => void;
     onCreateFolder?: () => void;
     onOpenCanvas?: () => void;
-    onEdit: (text: string) => void;
+    onEdit: (text: string, isDirty: boolean) => void;
     onReady: () => void;
     onError: (message: string) => void;
 }) {
@@ -183,7 +183,7 @@ function Source({
 }: {
     text: string;
     language?: "json" | "yaml" | "html" | "markdown" | "python" | "bash";
-    onEdit: (text: string) => void;
+    onEdit: (text: string, isDirty: boolean) => void;
 }) {
     const controller = useEditor({
         document: text,
@@ -191,7 +191,7 @@ function Source({
         lineNumbers: true,
         // CodeMirror reports setting the initial document as a change, which
         // would light up "unsaved" before the user has touched anything.
-        onChangeDocument: (next) => next !== text && onEdit(next),
+        onChangeDocument: (next) => onEdit(next, next !== text),
     });
     return <CodeEditor controller={controller} flex={1} mih={0} autoFocus />;
 }
