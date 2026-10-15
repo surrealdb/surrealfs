@@ -93,13 +93,13 @@ impl CrdtDoc {
             .find(old)
             .ok_or_else(|| anyhow!("Target content {:?} not found in document", old))?;
 
-        // Characters count vs byte offsets
-        let char_pos = current[..pos].chars().count() as u32;
-        let char_len = old.chars().count() as u32;
+        // yrs uses UTF-8 byte offsets by default (OffsetKind::Bytes)
+        let byte_pos = pos as u32;
+        let byte_len = old.len() as u32;
 
-        text.remove_range(&mut txn, char_pos, char_len);
+        text.remove_range(&mut txn, byte_pos, byte_len);
         if !new.is_empty() {
-            text.insert(&mut txn, char_pos, new);
+            text.insert(&mut txn, byte_pos, new);
         }
 
         let delta = txn.encode_diff_v1(&sv);
@@ -113,10 +113,10 @@ impl CrdtDoc {
         let sv = self.get_state_vector();
         let mut txn = self.doc.transact_mut();
         let current = text.get_string(&txn);
-        let char_len = current.chars().count() as u32;
+        let byte_len = current.len() as u32;
 
-        if char_len > 0 {
-            text.remove_range(&mut txn, 0, char_len);
+        if byte_len > 0 {
+            text.remove_range(&mut txn, 0, byte_len);
         }
         if !new_content.is_empty() {
             text.insert(&mut txn, 0, new_content);
@@ -152,6 +152,16 @@ mod tests {
         let (d2, res2) = doc.apply_edit("pending", "in-progress").unwrap();
         assert_eq!(res2, "Task: in-progress\nOwner: Alice\n");
         assert!(!d2.is_empty());
+    }
+
+    #[test]
+    fn test_crdt_multibyte_utf8_edit_and_replace() {
+        let (mut doc, _) = CrdtDoc::init("🚀 Status: 待機中 — owner: 太郎\n");
+        let (_, edited) = doc.apply_edit("待機中", "✅ 完了").unwrap();
+        assert_eq!(edited, "🚀 Status: ✅ 完了 — owner: 太郎\n");
+
+        let (_, replaced) = doc.apply_replace("🎉 Replaced cleanly").unwrap();
+        assert_eq!(replaced, "🎉 Replaced cleanly");
     }
 
     #[test]

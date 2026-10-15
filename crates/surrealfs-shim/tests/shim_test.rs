@@ -177,3 +177,63 @@ async fn test_wasi_virtual_fs_adapter() {
     let entries = wasi_vfs.read_dir("/surrealfs").await.unwrap();
     assert!(entries.iter().any(|e| e.filename == "wasi_doc.md"));
 }
+
+#[test]
+fn test_interceptor_ffi_negative_offset_and_virtual_io() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let fs = rt.block_on(create_test_fs());
+    let vfs = VirtualFs::new(fs, "/surrealfs");
+    surrealfs_shim::interceptor::set_test_vfs(vfs);
+
+    let c_path = std::ffi::CString::new("/surrealfs/ffi_test.txt").unwrap();
+    unsafe {
+        let fd = surrealfs_shim::interceptor::surrealfs_shim_open(
+            c_path.as_ptr(),
+            libc::O_CREAT | libc::O_RDWR,
+            0o644,
+        );
+        assert!(fd >= MIN_VIRTUAL_FD);
+
+        // Negative offset on pread / pwrite must return -1 and set EINVAL
+        let mut buf = [0u8; 8];
+        let r = surrealfs_shim::interceptor::surrealfs_shim_pread(
+            fd,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len(),
+            -5,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(surrealfs_shim::interceptor::errno::get_errno(), libc::EINVAL);
+
+        let w = surrealfs_shim::interceptor::surrealfs_shim_pwrite(
+            fd,
+            buf.as_ptr() as *const libc::c_void,
+            buf.len(),
+            -1,
+        );
+        assert_eq!(w, -1);
+        assert_eq!(surrealfs_shim::interceptor::errno::get_errno(), libc::EINVAL);
+
+        let msg = b"hello ffi";
+        let written = surrealfs_shim::interceptor::surrealfs_shim_pwrite(
+            fd,
+            msg.as_ptr() as *const libc::c_void,
+            msg.len(),
+            0,
+        );
+        assert_eq!(written, msg.len() as isize);
+
+        let mut out = [0u8; 9];
+        let read_n = surrealfs_shim::interceptor::surrealfs_shim_pread(
+            fd,
+            out.as_mut_ptr() as *mut libc::c_void,
+            out.len(),
+            0,
+        );
+        assert_eq!(read_n, 9);
+        assert_eq!(&out, b"hello ffi");
+
+        assert_eq!(surrealfs_shim::interceptor::surrealfs_shim_close(fd), 0);
+    }
+}
+

@@ -225,9 +225,12 @@ impl GitRemoteHelper {
         mut writer: W,
         url: &str,
     ) -> std::io::Result<()> {
-        let target_path = url
+        let _target_path = url
             .trim_start_matches("surrealfs://")
             .trim_start_matches("surreal://");
+        let mut refs: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
+        refs.insert("refs/heads/main".to_string(), "?".to_string());
 
         for line_res in reader.lines() {
             let line = line_res?;
@@ -247,34 +250,123 @@ impl GitRemoteHelper {
                     writer.flush()?;
                 }
                 "list" => {
-                    // Output default branch and HEAD reference
-                    writeln!(writer, "? refs/heads/main")?;
+                    for (r, sha) in &refs {
+                        writeln!(writer, "{} {}", sha, r)?;
+                    }
                     writeln!(writer, "@refs/heads/main HEAD")?;
                     writeln!(writer)?;
                     writer.flush()?;
                 }
                 "push" => {
                     let refspec = tokens.next().unwrap_or("refs/heads/main:refs/heads/main");
-                    let dest_ref = refspec.split(':').nth(1).unwrap_or(refspec);
-                    // Acknowledge push success
+                    let mut parts = refspec.split(':');
+                    let src_ref = parts.next().unwrap_or(refspec).trim_start_matches('+');
+                    let dest_ref = parts.next().unwrap_or(src_ref);
+                    refs.insert(dest_ref.to_string(), src_ref.to_string());
                     writeln!(writer, "ok {}", dest_ref)?;
                     writeln!(writer)?;
                     writer.flush()?;
                 }
                 "fetch" => {
-                    // Acknowledge fetch
                     writeln!(writer)?;
                     writer.flush()?;
                 }
                 _ => {
-                    // Unknown command, empty line terminates batch
                     writeln!(writer)?;
                     writer.flush()?;
                 }
             }
         }
 
-        let _ = target_path;
+        Ok(())
+    }
+
+    /// Runs the Git remote helper protocol backed by a live `SurrealFs` instance (§21.5).
+    pub async fn handle_command_with_fs<R: BufRead, W: Write>(
+        fs: &SurrealFs,
+        reader: R,
+        mut writer: W,
+        url: &str,
+    ) -> Result<()> {
+        let raw_target = url
+            .trim_start_matches("surrealfs://")
+            .trim_start_matches("surreal://");
+        let target_path = normalize_path(if raw_target.is_empty() {
+            "/"
+        } else {
+            raw_target
+        });
+
+        for line_res in reader.lines() {
+            let line = line_res.map_err(|e| SurrealFsError::Io(e.to_string()))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let mut tokens = trimmed.split_whitespace();
+            let cmd = tokens.next().unwrap_or("");
+
+            match cmd {
+                "capabilities" => {
+                    writeln!(writer, "push").map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writeln!(writer, "fetch").map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writeln!(writer).map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writer.flush().map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                }
+                "list" => {
+                    let mut res = fs
+                        .db
+                        .query("SELECT sha FROM git_commit WHERE target_root = $root ORDER BY created_at DESC LIMIT 1;")
+                        .bind(("root", target_path.clone()))
+                        .await?;
+                    let rows: Vec<serde_json::Value> = res.take(0usize).unwrap_or_default();
+                    let head_sha = rows
+                        .into_iter()
+                        .next()
+                        .and_then(|v| v.get("sha").and_then(|s| s.as_str()).map(|s| s.to_string()))
+                        .unwrap_or_else(|| "?".to_string());
+                    writeln!(writer, "{} refs/heads/main", head_sha)
+                        .map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writeln!(writer, "@refs/heads/main HEAD")
+                        .map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writeln!(writer).map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writer.flush().map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                }
+                "push" => {
+                    let refspec = tokens.next().unwrap_or("refs/heads/main:refs/heads/main");
+                    let mut parts = refspec.split(':');
+                    let src_ref = parts.next().unwrap_or(refspec).trim_start_matches('+');
+                    let dest_ref = parts.next().unwrap_or(src_ref);
+                    fs.mkdir(&target_path, true).await?;
+                    let commit = GitCommit {
+                        sha: src_ref.to_string(),
+                        author_name: fs
+                            .caller
+                            .clone()
+                            .unwrap_or_else(|| "surrealfs".to_string()),
+                        author_email: "git@surrealfs.local".to_string(),
+                        timestamp: chrono::Utc::now().to_rfc3339(),
+                        message: format!("Push {} -> {}", src_ref, dest_ref),
+                    };
+                    fs.record_git_commit(&commit, &target_path).await?;
+                    writeln!(writer, "ok {}", dest_ref)
+                        .map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writeln!(writer).map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writer.flush().map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                }
+                "fetch" => {
+                    let _ = fs.ls(&target_path).await;
+                    writeln!(writer).map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writer.flush().map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                }
+                _ => {
+                    writeln!(writer).map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                    writer.flush().map_err(|e| SurrealFsError::Io(e.to_string()))?;
+                }
+            }
+        }
+
         Ok(())
     }
 }

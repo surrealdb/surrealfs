@@ -45,6 +45,14 @@ pub const SSH_FX_NO_CONNECTION: u32 = 6;
 pub const SSH_FX_CONNECTION_LOST: u32 = 7;
 pub const SSH_FX_OP_UNSUPPORTED: u32 = 8;
 
+// SFTP Open Flags (SSH_FXF_*)
+pub const SSH_FXF_READ: u32 = 0x01;
+pub const SSH_FXF_WRITE: u32 = 0x02;
+pub const SSH_FXF_APPEND: u32 = 0x04;
+pub const SSH_FXF_CREAT: u32 = 0x08;
+pub const SSH_FXF_TRUNC: u32 = 0x10;
+pub const SSH_FXF_EXCL: u32 = 0x20;
+
 /// Open SFTP handle state (§22.8).
 #[derive(Debug, Clone)]
 struct SftpHandle {
@@ -52,6 +60,7 @@ struct SftpHandle {
     is_dir: bool,
     read_exhausted: bool,
     write_buffer: Vec<u8>,
+    dirty: bool,
 }
 
 /// SFTP Subsystem session engine.
@@ -59,6 +68,7 @@ pub struct SftpSession {
     fs: SurrealFs,
     handles: Arc<RwLock<HashMap<String, SftpHandle>>>,
     next_handle_id: AtomicU64,
+    caller: Arc<RwLock<Option<String>>>,
 }
 
 impl SftpSession {
@@ -67,13 +77,25 @@ impl SftpSession {
             fs,
             handles: Arc::new(RwLock::new(HashMap::new())),
             next_handle_id: AtomicU64::new(1),
+            caller: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    async fn scoped_fs(&self) -> SurrealFs {
+        let caller = self.caller.read().await.clone();
+        match caller {
+            Some(c) => self.fs.with_caller(&c),
+            None => self.fs.clone(),
         }
     }
 
     /// Authenticates an SSH public key against the `credential` store (§22.8).
     pub async fn authenticate_pubkey(&self, pubkey_fingerprint: &str) -> bool {
         match self.fs.resolve_credential("ssh", pubkey_fingerprint).await {
-            Ok(Some(cred)) => cred.enabled,
+            Ok(Some(cred)) if cred.enabled => {
+                *self.caller.write().await = Some(cred.user_id);
+                true
+            }
             _ => false,
         }
     }
@@ -134,7 +156,8 @@ impl SftpSession {
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid path"),
         };
 
-        match self.fs.stat(&path).await {
+        let fs = self.scoped_fs().await;
+        match fs.stat(&path).await {
             Ok(Some(stat)) => {
                 let mut resp = vec![SSH_FXP_ATTRS];
                 resp.extend_from_slice(&id.to_be_bytes());
@@ -164,6 +187,7 @@ impl SftpSession {
                 is_dir: true,
                 read_exhausted: false,
                 write_buffer: Vec::new(),
+                dirty: false,
             },
         );
 
@@ -180,18 +204,23 @@ impl SftpSession {
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid handle"),
         };
 
-        let mut handles = self.handles.write().await;
-        let handle = match handles.get_mut(&handle_str) {
-            Some(h) => h,
-            None => return build_status(id, SSH_FX_FAILURE, "Invalid handle"),
+        let dir_path = {
+            let mut handles = self.handles.write().await;
+            let handle = match handles.get_mut(&handle_str) {
+                Some(h) => h,
+                None => return build_status(id, SSH_FX_FAILURE, "Invalid handle"),
+            };
+
+            if handle.read_exhausted {
+                return build_status(id, SSH_FX_EOF, "End of directory");
+            }
+
+            handle.read_exhausted = true;
+            handle.path.clone()
         };
 
-        if handle.read_exhausted {
-            return build_status(id, SSH_FX_EOF, "End of directory");
-        }
-
-        handle.read_exhausted = true;
-        let children = self.fs.ls(&handle.path).await.unwrap_or_default();
+        let fs = self.scoped_fs().await;
+        let children = fs.ls(&dir_path).await.unwrap_or_default();
 
         let mut resp = vec![SSH_FXP_NAME];
         resp.extend_from_slice(&id.to_be_bytes());
@@ -214,10 +243,31 @@ impl SftpSession {
 
     async fn handle_open(&self, payload: &[u8]) -> Vec<u8> {
         let id = parse_u32(payload, 0).unwrap_or(0);
-        let path = match parse_string(payload, 4) {
-            Some(p) => normalize_path(&p),
+        let raw_path = match parse_string(payload, 4) {
+            Some(p) => p,
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid path"),
         };
+        let path = normalize_path(&raw_path);
+        let pflags_offset = 4 + 4 + raw_path.len();
+        let pflags = parse_u32(payload, pflags_offset).unwrap_or(SSH_FXF_CREAT | SSH_FXF_WRITE);
+
+        let fs = self.scoped_fs().await;
+        let existing = fs.stat(&path).await.ok().flatten();
+
+        if (pflags & SSH_FXF_EXCL) != 0 && (pflags & SSH_FXF_CREAT) != 0 && existing.is_some() {
+            return build_status(id, SSH_FX_FAILURE, "File already exists");
+        }
+        if (pflags & SSH_FXF_CREAT) == 0 && (pflags & SSH_FXF_WRITE) == 0 && existing.is_none() {
+            return build_status(id, SSH_FX_NO_SUCH_FILE, "File not found");
+        }
+
+        let write_buffer = if (pflags & SSH_FXF_TRUNC) == 0 && existing.is_some() {
+            fs.read_bytes(&path).await.unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let dirty = (pflags & SSH_FXF_TRUNC) != 0
+            || ((pflags & SSH_FXF_CREAT) != 0 && existing.is_none());
 
         let hid = self.next_handle_id.fetch_add(1, Ordering::SeqCst);
         let handle_str = format!("file-{}", hid);
@@ -229,7 +279,8 @@ impl SftpSession {
                 path,
                 is_dir: false,
                 read_exhausted: false,
-                write_buffer: Vec::new(),
+                write_buffer,
+                dirty,
             },
         );
 
@@ -250,13 +301,16 @@ impl SftpSession {
         let offset = parse_u64(payload, handle_len).unwrap_or(0);
         let len = parse_u32(payload, handle_len + 8).unwrap_or(32768);
 
-        let handles = self.handles.read().await;
-        let handle = match handles.get(&handle_str) {
-            Some(h) => h,
-            None => return build_status(id, SSH_FX_FAILURE, "Invalid handle"),
+        let handle_path = {
+            let handles = self.handles.read().await;
+            match handles.get(&handle_str) {
+                Some(h) => h.path.clone(),
+                None => return build_status(id, SSH_FX_FAILURE, "Invalid handle"),
+            }
         };
 
-        match self.fs.read_range(&handle.path, offset, len as u64).await {
+        let fs = self.scoped_fs().await;
+        match fs.read_range(&handle_path, offset, len as u64).await {
             Ok(data) => {
                 if data.is_empty() {
                     build_status(id, SSH_FX_EOF, "EOF")
@@ -298,6 +352,7 @@ impl SftpSession {
             handle.write_buffer.resize(end, 0);
         }
         handle.write_buffer[offset as usize..end].copy_from_slice(data);
+        handle.dirty = true;
 
         build_status(id, SSH_FX_OK, "OK")
     }
@@ -309,13 +364,20 @@ impl SftpSession {
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid handle"),
         };
 
-        let mut handles = self.handles.write().await;
-        if let Some(handle) = handles.remove(&handle_str) {
-            if !handle.is_dir && !handle.write_buffer.is_empty() {
-                let _ = self
-                    .fs
+        let handle = {
+            let mut handles = self.handles.write().await;
+            handles.remove(&handle_str)
+        };
+
+        if let Some(handle) = handle {
+            if !handle.is_dir && (handle.dirty || !handle.write_buffer.is_empty()) {
+                let fs = self.scoped_fs().await;
+                if let Err(e) = fs
                     .write_bytes(&handle.path, &handle.write_buffer, None)
-                    .await;
+                    .await
+                {
+                    return build_status(id, SSH_FX_FAILURE, &e.to_string());
+                }
             }
         }
 
@@ -329,7 +391,8 @@ impl SftpSession {
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid path"),
         };
 
-        match self.fs.rm(&path, false).await {
+        let fs = self.scoped_fs().await;
+        match fs.rm(&path, false).await {
             Ok(_) => build_status(id, SSH_FX_OK, "OK"),
             Err(e) => build_status(id, SSH_FX_FAILURE, &e.to_string()),
         }
@@ -342,7 +405,8 @@ impl SftpSession {
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid path"),
         };
 
-        match self.fs.mkdir(&path, false).await {
+        let fs = self.scoped_fs().await;
+        match fs.mkdir(&path, false).await {
             Ok(_) => build_status(id, SSH_FX_OK, "OK"),
             Err(e) => build_status(id, SSH_FX_FAILURE, &e.to_string()),
         }
@@ -355,7 +419,8 @@ impl SftpSession {
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid path"),
         };
 
-        match self.fs.rm(&path, true).await {
+        let fs = self.scoped_fs().await;
+        match fs.rm(&path, true).await {
             Ok(_) => build_status(id, SSH_FX_OK, "OK"),
             Err(e) => build_status(id, SSH_FX_FAILURE, &e.to_string()),
         }
@@ -373,7 +438,8 @@ impl SftpSession {
             None => return build_status(id, SSH_FX_BAD_MESSAGE, "Invalid new path"),
         };
 
-        match self.fs.mv(&oldpath, &newpath).await {
+        let fs = self.scoped_fs().await;
+        match fs.mv(&oldpath, &newpath).await {
             Ok(_) => build_status(id, SSH_FX_OK, "OK"),
             Err(e) => build_status(id, SSH_FX_FAILURE, &e.to_string()),
         }

@@ -129,6 +129,7 @@ impl InvariantChecker {
 
     /// Invariant 3: Branch Isolation Invariant
     /// - Files modified in branch `child` must not alter content in branch `base` before merge.
+    /// - No `main` branch node may have a parent belonging to a non-`main` branch.
     pub async fn check_branch_isolation(
         fs: &SurrealFs,
         base_path: &str,
@@ -143,6 +144,24 @@ impl InvariantChecker {
                 expected_base_content
             );
         }
+
+        let mut res = fs
+            .client()
+            .query("SELECT id, branch, parent.branch AS parent_branch FROM file WHERE branch = 'main' AND parent != NONE;")
+            .await?;
+        let rows: Vec<serde_json::Value> = res.take(0usize).unwrap_or_default();
+        for row in rows {
+            if let Some(pb) = row.get("parent_branch").and_then(|v| v.as_str()) {
+                if pb != "main" {
+                    bail!(
+                        "Branch Isolation Invariant violated: main branch record {:?} has parent in branch '{}'",
+                        row.get("id"),
+                        pb
+                    );
+                }
+            }
+        }
+
         Ok(())
     }
 }

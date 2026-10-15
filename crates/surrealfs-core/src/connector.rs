@@ -113,14 +113,125 @@ pub trait Connector: Send + Sync {
     }
 }
 
-/// In-memory mock/configured connector for Google Drive.
+/// Helper to fetch documents over HTTP from a provider or mock API endpoint.
+async fn fetch_remote_documents(
+    api_url: &str,
+    bearer_token: Option<&str>,
+) -> Result<Vec<SourceDocument>> {
+    let client = reqwest::Client::new();
+    let mut req = client.get(api_url);
+    if let Some(tok) = bearer_token {
+        req = req.bearer_auth(tok);
+    }
+    let resp = req.send().await.map_err(|e| {
+        crate::errors::SurrealFsError::Other(format!("Connector HTTP request failed: {}", e))
+    })?;
+    if !resp.status().is_success() {
+        return Err(crate::errors::SurrealFsError::Other(format!(
+            "Connector HTTP status {}",
+            resp.status()
+        )));
+    }
+    let val: serde_json::Value = resp.json().await.map_err(|e| {
+        crate::errors::SurrealFsError::Other(format!("Connector JSON parse failed: {}", e))
+    })?;
+    if let Ok(docs) = serde_json::from_value::<Vec<SourceDocument>>(val.clone()) {
+        return Ok(docs);
+    }
+    if let Some(arr) = val
+        .get("files")
+        .or_else(|| val.get("results"))
+        .or_else(|| val.get("items"))
+        .or_else(|| val.get("messages"))
+        .and_then(|v| v.as_array())
+    {
+        let mut out = Vec::new();
+        for item in arr {
+            if let Ok(doc) = serde_json::from_value::<SourceDocument>(item.clone()) {
+                out.push(doc);
+            } else {
+                let id = item
+                    .get("id")
+                    .or_else(|| item.get("ts"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("doc")
+                    .to_string();
+                let title = item
+                    .get("name")
+                    .or_else(|| item.get("title"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(&id)
+                    .to_string();
+                let path = item
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("{}.md", title.replace(' ', "_")));
+                let content = item
+                    .get("content")
+                    .or_else(|| item.get("text"))
+                    .or_else(|| item.get("body"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content_type = item
+                    .get("mimeType")
+                    .or_else(|| item.get("content_type"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("text/markdown")
+                    .to_string();
+                let source_url = item
+                    .get("url")
+                    .or_else(|| item.get("html_url"))
+                    .or_else(|| item.get("webViewLink"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(api_url)
+                    .to_string();
+                out.push(SourceDocument {
+                    id,
+                    path,
+                    title,
+                    content,
+                    content_type,
+                    source_url,
+                    source_version: item
+                        .get("version")
+                        .or_else(|| item.get("sha"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()),
+                    owner: None,
+                    group: None,
+                    mode: None,
+                });
+            }
+        }
+        return Ok(out);
+    }
+    Ok(Vec::new())
+}
+
+/// Connector for Google Drive (supports HTTP API endpoint or in-memory fixture documents).
 pub struct GoogleDriveConnector {
     pub docs: Vec<SourceDocument>,
+    pub api_url: Option<String>,
+    pub bearer_token: Option<String>,
 }
 
 impl GoogleDriveConnector {
     pub fn new(docs: Vec<SourceDocument>) -> Self {
-        Self { docs }
+        Self {
+            docs,
+            api_url: None,
+            bearer_token: None,
+        }
+    }
+
+    pub fn with_http(api_url: impl Into<String>, bearer_token: Option<String>) -> Self {
+        Self {
+            docs: Vec::new(),
+            api_url: Some(api_url.into()),
+            bearer_token,
+        }
     }
 }
 
@@ -132,18 +243,35 @@ impl Connector for GoogleDriveConnector {
     }
 
     async fn fetch_documents(&self) -> Result<Vec<SourceDocument>> {
+        if let Some(ref url) = self.api_url {
+            return fetch_remote_documents(url, self.bearer_token.as_deref()).await;
+        }
         Ok(self.docs.clone())
     }
 }
 
-/// In-memory mock/configured connector for Notion.
+/// Connector for Notion (supports HTTP API endpoint or in-memory fixture documents).
 pub struct NotionConnector {
     pub docs: Vec<SourceDocument>,
+    pub api_url: Option<String>,
+    pub bearer_token: Option<String>,
 }
 
 impl NotionConnector {
     pub fn new(docs: Vec<SourceDocument>) -> Self {
-        Self { docs }
+        Self {
+            docs,
+            api_url: None,
+            bearer_token: None,
+        }
+    }
+
+    pub fn with_http(api_url: impl Into<String>, bearer_token: Option<String>) -> Self {
+        Self {
+            docs: Vec::new(),
+            api_url: Some(api_url.into()),
+            bearer_token,
+        }
     }
 }
 
@@ -155,18 +283,35 @@ impl Connector for NotionConnector {
     }
 
     async fn fetch_documents(&self) -> Result<Vec<SourceDocument>> {
+        if let Some(ref url) = self.api_url {
+            return fetch_remote_documents(url, self.bearer_token.as_deref()).await;
+        }
         Ok(self.docs.clone())
     }
 }
 
-/// In-memory mock/configured connector for GitHub.
+/// Connector for GitHub (supports HTTP API endpoint or in-memory fixture documents).
 pub struct GitHubConnector {
     pub docs: Vec<SourceDocument>,
+    pub api_url: Option<String>,
+    pub bearer_token: Option<String>,
 }
 
 impl GitHubConnector {
     pub fn new(docs: Vec<SourceDocument>) -> Self {
-        Self { docs }
+        Self {
+            docs,
+            api_url: None,
+            bearer_token: None,
+        }
+    }
+
+    pub fn with_http(api_url: impl Into<String>, bearer_token: Option<String>) -> Self {
+        Self {
+            docs: Vec::new(),
+            api_url: Some(api_url.into()),
+            bearer_token,
+        }
     }
 }
 
@@ -178,18 +323,35 @@ impl Connector for GitHubConnector {
     }
 
     async fn fetch_documents(&self) -> Result<Vec<SourceDocument>> {
+        if let Some(ref url) = self.api_url {
+            return fetch_remote_documents(url, self.bearer_token.as_deref()).await;
+        }
         Ok(self.docs.clone())
     }
 }
 
-/// In-memory mock/configured connector for Slack.
+/// Connector for Slack (supports HTTP API endpoint or in-memory fixture documents).
 pub struct SlackConnector {
     pub docs: Vec<SourceDocument>,
+    pub api_url: Option<String>,
+    pub bearer_token: Option<String>,
 }
 
 impl SlackConnector {
     pub fn new(docs: Vec<SourceDocument>) -> Self {
-        Self { docs }
+        Self {
+            docs,
+            api_url: None,
+            bearer_token: None,
+        }
+    }
+
+    pub fn with_http(api_url: impl Into<String>, bearer_token: Option<String>) -> Self {
+        Self {
+            docs: Vec::new(),
+            api_url: Some(api_url.into()),
+            bearer_token,
+        }
     }
 }
 
@@ -201,6 +363,9 @@ impl Connector for SlackConnector {
     }
 
     async fn fetch_documents(&self) -> Result<Vec<SourceDocument>> {
+        if let Some(ref url) = self.api_url {
+            return fetch_remote_documents(url, self.bearer_token.as_deref()).await;
+        }
         Ok(self.docs.clone())
     }
 }

@@ -20,13 +20,19 @@ struct MultipartUpload {
     bucket: String,
     key: String,
     parts: HashMap<u32, Vec<u8>>,
+    total_bytes: usize,
     created_at: chrono::DateTime<Utc>,
 }
+
+const MAX_MULTIPART_UPLOADS: usize = 1000;
+const MAX_MULTIPART_BYTES: usize = 100 * 1024 * 1024;
+const MULTIPART_TTL_SECS: i64 = 3600;
 
 /// S3-compatible API server implementation (§22.3).
 pub struct S3Server {
     fs: SurrealFs,
     auth: Authenticator,
+    require_auth: bool,
     multipart_uploads: Arc<RwLock<HashMap<String, MultipartUpload>>>,
 }
 
@@ -35,8 +41,14 @@ impl S3Server {
         Self {
             auth: Authenticator::new(fs.clone()),
             fs,
+            require_auth: false,
             multipart_uploads: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    pub fn with_require_auth(mut self, require_auth: bool) -> Self {
+        self.require_auth = require_auth;
+        self
     }
 
     /// Splits an S3 request path into (bucket, key).
@@ -60,7 +72,7 @@ impl S3Server {
     }
 
     /// Handles GET / (ListAllMyBuckets).
-    async fn handle_list_buckets(&self) -> HttpResponse {
+    async fn handle_list_buckets(&self, fs: &SurrealFs) -> HttpResponse {
         let mut xml = String::from(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListAllMyBucketsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
@@ -71,7 +83,7 @@ impl S3Server {
   <Buckets>"#,
         );
 
-        if let Ok(entries) = self.fs.ls("/").await {
+        if let Ok(entries) = fs.ls("/").await {
             for entry in entries {
                 if entry.is_folder {
                     let created = entry
@@ -80,7 +92,8 @@ impl S3Server {
                         .unwrap_or_else(|| Utc::now().to_rfc3339());
                     xml.push_str(&format!(
                         r#"<Bucket><Name>{}</Name><CreationDate>{}</CreationDate></Bucket>"#,
-                        entry.filename, created
+                        escape_xml(&entry.filename),
+                        created
                     ));
                 }
             }
@@ -95,12 +108,13 @@ impl S3Server {
     /// Traverses all subdirectories in a bucket recursively (§22.3).
     async fn list_bucket_objects_recursive(
         &self,
+        fs: &SurrealFs,
         bucket_path: &str,
     ) -> Vec<surrealfs_core::models::FileEntry> {
         let mut all_files = Vec::new();
         let mut queue = vec![bucket_path.to_string()];
         while let Some(dir) = queue.pop() {
-            if let Ok(entries) = self.fs.ls(&dir).await {
+            if let Ok(entries) = fs.ls(&dir).await {
                 for entry in entries {
                     if entry.is_folder {
                         queue.push(entry.path.clone());
@@ -114,9 +128,14 @@ impl S3Server {
     }
 
     /// Handles GET /<bucket> (ListObjectsV2).
-    async fn handle_list_objects(&self, req: &HttpRequest, bucket: &str) -> HttpResponse {
+    async fn handle_list_objects(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        bucket: &str,
+    ) -> HttpResponse {
         let bucket_path = format!("/{}", bucket);
-        if !self.fs.exists(&bucket_path).await.unwrap_or(false) {
+        if !fs.exists(&bucket_path).await.unwrap_or(false) {
             return s3_error("NoSuchBucket", "The specified bucket does not exist.", 404);
         }
 
@@ -127,7 +146,7 @@ impl S3Server {
             .and_then(|m| m.parse().ok())
             .unwrap_or(1000);
 
-        let files = self.list_bucket_objects_recursive(&bucket_path).await;
+        let files = self.list_bucket_objects_recursive(fs, &bucket_path).await;
 
         let mut xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -136,7 +155,9 @@ impl S3Server {
   <Prefix>{}</Prefix>
   <MaxKeys>{}</MaxKeys>
   <IsTruncated>false</IsTruncated>"#,
-            bucket, prefix, max_keys
+            escape_xml(bucket),
+            escape_xml(prefix),
+            max_keys
         );
 
         let mut count = 0;
@@ -199,8 +220,13 @@ impl S3Server {
     }
 
     /// Handles GET /<bucket>/<key> (GetObject).
-    async fn handle_get_object(&self, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
-        let stat = match self.fs.stat(sfs_path).await {
+    async fn handle_get_object(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        sfs_path: &str,
+    ) -> HttpResponse {
+        let stat = match fs.stat(sfs_path).await {
             Ok(Some(s)) => s,
             Ok(None) => return s3_error("NoSuchKey", "The specified key does not exist.", 404),
             Err(e) => return s3_error("InternalError", &e.to_string(), 500),
@@ -216,8 +242,7 @@ impl S3Server {
         if let Some(range_hdr) = req.header("range") {
             if let Some((start, end)) = parse_byte_range(range_hdr, stat.size) {
                 let len = end - start + 1;
-                let data = self
-                    .fs
+                let data = fs
                     .read_range(sfs_path, start, len)
                     .await
                     .unwrap_or_default();
@@ -233,7 +258,7 @@ impl S3Server {
             }
         }
 
-        match self.fs.read_bytes(sfs_path).await {
+        match fs.read_bytes(sfs_path).await {
             Ok(bytes) => HttpResponse::ok()
                 .header("Content-Type", &stat.content_type)
                 .header("ETag", &etag)
@@ -245,8 +270,8 @@ impl S3Server {
     }
 
     /// Handles HEAD /<bucket>/<key> (HeadObject).
-    async fn handle_head_object(&self, sfs_path: &str) -> HttpResponse {
-        match self.fs.stat(sfs_path).await {
+    async fn handle_head_object(&self, fs: &SurrealFs, sfs_path: &str) -> HttpResponse {
+        match fs.stat(sfs_path).await {
             Ok(Some(stat)) if !stat.is_folder => {
                 let etag = format!("\"gen-{}\"", stat.generation);
                 HttpResponse::ok()
@@ -260,7 +285,12 @@ impl S3Server {
     }
 
     /// Handles PUT /<bucket>/<key> (PutObject).
-    async fn handle_put_object(&self, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
+    async fn handle_put_object(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        sfs_path: &str,
+    ) -> HttpResponse {
         // Check for UploadPart query params: ?uploadId=...&partNumber=...
         if let (Some(upload_id), Some(part_num_str)) =
             (req.query_param("uploadId"), req.query_param("partNumber"))
@@ -272,7 +302,7 @@ impl S3Server {
             }
         }
 
-        match self.fs.write_bytes(sfs_path, &req.body, None).await {
+        match fs.write_bytes(sfs_path, &req.body, None).await {
             Ok(entry) => {
                 let etag = format!("\"gen-{}\"", entry.generation);
                 HttpResponse::ok()
@@ -284,14 +314,15 @@ impl S3Server {
     }
 
     /// Handles DELETE /<bucket>/<key> (DeleteObject).
-    async fn handle_delete_object(&self, sfs_path: &str) -> HttpResponse {
-        let _ = self.fs.rm(sfs_path, false).await;
+    async fn handle_delete_object(&self, fs: &SurrealFs, sfs_path: &str) -> HttpResponse {
+        let _ = fs.rm(sfs_path, false).await;
         HttpResponse::no_content()
     }
 
     /// Handles POST requests (InitiateMultipartUpload or CompleteMultipartUpload).
     async fn handle_post(
         &self,
+        fs: &SurrealFs,
         req: &HttpRequest,
         bucket: &str,
         key: &str,
@@ -299,18 +330,30 @@ impl S3Server {
     ) -> HttpResponse {
         if req.query.contains_key("uploads") {
             // InitiateMultipartUpload
-            let upload_id = blake3::hash(format!("{}:{}:{}", bucket, key, Utc::now()).as_bytes())
+            let now = Utc::now();
+            let upload_id = blake3::hash(format!("{}:{}:{}", bucket, key, now).as_bytes())
                 .to_hex()
                 .to_string();
 
             let mut map = self.multipart_uploads.write().await;
+            // Evict expired multipart uploads older than MULTIPART_TTL_SECS
+            map.retain(|_, u| (now - u.created_at).num_seconds() <= MULTIPART_TTL_SECS);
+            if map.len() >= MAX_MULTIPART_UPLOADS {
+                return s3_error(
+                    "SlowDown",
+                    "Too many concurrent multipart uploads in progress",
+                    503,
+                );
+            }
+
             map.insert(
                 upload_id.clone(),
                 MultipartUpload {
                     bucket: bucket.to_string(),
                     key: key.to_string(),
                     parts: HashMap::new(),
-                    created_at: Utc::now(),
+                    total_bytes: 0,
+                    created_at: now,
                 },
             );
 
@@ -321,7 +364,7 @@ impl S3Server {
   <Key>{}</Key>
   <UploadId>{}</UploadId>
 </InitiateMultipartUploadResult>"#,
-                bucket,
+                escape_xml(bucket),
                 escape_xml(key),
                 upload_id
             );
@@ -356,7 +399,7 @@ impl S3Server {
                 }
             }
 
-            match self.fs.write_bytes(sfs_path, &full_body, None).await {
+            match fs.write_bytes(sfs_path, &full_body, None).await {
                 Ok(entry) => {
                     let etag = format!("\"gen-{}\"", entry.generation);
                     let xml = format!(
@@ -367,9 +410,9 @@ impl S3Server {
   <Key>{}</Key>
   <ETag>{}</ETag>
 </CompleteMultipartUploadResult>"#,
-                        bucket,
+                        escape_xml(bucket),
                         escape_xml(key),
-                        bucket,
+                        escape_xml(bucket),
                         escape_xml(key),
                         etag
                     );
@@ -393,7 +436,17 @@ impl S3Server {
     ) -> HttpResponse {
         let mut map = self.multipart_uploads.write().await;
         if let Some(upload) = map.get_mut(upload_id) {
+            let prev_len = upload.parts.get(&part_number).map(|p| p.len()).unwrap_or(0);
+            let new_total = upload.total_bytes.saturating_sub(prev_len) + data.len();
+            if new_total > MAX_MULTIPART_BYTES {
+                return s3_error(
+                    "EntityTooLarge",
+                    "Multipart upload exceeds maximum total size",
+                    400,
+                );
+            }
             let part_etag = format!("\"part-{}\"", blake3::hash(&data).to_hex());
+            upload.total_bytes = new_total;
             upload.parts.insert(part_number, data);
             HttpResponse::ok().header("ETag", &part_etag)
         } else {
@@ -406,26 +459,31 @@ impl S3Server {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl HttpHandler for S3Server {
     async fn handle(&self, req: HttpRequest) -> HttpResponse {
-        // Authenticate S3 request if authorization header is provided (§22)
-        if let Some(auth_hdr) = req.header("authorization") {
-            if self.auth.authenticate_s3(Some(auth_hdr)).await.is_err() {
-                return s3_error("AccessDenied", "Access Denied", 403);
+        // Authenticate S3 request and scope caller identity (§22)
+        let fs = if let Some(auth_hdr) = req.header("authorization") {
+            match self.auth.authenticate_s3(Some(auth_hdr)).await {
+                Ok(user) => self.fs.with_caller(&user.user_id),
+                Err(_) => return s3_error("AccessDenied", "Access Denied", 403),
             }
-        }
+        } else if self.require_auth {
+            return s3_error("AccessDenied", "Access Denied", 403);
+        } else {
+            self.fs.clone()
+        };
 
         let (bucket, key) = self.parse_bucket_and_key(&req.path);
 
         match (bucket, key) {
             (None, None) => match req.method.as_str() {
-                "GET" => self.handle_list_buckets().await,
+                "GET" => self.handle_list_buckets(&fs).await,
                 _ => HttpResponse::method_not_allowed(),
             },
             (Some(b), None) => match req.method.as_str() {
-                "GET" => self.handle_list_objects(&req, &b).await,
+                "GET" => self.handle_list_objects(&fs, &req, &b).await,
                 "PUT" => {
                     // CreateBucket
                     let sfs_path = format!("/{}", b);
-                    match self.fs.mkdir(&sfs_path, false).await {
+                    match fs.mkdir(&sfs_path, false).await {
                         Ok(_) => HttpResponse::ok().header("Location", &format!("/{}", b)),
                         Err(_) => HttpResponse::ok(),
                     }
@@ -433,7 +491,7 @@ impl HttpHandler for S3Server {
                 "DELETE" => {
                     // DeleteBucket
                     let sfs_path = format!("/{}", b);
-                    let _ = self.fs.rm(&sfs_path, false).await;
+                    let _ = fs.rm(&sfs_path, false).await;
                     HttpResponse::no_content()
                 }
                 _ => HttpResponse::method_not_allowed(),
@@ -441,9 +499,9 @@ impl HttpHandler for S3Server {
             (Some(b), Some(k)) => {
                 let sfs_path = self.to_sfs_path(&b, Some(&k));
                 match req.method.as_str() {
-                    "GET" => self.handle_get_object(&req, &sfs_path).await,
-                    "HEAD" => self.handle_head_object(&sfs_path).await,
-                    "PUT" => self.handle_put_object(&req, &sfs_path).await,
+                    "GET" => self.handle_get_object(&fs, &req, &sfs_path).await,
+                    "HEAD" => self.handle_head_object(&fs, &sfs_path).await,
+                    "PUT" => self.handle_put_object(&fs, &req, &sfs_path).await,
                     "DELETE" => {
                         // Check if AbortMultipartUpload: ?uploadId=...
                         if let Some(upload_id) = req.query_param("uploadId") {
@@ -451,10 +509,10 @@ impl HttpHandler for S3Server {
                             map.remove(upload_id);
                             HttpResponse::no_content()
                         } else {
-                            self.handle_delete_object(&sfs_path).await
+                            self.handle_delete_object(&fs, &sfs_path).await
                         }
                     }
-                    "POST" => self.handle_post(&req, &b, &k, &sfs_path).await,
+                    "POST" => self.handle_post(&fs, &req, &b, &k, &sfs_path).await,
                     _ => HttpResponse::method_not_allowed(),
                 }
             }
@@ -484,12 +542,18 @@ fn s3_error(code: &str, message: &str, status: u16) -> HttpResponse {
 }
 
 fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
+    if file_size == 0 {
+        return None;
+    }
     let clean = header.trim();
     let spec = clean.strip_prefix("bytes=")?;
     let (start_str, end_str) = spec.split_once('-')?;
 
     if start_str.is_empty() {
         let len: u64 = end_str.parse().ok()?;
+        if len == 0 {
+            return None;
+        }
         let start = file_size.saturating_sub(len);
         let end = file_size.saturating_sub(1);
         Some((start, end))
@@ -501,7 +565,7 @@ fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
             let parsed_end: u64 = end_str.parse().ok()?;
             parsed_end.min(file_size.saturating_sub(1))
         };
-        if start <= end {
+        if start <= end && start < file_size {
             Some((start, end))
         } else {
             None

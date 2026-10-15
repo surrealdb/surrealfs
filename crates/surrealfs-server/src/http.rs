@@ -240,16 +240,24 @@ pub trait HttpHandler: Send + Sync {
     async fn handle(&self, req: HttpRequest) -> HttpResponse;
 }
 
+/// Maximum allowed HTTP request body size (100 MiB).
+pub const MAX_HTTP_BODY_BYTES: usize = 100 * 1024 * 1024;
+
 /// Parses an incoming raw HTTP request from a TCP stream.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
     let mut buf = Vec::new();
     let mut temp = [0u8; 4096];
     let mut header_end = None;
+    let read_timeout = std::time::Duration::from_secs(30);
 
     // Read headers until \r\n\r\n or \n\n
     while header_end.is_none() {
-        let n = stream.read(&mut temp).await?;
+        let n = tokio::time::timeout(read_timeout, stream.read(&mut temp))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP header read timed out")
+            })??;
         if n == 0 {
             if buf.is_empty() {
                 return Ok(None);
@@ -324,11 +332,25 @@ pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
+    if content_length > MAX_HTTP_BODY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "HTTP request body exceeds maximum size limit",
+        ));
+    }
+
     let mut body = buf[body_start..].to_vec();
+    if body.len() > content_length {
+        body.truncate(content_length);
+    }
     while body.len() < content_length {
         let needed = content_length - body.len();
         let to_read = needed.min(temp.len());
-        let n = stream.read(&mut temp[..to_read]).await?;
+        let n = tokio::time::timeout(read_timeout, stream.read(&mut temp[..to_read]))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "HTTP body read timed out")
+            })??;
         if n == 0 {
             break;
         }
@@ -420,9 +442,14 @@ pub async fn run_http_server<H: HttpHandler + 'static>(
                 Ok(None) => {}
                 Err(e) => {
                     debug!("Failed to parse HTTP request from {}: {}", peer_addr, e);
-                    let _ =
-                        send_response(&mut stream, HttpResponse::bad_request("Malformed request"))
-                            .await;
+                    let resp = if e.to_string().contains("exceeds maximum size limit") {
+                        HttpResponse::new(413, "Payload Too Large")
+                            .header("Content-Type", "text/plain; charset=utf-8")
+                            .body_str("Payload Too Large")
+                    } else {
+                        HttpResponse::bad_request("Malformed request")
+                    };
+                    let _ = send_response(&mut stream, resp).await;
                 }
             }
         });

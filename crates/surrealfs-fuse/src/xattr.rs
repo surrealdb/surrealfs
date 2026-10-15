@@ -18,7 +18,7 @@ impl XattrEngine {
     /// Notice: Control action attributes (user.surrealfs.action, user.surrealfs.lock)
     /// are strictly write-only and MUST NEVER be returned by listxattr.
     /// This prevents `cp -a` or `rsync -X` from copying action triggers.
-    pub fn list_xattrs(_entry: &FileEntry, active_lock: Option<&FileLock>) -> Vec<String> {
+    pub fn list_xattrs(entry: &FileEntry, active_lock: Option<&FileLock>) -> Vec<String> {
         let mut list = vec![
             XATTR_OWNER.to_string(),
             XATTR_GENERATION.to_string(),
@@ -28,6 +28,19 @@ impl XattrEngine {
 
         if active_lock.is_some() {
             list.push(XATTR_LOCKED_BY.to_string());
+        }
+
+        if let Some(xattrs) = entry
+            .meta
+            .as_ref()
+            .and_then(|m| m.get("xattrs"))
+            .and_then(|x| x.as_object())
+        {
+            for k in xattrs.keys() {
+                if k.starts_with(USER_AGENT_PREFIX) && !list.contains(k) {
+                    list.push(k.clone());
+                }
+            }
         }
 
         list
@@ -57,7 +70,17 @@ impl XattrEngine {
             XATTR_ACTION | XATTR_LOCK => Ok(None),
             _ => {
                 if name.starts_with(USER_AGENT_PREFIX) {
-                    Ok(custom_attrs.get(name).map(|v| v.as_bytes().to_vec()))
+                    if let Some(v) = custom_attrs.get(name) {
+                        return Ok(Some(v.as_bytes().to_vec()));
+                    }
+                    let persisted = entry
+                        .meta
+                        .as_ref()
+                        .and_then(|m| m.get("xattrs"))
+                        .and_then(|x| x.get(name))
+                        .and_then(|v| v.as_str())
+                        .map(|v| v.as_bytes().to_vec());
+                    Ok(persisted)
                 } else {
                     Ok(None)
                 }
@@ -100,9 +123,10 @@ impl XattrEngine {
                 }
             }
 
-            // Virtual Action Trigger: reindex embedding
+            // Virtual Action Trigger: reindex embedding & symbols
             XATTR_ACTION => {
                 if val_str == "reindex" {
+                    let _ = fs.index_file_symbols(path).await;
                     Ok(())
                 } else {
                     Err(SurrealFsError::InvalidPath(format!(
@@ -115,6 +139,15 @@ impl XattrEngine {
             _ => {
                 if name.starts_with(USER_AGENT_PREFIX) {
                     custom_attrs.insert(name.to_string(), val_str.to_string());
+                    let kv = serde_json::json!({ name: val_str });
+                    let _ = fs
+                        .client()
+                        .query(
+                            "UPDATE file SET meta = object::extend(meta ?? {}, { xattrs: object::extend((meta ?? {}).xattrs ?? {}, $kv) }) WHERE id = fn::sfs_resolve($path);",
+                        )
+                        .bind(("path", path.to_string()))
+                        .bind(("kv", kv))
+                        .await;
                     Ok(())
                 } else {
                     Err(SurrealFsError::InvalidPath(format!(

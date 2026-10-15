@@ -139,6 +139,7 @@ async fn test_advisory_locks() {
     fs.write_text("/locked.md", "critical doc", None)
         .await
         .unwrap();
+    fs.chmod("/locked.md", 0o666).await.unwrap();
 
     let lock = fs
         .acquire_lock("/locked.md", 60, "editing", "agent-alpha")

@@ -1,6 +1,6 @@
 //! Webhook outbound dispatcher with HMAC signatures and exponential retry (§23.2).
 
-use crate::errors::Result;
+use crate::errors::{Result, SurrealFsError};
 use crate::fs::SurrealFs;
 use crate::models::{WebhookDeliveryRecord, WebhookRecord};
 use chrono::Utc;
@@ -8,11 +8,76 @@ use hmac::{Hmac, Mac};
 use reqwest::Client;
 use serde_json::Value;
 use sha2::Sha256;
+use std::net::IpAddr;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 use tracing::{debug, warn};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Validate a webhook target URL against SSRF vectors (non-HTTP schemes, cloud metadata,
+/// link-local, RFC1918 private IPs, and loopback unless `SURREALFS_ALLOW_LOCAL_WEBHOOKS=1`).
+pub fn validate_webhook_url(url_str: &str) -> Result<()> {
+    let parsed = reqwest::Url::parse(url_str)
+        .map_err(|e| SurrealFsError::InvalidArguments(format!("Invalid webhook URL: {}", e)))?;
+
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return Err(SurrealFsError::InvalidArguments(format!(
+            "Unsupported webhook scheme '{}': only http and https are allowed",
+            scheme
+        )));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| SurrealFsError::InvalidArguments("Webhook URL missing host".into()))?
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_lowercase();
+
+    let allow_local = std::env::var("SURREALFS_ALLOW_LOCAL_WEBHOOKS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if host == "metadata.google.internal" || host == "169.254.169.254" {
+        return Err(SurrealFsError::PermissionDenied(
+            "Webhook URL targets forbidden cloud metadata service".into(),
+        ));
+    }
+
+    if !allow_local && (host == "localhost" || host.ends_with(".localhost") || host.ends_with(".internal")) {
+        return Err(SurrealFsError::PermissionDenied(format!(
+            "Webhook URL host '{}' is restricted (loopback/internal)",
+            host
+        )));
+    }
+
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let is_blocked = match ip {
+            IpAddr::V4(v4) => {
+                v4.is_link_local()
+                    || v4.is_private()
+                    || v4.is_unspecified()
+                    || v4.is_broadcast()
+                    || (!allow_local && v4.is_loopback())
+            }
+            IpAddr::V6(v6) => {
+                v6.is_unspecified()
+                    || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                    || (v6.segments()[0] & 0xfe00) == 0xfc00 // unique local fc00::/7
+                    || (!allow_local && v6.is_loopback())
+            }
+        };
+        if is_blocked {
+            return Err(SurrealFsError::PermissionDenied(format!(
+                "Webhook URL IP '{}' is restricted (private/loopback/link-local)",
+                ip
+            )));
+        }
+    }
+
+    Ok(())
+}
 
 /// Compute HMAC-SHA256 signature formatted as `sha256=<hex>`.
 pub fn compute_signature(secret: &str, body: &[u8]) -> String {
@@ -81,6 +146,7 @@ impl WebhookDispatcher {
         path: &str,
         payload: &Value,
     ) -> Result<WebhookDeliveryRecord> {
+        validate_webhook_url(&webhook.url)?;
         let body = serde_json::to_vec(payload)?;
         let sig = compute_signature(&webhook.secret, &body);
         let start_ts = Utc::now();
@@ -166,6 +232,7 @@ impl WebhookDispatcher {
     ) -> Result<Vec<WebhookDeliveryRecord>> {
         let webhooks = fs.list_webhooks().await?;
         let mut deliveries = Vec::new();
+        let norm_path = crate::paths::normalize_path(path);
 
         for hook in webhooks {
             if !hook.active {
@@ -176,6 +243,20 @@ impl WebhookDispatcher {
             }
             if !Self::matches_pattern(&hook.path_pattern, path) {
                 continue;
+            }
+            // Enforce tenant readability: if hook.owner is not root and the target file exists,
+            // verify hook.owner has read permission on the target path before dispatching.
+            if hook.owner != "root" {
+                let mut res = fs
+                    .db
+                    .query("LET $id = fn::sfs_resolve($path); RETURN IF $id IS NONE THEN true ELSE fn::sfs_can_read_grp($id.gate, $id.owner, $id.mode, $owner, $id.group) END;")
+                    .bind(("path", norm_path.clone()))
+                    .bind(("owner", hook.owner.clone()))
+                    .await?;
+                let readable: Option<bool> = res.take(1usize).unwrap_or(Some(false));
+                if !readable.unwrap_or(false) {
+                    continue;
+                }
             }
             let delivery = self.dispatch_one(fs, &hook, event, path, payload).await?;
             deliveries.push(delivery);
@@ -196,6 +277,15 @@ mod tests {
         let sig = compute_signature(secret, body);
         assert!(sig.starts_with("sha256="));
         assert_eq!(sig.len(), 7 + 64);
+    }
+
+    #[test]
+    fn test_validate_webhook_url_ssrf_protection() {
+        assert!(validate_webhook_url("https://example.com/hook").is_ok());
+        assert!(validate_webhook_url("file:///etc/passwd").is_err());
+        assert!(validate_webhook_url("http://169.254.169.254/latest/meta-data/").is_err());
+        assert!(validate_webhook_url("http://10.0.0.1:8080/hook").is_err());
+        assert!(validate_webhook_url("http://192.168.1.1/hook").is_err());
     }
 
     #[test]

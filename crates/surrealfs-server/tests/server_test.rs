@@ -557,3 +557,203 @@ async fn test_unified_gateway_api_mcp_and_rpc() {
     );
 }
 
+#[tokio::test]
+async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
+    let fs = setup_test_fs().await;
+    let auth = Authenticator::new(fs.clone());
+
+    // 1. Secretless credential must NOT pass Basic Auth even with empty password
+    fs.create_credential("ssh", "pubkey-only", None, "user:ssh_only", None)
+        .await
+        .unwrap();
+    let empty_pass_token = base64::Engine::encode(
+        &base64::engine::general_purpose::STANDARD,
+        b"pubkey-only:",
+    );
+    assert!(auth
+        .authenticate_basic(&format!("Basic {}", empty_pass_token))
+        .await
+        .is_err());
+
+    // 2. S3 SigV4 HMAC verification
+    fs.create_credential(
+        "s3",
+        "AKIAIOSFODNN7EXAMPLE",
+        Some("wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+        "user:s3_alice",
+        None,
+    )
+    .await
+    .unwrap();
+
+    let sig = Authenticator::compute_s3_signature(
+        "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "20261015",
+        "us-east-1",
+        "s3",
+    );
+    let valid_s3_hdr = format!(
+        "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261015/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature={}",
+        sig
+    );
+    let s3_user = auth
+        .authenticate_s3(Some(&valid_s3_hdr))
+        .await
+        .expect("Valid SigV4 signature should succeed");
+    assert_eq!(s3_user.user_id, "user:s3_alice");
+
+    let forged_s3_hdr = "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20261015/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=0000000000000000000000000000000000000000000000000000000000000000";
+    assert!(auth.authenticate_s3(Some(forged_s3_hdr)).await.is_err());
+
+    // 3. WebDAV lock holder isolation & 0-byte Range guard
+    let webdav = WebDavServer::new(fs.clone(), "/").with_require_auth(true);
+
+    // Unauthenticated PUT rejected when require_auth = true
+    let unauth_put = HttpRequest {
+        method: "PUT".into(),
+        path: "/empty.txt".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: HashMap::new(),
+        body: Vec::new(),
+    };
+    assert_eq!(webdav.handle(unauth_put).await.status, 401);
+
+    // Provision alice and bob WebDAV credentials
+    fs.create_credential("webdav", "alice", Some("passA"), "user:alice", None)
+        .await
+        .unwrap();
+    fs.create_credential("webdav", "bob", Some("passB"), "user:bob", None)
+        .await
+        .unwrap();
+    let alice_auth = format!(
+        "Basic {}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"alice:passA")
+    );
+    let bob_auth = format!(
+        "Basic {}",
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"bob:passB")
+    );
+
+    let mut headers = HashMap::new();
+    headers.insert("authorization".into(), alice_auth.clone());
+    let put_empty = HttpRequest {
+        method: "PUT".into(),
+        path: "/empty.txt".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: headers.clone(),
+        body: Vec::new(),
+    };
+    assert_eq!(webdav.handle(put_empty).await.status, 201);
+
+    // Range request on 0-byte file does not underflow or return invalid 206
+    let mut range_headers = headers.clone();
+    range_headers.insert("range".into(), "bytes=0-10".into());
+    let get_empty = HttpRequest {
+        method: "GET".into(),
+        path: "/empty.txt".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: range_headers,
+        body: Vec::new(),
+    };
+    let get_res = webdav.handle(get_empty).await;
+    assert_eq!(get_res.status, 200);
+    assert!(get_res.body.is_empty());
+
+    // Make /empty.txt writable so Bob tests lock contention (423) rather than file mode (403)
+    fs.with_caller("user:alice")
+        .chmod("/empty.txt", 0o666)
+        .await
+        .unwrap();
+
+    // Alice locks /empty.txt; Bob cannot acquire or release lock while Alice holds it
+    let lock_alice = HttpRequest {
+        method: "LOCK".into(),
+        path: "/empty.txt".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: headers.clone(),
+        body: Vec::new(),
+    };
+    assert_eq!(webdav.handle(lock_alice).await.status, 200);
+
+    let mut bob_headers = HashMap::new();
+    bob_headers.insert("authorization".into(), bob_auth);
+    let lock_bob = HttpRequest {
+        method: "LOCK".into(),
+        path: "/empty.txt".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: bob_headers.clone(),
+        body: Vec::new(),
+    };
+    assert_eq!(webdav.handle(lock_bob).await.status, 423);
+
+    let unlock_bob = HttpRequest {
+        method: "UNLOCK".into(),
+        path: "/empty.txt".into(),
+        raw_query: "".into(),
+        query: HashMap::new(),
+        headers: bob_headers,
+        body: Vec::new(),
+    };
+    assert_eq!(webdav.handle(unlock_bob).await.status, 423);
+}
+
+#[tokio::test]
+async fn test_nfs_rpc_call_and_sftp_pflags() {
+    let fs = setup_test_fs().await;
+    fs.write_text("/hello.txt", "Hello World", None)
+        .await
+        .unwrap();
+
+    // 1. NFS ONC RPC call framing (MOUNTPROC3_MNT + NFSPROC3_LOOKUP)
+    let nfs = NfsServer::new(fs.clone());
+    let mut mnt_call = Vec::new();
+    mnt_call.extend_from_slice(&100u32.to_be_bytes()); // xid
+    mnt_call.extend_from_slice(&0u32.to_be_bytes()); // CALL
+    mnt_call.extend_from_slice(&2u32.to_be_bytes()); // rpcvers = 2
+    mnt_call.extend_from_slice(&100005u32.to_be_bytes()); // MOUNT prog
+    mnt_call.extend_from_slice(&3u32.to_be_bytes()); // vers = 3
+    mnt_call.extend_from_slice(&1u32.to_be_bytes()); // proc = MNT (1)
+    mnt_call.extend_from_slice(&[0u8; 16]); // AUTH_NULL cred + verf
+    let mnt_reply = nfs.handle_rpc_call(&mnt_call).await.unwrap();
+    assert_eq!(u32::from_be_bytes(mnt_reply[0..4].try_into().unwrap()), 100);
+    assert_eq!(u32::from_be_bytes(mnt_reply[20..24].try_into().unwrap()), 0); // MNT3_OK
+
+    // 2. SFTP partial write without SSH_FXF_TRUNC preserves existing prefix
+    let sftp = SftpSession::new(fs.clone());
+    let mut open_pkt = vec![SSH_FXP_OPEN];
+    open_pkt.extend_from_slice(&10u32.to_be_bytes());
+    let p = b"/hello.txt";
+    open_pkt.extend_from_slice(&(p.len() as u32).to_be_bytes());
+    open_pkt.extend_from_slice(p);
+    open_pkt.extend_from_slice(&SSH_FXF_WRITE.to_be_bytes()); // write without trunc
+    let resp = sftp.process_packet(&open_pkt).await;
+    assert_eq!(resp[4], SSH_FXP_HANDLE);
+    let h_len = u32::from_be_bytes(resp[9..13].try_into().unwrap()) as usize;
+    let handle_str = String::from_utf8(resp[13..13 + h_len].to_vec()).unwrap();
+
+    // Overwrite at offset 6 ("World" -> "SFTP!")
+    let mut write_pkt = vec![SSH_FXP_WRITE];
+    write_pkt.extend_from_slice(&11u32.to_be_bytes());
+    write_pkt.extend_from_slice(&(handle_str.len() as u32).to_be_bytes());
+    write_pkt.extend_from_slice(handle_str.as_bytes());
+    write_pkt.extend_from_slice(&6u64.to_be_bytes());
+    let chunk = b"SFTP!";
+    write_pkt.extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+    write_pkt.extend_from_slice(chunk);
+    sftp.process_packet(&write_pkt).await;
+
+    let mut close_pkt = vec![SSH_FXP_CLOSE];
+    close_pkt.extend_from_slice(&12u32.to_be_bytes());
+    close_pkt.extend_from_slice(&(handle_str.len() as u32).to_be_bytes());
+    close_pkt.extend_from_slice(handle_str.as_bytes());
+    sftp.process_packet(&close_pkt).await;
+
+    let updated = fs.read_text("/hello.txt").await.unwrap();
+    assert_eq!(updated, "Hello SFTP!");
+}
+

@@ -156,12 +156,25 @@ pub async fn restore_backup(
             .strip_prefix(&manifest.root_path)
             .unwrap_or(&file.path)
             .trim_start_matches('/');
+        if rel_path.split('/').any(|seg| seg == "..") {
+            return Err(SurrealFsError::PermissionDenied(format!(
+                "Backup manifest entry contains forbidden '..' traversal: {}",
+                file.path
+            )));
+        }
 
-        let dest_path = if base == "/" {
+        let raw_dest = if base == "/" {
             format!("/{}", rel_path)
         } else {
             format!("{}/{}", base, rel_path)
         };
+        let dest_path = normalize_path(&raw_dest);
+        if base != "/" && dest_path != base && !dest_path.starts_with(&format!("{}/", base)) {
+            return Err(SurrealFsError::PermissionDenied(format!(
+                "Backup manifest entry escapes target prefix {}: {}",
+                base, file.path
+            )));
+        }
 
         if file.is_folder {
             fs.mkdir(&dest_path, true).await?;

@@ -142,6 +142,24 @@ impl NfsServer {
     pub async fn verify_handle(&self, handle: &NfsFileHandle) -> Result<FileEntry, u32> {
         let stat = match self.fs.stat(&handle.path).await {
             Ok(Some(s)) => s,
+            Ok(None) if handle.path == "/" => FileEntry {
+                path: "/".to_string(),
+                filename: "".to_string(),
+                is_folder: true,
+                size: 0,
+                content_type: "inode/directory".to_string(),
+                content: None,
+                mode: 0o755,
+                owner: Some("root".to_string()),
+                group: None,
+                branch: "main".to_string(),
+                generation: 1,
+                parent_key: None,
+                crdt: false,
+                created_at: Some(Utc::now()),
+                updated_at: Some(Utc::now()),
+                meta: None,
+            },
             Ok(None) => return Err(NFS3ERR_NOENT),
             Err(_) => return Err(NFS3ERR_IO),
         };
@@ -349,15 +367,203 @@ impl NfsServer {
             )
         }
     }
+
+    /// Handles a single ONC RPC call message (without record-marking prefix) and returns the XDR reply.
+    pub async fn handle_rpc_call(&self, call: &[u8]) -> Option<Vec<u8>> {
+        if call.len() < 24 {
+            return None;
+        }
+        let xid = u32::from_be_bytes(call[0..4].try_into().ok()?);
+        let msg_type = u32::from_be_bytes(call[4..8].try_into().ok()?);
+        if msg_type != 0 {
+            return None;
+        }
+        let prog = u32::from_be_bytes(call[12..16].try_into().ok()?);
+        let proc_num = u32::from_be_bytes(call[20..24].try_into().ok()?);
+
+        // Skip auth cred and verf opaque fields
+        let mut pos = 24usize;
+        for _ in 0..2 {
+            if pos + 8 > call.len() {
+                return None;
+            }
+            let opaque_len = u32::from_be_bytes(call[pos + 4..pos + 8].try_into().ok()?) as usize;
+            let padded = (opaque_len + 3) & !3;
+            pos += 8 + padded;
+        }
+        if pos > call.len() {
+            return None;
+        }
+        let args = &call[pos..];
+
+        let mut reply = Vec::with_capacity(128);
+        reply.extend_from_slice(&xid.to_be_bytes());
+        reply.extend_from_slice(&1u32.to_be_bytes()); // REPLY
+        reply.extend_from_slice(&0u32.to_be_bytes()); // MSG_ACCEPTED
+        reply.extend_from_slice(&0u32.to_be_bytes()); // verf flavor AUTH_NULL
+        reply.extend_from_slice(&0u32.to_be_bytes()); // verf len 0
+
+        match (prog, proc_num) {
+            (_, 0) => {
+                // NULL procedure (NFS or MOUNT)
+                reply.extend_from_slice(&0u32.to_be_bytes()); // SUCCESS
+            }
+            (100005, 1) => {
+                // MOUNTPROC3_MNT: return root file handle
+                reply.extend_from_slice(&0u32.to_be_bytes()); // SUCCESS
+                reply.extend_from_slice(&0u32.to_be_bytes()); // MNT3_OK
+                let root_fh = NfsFileHandle::new("/", 0).to_bytes();
+                encode_xdr_opaque(&mut reply, &root_fh);
+                reply.extend_from_slice(&1u32.to_be_bytes()); // 1 auth flavor
+                reply.extend_from_slice(&1u32.to_be_bytes()); // AUTH_SYS
+            }
+            (100003, 1) => {
+                // NFSPROC3_GETATTR
+                reply.extend_from_slice(&0u32.to_be_bytes()); // SUCCESS
+                let Some((fh_bytes, _)) = decode_xdr_opaque(args) else {
+                    reply.extend_from_slice(&NFS3ERR_BADHANDLE.to_be_bytes());
+                    return Some(reply);
+                };
+                let Some(fh) = NfsFileHandle::from_bytes(fh_bytes) else {
+                    reply.extend_from_slice(&NFS3ERR_BADHANDLE.to_be_bytes());
+                    return Some(reply);
+                };
+                match self.getattr(&fh).await {
+                    Ok(fattr) => {
+                        reply.extend_from_slice(&NFS3_OK.to_be_bytes());
+                        encode_fattr3(&mut reply, &fattr);
+                    }
+                    Err(status) => {
+                        reply.extend_from_slice(&status.to_be_bytes());
+                    }
+                }
+            }
+            (100003, 3) => {
+                // NFSPROC3_LOOKUP
+                reply.extend_from_slice(&0u32.to_be_bytes()); // SUCCESS
+                let Some((fh_bytes, rest)) = decode_xdr_opaque(args) else {
+                    reply.extend_from_slice(&NFS3ERR_BADHANDLE.to_be_bytes());
+                    reply.extend_from_slice(&0u32.to_be_bytes()); // post_op_attr = FALSE
+                    return Some(reply);
+                };
+                let Some((name_bytes, _)) = decode_xdr_opaque(rest) else {
+                    reply.extend_from_slice(&NFS3ERR_INVAL.to_be_bytes());
+                    reply.extend_from_slice(&0u32.to_be_bytes());
+                    return Some(reply);
+                };
+                let (Some(dir_fh), Ok(name)) =
+                    (NfsFileHandle::from_bytes(fh_bytes), std::str::from_utf8(name_bytes))
+                else {
+                    reply.extend_from_slice(&NFS3ERR_BADHANDLE.to_be_bytes());
+                    reply.extend_from_slice(&0u32.to_be_bytes());
+                    return Some(reply);
+                };
+                match self.lookup(&dir_fh, name).await {
+                    Ok((child_fh, fattr)) => {
+                        reply.extend_from_slice(&NFS3_OK.to_be_bytes());
+                        encode_xdr_opaque(&mut reply, &child_fh.to_bytes());
+                        reply.extend_from_slice(&1u32.to_be_bytes()); // obj_attributes present
+                        encode_fattr3(&mut reply, &fattr);
+                        reply.extend_from_slice(&0u32.to_be_bytes()); // dir_attributes omitted
+                    }
+                    Err(status) => {
+                        reply.extend_from_slice(&status.to_be_bytes());
+                        reply.extend_from_slice(&0u32.to_be_bytes());
+                    }
+                }
+            }
+            _ => {
+                // PROC_UNAVAIL = 3
+                reply.extend_from_slice(&3u32.to_be_bytes());
+            }
+        }
+        Some(reply)
+    }
+}
+
+fn decode_xdr_opaque(buf: &[u8]) -> Option<(&[u8], &[u8])> {
+    if buf.len() < 4 {
+        return None;
+    }
+    let len = u32::from_be_bytes(buf[0..4].try_into().ok()?) as usize;
+    let padded = (len + 3) & !3;
+    if buf.len() < 4 + padded {
+        return None;
+    }
+    Some((&buf[4..4 + len], &buf[4 + padded..]))
+}
+
+fn encode_xdr_opaque(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    out.extend_from_slice(bytes);
+    let pad = (4 - (bytes.len() % 4)) % 4;
+    for _ in 0..pad {
+        out.push(0);
+    }
+}
+
+fn encode_fattr3(out: &mut Vec<u8>, f: &NfsFattr3) {
+    out.extend_from_slice(&f.file_type.to_be_bytes());
+    out.extend_from_slice(&f.mode.to_be_bytes());
+    out.extend_from_slice(&f.nlink.to_be_bytes());
+    out.extend_from_slice(&f.uid.to_be_bytes());
+    out.extend_from_slice(&f.gid.to_be_bytes());
+    out.extend_from_slice(&f.size.to_be_bytes());
+    out.extend_from_slice(&f.used.to_be_bytes());
+    out.extend_from_slice(&f.rdev.0.to_be_bytes());
+    out.extend_from_slice(&f.rdev.1.to_be_bytes());
+    out.extend_from_slice(&f.fsid.to_be_bytes());
+    out.extend_from_slice(&f.fileid.to_be_bytes());
+    out.extend_from_slice(&f.atime.0.to_be_bytes());
+    out.extend_from_slice(&f.atime.1.to_be_bytes());
+    out.extend_from_slice(&f.mtime.0.to_be_bytes());
+    out.extend_from_slice(&f.mtime.1.to_be_bytes());
+    out.extend_from_slice(&f.ctime.0.to_be_bytes());
+    out.extend_from_slice(&f.ctime.1.to_be_bytes());
 }
 
 /// Runs the NFSv3 over TCP loopback listener on `127.0.0.1:{port}` (§22.2).
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn serve_nfs(fs: SurrealFs, port: u16) -> std::io::Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await?;
-    let _server = std::sync::Arc::new(NfsServer::new(fs));
+    let server = std::sync::Arc::new(NfsServer::new(fs));
     loop {
-        let (_stream, _) = listener.accept().await?;
+        let (mut stream, _) = listener.accept().await?;
+        let srv = server.clone();
+        tokio::spawn(async move {
+            let mut msg_buf = Vec::new();
+            loop {
+                let mut hdr = [0u8; 4];
+                if stream.read_exact(&mut hdr).await.is_err() {
+                    break;
+                }
+                let raw_hdr = u32::from_be_bytes(hdr);
+                let last_frag = (raw_hdr & 0x8000_0000) != 0;
+                let frag_len = (raw_hdr & 0x7fff_ffff) as usize;
+                if frag_len > 1024 * 1024 || msg_buf.len() + frag_len > 1024 * 1024 {
+                    break;
+                }
+                let start = msg_buf.len();
+                msg_buf.resize(start + frag_len, 0);
+                if stream.read_exact(&mut msg_buf[start..]).await.is_err() {
+                    break;
+                }
+                if last_frag {
+                    if let Some(reply) = srv.handle_rpc_call(&msg_buf).await {
+                        let out_hdr = 0x8000_0000u32 | (reply.len() as u32);
+                        if stream.write_all(&out_hdr.to_be_bytes()).await.is_err() {
+                            break;
+                        }
+                        if stream.write_all(&reply).await.is_err() {
+                            break;
+                        }
+                    }
+                    msg_buf.clear();
+                }
+            }
+        });
     }
 }
 

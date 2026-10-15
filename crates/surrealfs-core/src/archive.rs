@@ -66,12 +66,75 @@ pub async fn collect_tree(fs: &SurrealFs, root_path: &str) -> Result<Vec<FileEnt
     Ok(entries)
 }
 
+/// Validate an archive entry relative path against Zip-Slip / Tar-Slip traversal (`..` segments)
+/// and resolve it inside `base`.
+fn resolve_archive_entry_path(base: &str, raw_name: &str) -> Result<Option<String>> {
+    let normalized_sep = raw_name.replace('\\', "/");
+    let clean_name = normalized_sep.trim_matches('/');
+    if clean_name.is_empty() || clean_name == "." {
+        return Ok(None);
+    }
+    for seg in clean_name.split('/') {
+        if seg == ".." {
+            return Err(SurrealFsError::PermissionDenied(format!(
+                "Archive entry contains forbidden path traversal segment '..': {}",
+                raw_name
+            )));
+        }
+    }
+    let raw_dest = if base == "/" {
+        format!("/{}", clean_name)
+    } else {
+        format!("{}/{}", base, clean_name)
+    };
+    let dest_path = normalize_path(&raw_dest);
+    if base != "/" && dest_path != base && !dest_path.starts_with(&format!("{}/", base)) {
+        return Err(SurrealFsError::PermissionDenied(format!(
+            "Archive entry escapes target prefix {}: {}",
+            base, raw_name
+        )));
+    }
+    Ok(Some(dest_path))
+}
+
+/// Read file bytes optionally at a point-in-time `as_of` cutoff.
+async fn read_entry_bytes_as_of(
+    fs: &SurrealFs,
+    entry: &FileEntry,
+    as_of: Option<DateTime<Utc>>,
+) -> Result<Option<Vec<u8>>> {
+    if let Some(cutoff) = as_of {
+        if let Some(created) = entry.created_at {
+            if created > cutoff {
+                return Ok(None);
+            }
+        }
+        if let Ok(mut res) = fs
+            .db
+            .query("SELECT content FROM file_version WHERE path = $path AND created_at <= <datetime>$cutoff ORDER BY generation DESC LIMIT 1;")
+            .bind(("path", entry.path.clone()))
+            .bind(("cutoff", cutoff.to_rfc3339()))
+            .await
+        {
+            let rows: Vec<serde_json::Value> = res.take(0usize).unwrap_or_default();
+            if let Some(c) = rows
+                .first()
+                .and_then(|r| r.get("content"))
+                .and_then(|v| v.as_str())
+            {
+                return Ok(Some(c.as_bytes().to_vec()));
+            }
+        }
+    }
+    fs.read_bytes(&entry.path).await.map(Some)
+}
+
 /// Export a SurrealFS directory tree to an archive in memory.
 pub async fn export_tree(
     fs: &SurrealFs,
     root_path: &str,
     format: ArchiveFormat,
-    _as_of: Option<DateTime<Utc>>,
+    as_of: Option<DateTime<Utc>>,
 ) -> Result<Vec<u8>> {
     let norm_root = normalize_path(root_path);
     let entries = collect_tree(fs, &norm_root).await?;
@@ -79,7 +142,7 @@ pub async fn export_tree(
     match format {
         ArchiveFormat::Tar => {
             let mut builder = Builder::new(Vec::new());
-            append_entries_to_tar(fs, &mut builder, &norm_root, &entries).await?;
+            append_entries_to_tar(fs, &mut builder, &norm_root, &entries, as_of).await?;
             let bytes = builder
                 .into_inner()
                 .map_err(|e| SurrealFsError::Storage(format!("Tar export failed: {}", e)))?;
@@ -89,7 +152,7 @@ pub async fn export_tree(
             let mut gz = GzEncoder::new(Vec::new(), Compression::default());
             {
                 let mut builder = Builder::new(&mut gz);
-                append_entries_to_tar(fs, &mut builder, &norm_root, &entries).await?;
+                append_entries_to_tar(fs, &mut builder, &norm_root, &entries, as_of).await?;
                 builder
                     .finish()
                     .map_err(|e| SurrealFsError::Storage(format!("Tar finish failed: {}", e)))?;
@@ -117,6 +180,11 @@ pub async fn export_tree(
                     }
 
                     if entry.is_folder {
+                        if let Some(cutoff) = as_of {
+                            if entry.created_at.map(|t| t > cutoff).unwrap_or(false) {
+                                continue;
+                            }
+                        }
                         let dir_path = if rel_path.ends_with('/') {
                             rel_path.to_string()
                         } else {
@@ -125,8 +193,7 @@ pub async fn export_tree(
                         zip.add_directory(&dir_path, options).map_err(|e| {
                             SurrealFsError::Storage(format!("Zip directory failed: {}", e))
                         })?;
-                    } else {
-                        let data = fs.read_bytes(&entry.path).await?;
+                    } else if let Some(data) = read_entry_bytes_as_of(fs, entry, as_of).await? {
                         zip.start_file(rel_path, options).map_err(|e| {
                             SurrealFsError::Storage(format!("Zip start_file failed: {}", e))
                         })?;
@@ -148,6 +215,7 @@ async fn append_entries_to_tar<W: Write>(
     builder: &mut Builder<W>,
     root: &str,
     entries: &[FileEntry],
+    as_of: Option<DateTime<Utc>>,
 ) -> Result<()> {
     for entry in entries {
         let rel_path = entry
@@ -169,6 +237,11 @@ async fn append_entries_to_tar<W: Write>(
         header.set_mode(entry.mode);
 
         if entry.is_folder {
+            if let Some(cutoff) = as_of {
+                if entry.created_at.map(|t| t > cutoff).unwrap_or(false) {
+                    continue;
+                }
+            }
             let dir_name = if rel_path.ends_with('/') {
                 rel_path.to_string()
             } else {
@@ -180,8 +253,7 @@ async fn append_entries_to_tar<W: Write>(
             builder
                 .append_data(&mut header, &dir_name, std::io::empty())
                 .map_err(|e| SurrealFsError::Storage(format!("Tar append dir failed: {}", e)))?;
-        } else {
-            let data = fs.read_bytes(&entry.path).await?;
+        } else if let Some(data) = read_entry_bytes_as_of(fs, entry, as_of).await? {
             header.set_size(data.len() as u64);
             header.set_entry_type(tar::EntryType::Regular);
             header.set_cksum();
@@ -226,15 +298,8 @@ pub async fn import_tree(
                     .name()
                     .map_err(|e| SurrealFsError::Storage(e.to_string()))?
                     .to_string();
-                let clean_name = raw_name.trim_matches('/');
-                if clean_name.is_empty() {
+                let Some(dest_path) = resolve_archive_entry_path(&base, &raw_name)? else {
                     continue;
-                }
-
-                let dest_path = if base == "/" {
-                    format!("/{}", clean_name)
-                } else {
-                    format!("{}/{}", base, clean_name)
                 };
 
                 if file.is_dir() {
@@ -246,7 +311,11 @@ pub async fn import_tree(
                         SurrealFsError::Storage(format!("Zip read content failed: {}", e))
                     })?;
                     report.total_bytes += content.len() as u64;
-                    fs.write_bytes(&dest_path, &content, None).await?;
+                    if let Ok(text) = std::str::from_utf8(&content) {
+                        fs.write_text(&dest_path, text, None).await?;
+                    } else {
+                        fs.write_bytes(&dest_path, &content, None).await?;
+                    }
                     report.files_imported += 1;
                 }
             }
@@ -273,15 +342,8 @@ async fn unpack_tar<R: Read>(
             .path()
             .map_err(|e| SurrealFsError::Storage(format!("Tar path parse failed: {}", e)))?;
         let raw_name = path_buf.to_string_lossy().to_string();
-        let clean_name = raw_name.trim_matches('/');
-        if clean_name.is_empty() {
+        let Some(dest_path) = resolve_archive_entry_path(base, &raw_name)? else {
             continue;
-        }
-
-        let dest_path = if base == "/" {
-            format!("/{}", clean_name)
-        } else {
-            format!("{}/{}", base, clean_name)
         };
 
         if entry.header().entry_type().is_dir() {
@@ -293,7 +355,11 @@ async fn unpack_tar<R: Read>(
                 .read_to_end(&mut content)
                 .map_err(|e| SurrealFsError::Storage(format!("Tar entry read failed: {}", e)))?;
             report.total_bytes += content.len() as u64;
-            fs.write_bytes(&dest_path, &content, None).await?;
+            if let Ok(text) = std::str::from_utf8(&content) {
+                fs.write_text(&dest_path, text, None).await?;
+            } else {
+                fs.write_bytes(&dest_path, &content, None).await?;
+            }
             report.files_imported += 1;
         }
     }

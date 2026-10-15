@@ -17,6 +17,7 @@ pub struct WebDavServer {
     fs: SurrealFs,
     auth: Authenticator,
     prefix: String,
+    require_auth: bool,
 }
 
 impl WebDavServer {
@@ -31,7 +32,13 @@ impl WebDavServer {
             auth: Authenticator::new(fs.clone()),
             fs,
             prefix: clean_prefix,
+            require_auth: false,
         }
+    }
+
+    pub fn with_require_auth(mut self, require_auth: bool) -> Self {
+        self.require_auth = require_auth;
+        self
     }
 
     /// Strips the server URL prefix and returns the normalized SurrealFS path.
@@ -69,13 +76,18 @@ impl WebDavServer {
     }
 
     /// Handles PROPFIND requests (returns XML Multi-Status response).
-    async fn handle_propfind(&self, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
+    async fn handle_propfind(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        sfs_path: &str,
+    ) -> HttpResponse {
         // macOS Finder / Windows Explorer quirk: ignore AppleDouble metadata files
         if is_macos_appledouble(sfs_path) {
             return HttpResponse::not_found("AppleDouble file ignored");
         }
 
-        let stat = match self.fs.stat(sfs_path).await {
+        let stat = match fs.stat(sfs_path).await {
             Ok(Some(s)) => s,
             Ok(None) => {
                 // If checking root folder, synthesize root entry
@@ -109,7 +121,7 @@ impl WebDavServer {
 
         let mut entries = vec![stat.clone()];
         if stat.is_folder && depth != "0" {
-            if let Ok(children) = self.fs.ls(sfs_path).await {
+            if let Ok(children) = fs.ls(sfs_path).await {
                 for child in children {
                     // Filter out macOS AppleDouble clutter from visible folder listings
                     if !is_macos_appledouble(&child.filename) {
@@ -188,8 +200,14 @@ impl WebDavServer {
     }
 
     /// Handles GET and HEAD requests with Range header support (§19.4, §22.1).
-    async fn handle_get(&self, req: &HttpRequest, sfs_path: &str, is_head: bool) -> HttpResponse {
-        let stat = match self.fs.stat(sfs_path).await {
+    async fn handle_get(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        sfs_path: &str,
+        is_head: bool,
+    ) -> HttpResponse {
+        let stat = match fs.stat(sfs_path).await {
             Ok(Some(s)) => s,
             Ok(None) => return HttpResponse::not_found("File not found"),
             Err(e) => return HttpResponse::internal_error(&e.to_string()),
@@ -200,7 +218,7 @@ impl WebDavServer {
             if is_head {
                 return HttpResponse::ok().header("Content-Type", "text/html; charset=utf-8");
             }
-            let children = self.fs.ls(sfs_path).await.unwrap_or_default();
+            let children = fs.ls(sfs_path).await.unwrap_or_default();
             let mut html = format!("<!DOCTYPE html><html><head><title>Index of {}</title></head><body><h1>Index of {}</h1><hr><ul>", sfs_path, sfs_path);
             if sfs_path != "/" {
                 html.push_str("<li><a href=\"..\">..</a></li>");
@@ -233,11 +251,11 @@ impl WebDavServer {
             if let Some(range) = parse_byte_range(range_header, stat.size) {
                 let (start, end) = range;
                 let len = end - start + 1;
-                let data = match self.fs.read_range(sfs_path, start, len).await {
+                let data = match fs.read_range(sfs_path, start, len).await {
                     Ok(d) => d,
                     Err(_) => {
                         // Fallback to full read and slice
-                        match self.fs.read_bytes(sfs_path).await {
+                        match fs.read_bytes(sfs_path).await {
                             Ok(all) => {
                                 let s = (start as usize).min(all.len());
                                 let e = ((end + 1) as usize).min(all.len());
@@ -268,7 +286,7 @@ impl WebDavServer {
         let data = if is_head {
             Vec::new()
         } else {
-            match self.fs.read_bytes(sfs_path).await {
+            match fs.read_bytes(sfs_path).await {
                 Ok(d) => d,
                 Err(e) => return HttpResponse::internal_error(&e.to_string()),
             }
@@ -287,7 +305,12 @@ impl WebDavServer {
     }
 
     /// Handles PUT requests with If-Match optimistic concurrency (§1.3, §22.1).
-    async fn handle_put(&self, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
+    async fn handle_put(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        sfs_path: &str,
+    ) -> HttpResponse {
         // Transparently absorb macOS AppleDouble files and .DS_Store (§22.1)
         if is_macos_appledouble(sfs_path) {
             return HttpResponse::created();
@@ -302,11 +325,7 @@ impl WebDavServer {
             }
         });
 
-        match self
-            .fs
-            .write_bytes(sfs_path, &req.body, if_generation)
-            .await
-        {
+        match fs.write_bytes(sfs_path, &req.body, if_generation).await {
             Ok(entry) => {
                 let etag = format!("\"gen-{}\"", entry.generation);
                 HttpResponse::created()
@@ -321,12 +340,12 @@ impl WebDavServer {
     }
 
     /// Handles DELETE requests.
-    async fn handle_delete(&self, sfs_path: &str) -> HttpResponse {
+    async fn handle_delete(&self, fs: &SurrealFs, sfs_path: &str) -> HttpResponse {
         if is_macos_appledouble(sfs_path) {
             return HttpResponse::no_content();
         }
 
-        match self.fs.rm(sfs_path, true).await {
+        match fs.rm(sfs_path, true).await {
             Ok(_) => HttpResponse::no_content(),
             Err(SurrealFsError::NotFound(_)) => HttpResponse::not_found("Resource not found"),
             Err(e) => HttpResponse::internal_error(&e.to_string()),
@@ -334,13 +353,18 @@ impl WebDavServer {
     }
 
     /// Handles MKCOL requests (directory creation).
-    async fn handle_mkcol(&self, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
+    async fn handle_mkcol(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        sfs_path: &str,
+    ) -> HttpResponse {
         if !req.body.is_empty() {
             return HttpResponse::new(415, "Unsupported Media Type")
                 .body_str("MKCOL does not accept a request body");
         }
 
-        match self.fs.mkdir(sfs_path, false).await {
+        match fs.mkdir(sfs_path, false).await {
             Ok(_) => HttpResponse::created(),
             Err(SurrealFsError::Conflict(_)) => {
                 HttpResponse::new(405, "Method Not Allowed").body_str("Directory already exists")
@@ -350,7 +374,12 @@ impl WebDavServer {
     }
 
     /// Handles MOVE requests (renaming files or folders).
-    async fn handle_move(&self, req: &HttpRequest, src_path: &str) -> HttpResponse {
+    async fn handle_move(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        src_path: &str,
+    ) -> HttpResponse {
         let dest_header = match req.header("destination") {
             Some(d) => d,
             None => return HttpResponse::bad_request("Missing Destination header"),
@@ -370,11 +399,11 @@ impl WebDavServer {
             .map(|v| v.to_uppercase() != "F")
             .unwrap_or(true);
 
-        if !overwrite && self.fs.exists(&dest_path).await.unwrap_or(false) {
+        if !overwrite && fs.exists(&dest_path).await.unwrap_or(false) {
             return HttpResponse::precondition_failed("Destination exists and Overwrite is F");
         }
 
-        match self.fs.mv(src_path, &dest_path).await {
+        match fs.mv(src_path, &dest_path).await {
             Ok(_) => HttpResponse::created(),
             Err(SurrealFsError::NotFound(_)) => HttpResponse::not_found("Source not found"),
             Err(e) => HttpResponse::internal_error(&e.to_string()),
@@ -382,7 +411,12 @@ impl WebDavServer {
     }
 
     /// Handles COPY requests.
-    async fn handle_copy(&self, req: &HttpRequest, src_path: &str) -> HttpResponse {
+    async fn handle_copy(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        src_path: &str,
+    ) -> HttpResponse {
         let dest_header = match req.header("destination") {
             Some(d) => d,
             None => return HttpResponse::bad_request("Missing Destination header"),
@@ -402,11 +436,11 @@ impl WebDavServer {
             .map(|v| v.to_uppercase() != "F")
             .unwrap_or(true);
 
-        if !overwrite && self.fs.exists(&dest_path).await.unwrap_or(false) {
+        if !overwrite && fs.exists(&dest_path).await.unwrap_or(false) {
             return HttpResponse::precondition_failed("Destination exists and Overwrite is F");
         }
 
-        match self.fs.cp(src_path, &dest_path, true).await {
+        match fs.cp(src_path, &dest_path, true).await {
             Ok(_) => HttpResponse::created(),
             Err(SurrealFsError::NotFound(_)) => HttpResponse::not_found("Source not found"),
             Err(e) => HttpResponse::internal_error(&e.to_string()),
@@ -414,7 +448,13 @@ impl WebDavServer {
     }
 
     /// Handles LOCK requests (translates to swarm advisory leases, §1.1, §22.1).
-    async fn handle_lock(&self, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
+    async fn handle_lock(
+        &self,
+        fs: &SurrealFs,
+        req: &HttpRequest,
+        sfs_path: &str,
+        holder: &str,
+    ) -> HttpResponse {
         let timeout_secs = req
             .header("timeout")
             .and_then(|t| {
@@ -426,15 +466,12 @@ impl WebDavServer {
             })
             .unwrap_or(60);
 
-        match self
-            .fs
-            .acquire_lock(sfs_path, timeout_secs, "webdav-client", "webdav-client")
-            .await
-        {
+        match fs.acquire_lock(sfs_path, timeout_secs, holder, holder).await {
             Ok(_) => {
                 let token = format!(
                     "urn:uuid:{}",
-                    blake3::hash(format!("{}:{}", sfs_path, Utc::now()).as_bytes()).to_hex()
+                    blake3::hash(format!("{}:{}:{}", sfs_path, holder, Utc::now()).as_bytes())
+                        .to_hex()
                 );
                 let xml = format!(
                     r#"<?xml version="1.0" encoding="utf-8"?>
@@ -458,14 +495,19 @@ impl WebDavServer {
                     .body_str(&xml)
             }
             Err(SurrealFsError::Lock(_)) => HttpResponse::locked("Resource is locked"),
+            Err(SurrealFsError::PermissionDenied(_)) => {
+                HttpResponse::forbidden("Permission denied")
+            }
             Err(e) => HttpResponse::internal_error(&e.to_string()),
         }
     }
 
     /// Handles UNLOCK requests (releases swarm advisory lease, §1.1).
-    async fn handle_unlock(&self, sfs_path: &str) -> HttpResponse {
-        match self.fs.release_lock(sfs_path, "webdav-client").await {
+    async fn handle_unlock(&self, fs: &SurrealFs, sfs_path: &str, holder: &str) -> HttpResponse {
+        match fs.release_lock(sfs_path, holder).await {
             Ok(_) => HttpResponse::no_content(),
+            Err(SurrealFsError::Lock(_)) => HttpResponse::locked("Resource is locked by another holder"),
+            Err(SurrealFsError::PermissionDenied(_)) => HttpResponse::forbidden("Permission denied"),
             Err(_) => HttpResponse::no_content(),
         }
     }
@@ -495,27 +537,45 @@ impl WebDavServer {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl HttpHandler for WebDavServer {
     async fn handle(&self, req: HttpRequest) -> HttpResponse {
-        // Authenticate request if authorization header is provided
-        if let Some(auth_hdr) = req.header("authorization") {
-            if self.auth.authenticate_basic(auth_hdr).await.is_err() {
-                return HttpResponse::unauthorized("SurrealFS WebDAV");
+        let (fs, holder) = if let Some(auth_hdr) = req.header("authorization") {
+            let user = if auth_hdr.starts_with("Bearer ") {
+                self.auth.authenticate_bearer(auth_hdr).await
+            } else {
+                self.auth.authenticate_basic(auth_hdr).await
+            };
+            match user {
+                Ok(u) => (self.fs.with_caller(&u.user_id), u.user_id),
+                Err(_) => return HttpResponse::unauthorized("SurrealFS WebDAV"),
             }
-        }
+        } else if self.require_auth && req.method != "OPTIONS" {
+            return HttpResponse::unauthorized("SurrealFS WebDAV");
+        } else {
+            let caller = req
+                .header("x-surrealfs-caller")
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "webdav-client".to_string());
+            let scoped_fs = if let Some(c) = req.header("x-surrealfs-caller") {
+                self.fs.with_caller(c)
+            } else {
+                self.fs.clone()
+            };
+            (scoped_fs, caller)
+        };
 
         let sfs_path = self.resolve_path(&req.path);
 
         match req.method.as_str() {
             "OPTIONS" => self.handle_options(),
-            "PROPFIND" => self.handle_propfind(&req, &sfs_path).await,
-            "GET" => self.handle_get(&req, &sfs_path, false).await,
-            "HEAD" => self.handle_get(&req, &sfs_path, true).await,
-            "PUT" => self.handle_put(&req, &sfs_path).await,
-            "DELETE" => self.handle_delete(&sfs_path).await,
-            "MKCOL" => self.handle_mkcol(&req, &sfs_path).await,
-            "MOVE" => self.handle_move(&req, &sfs_path).await,
-            "COPY" => self.handle_copy(&req, &sfs_path).await,
-            "LOCK" => self.handle_lock(&req, &sfs_path).await,
-            "UNLOCK" => self.handle_unlock(&sfs_path).await,
+            "PROPFIND" => self.handle_propfind(&fs, &req, &sfs_path).await,
+            "GET" => self.handle_get(&fs, &req, &sfs_path, false).await,
+            "HEAD" => self.handle_get(&fs, &req, &sfs_path, true).await,
+            "PUT" => self.handle_put(&fs, &req, &sfs_path).await,
+            "DELETE" => self.handle_delete(&fs, &sfs_path).await,
+            "MKCOL" => self.handle_mkcol(&fs, &req, &sfs_path).await,
+            "MOVE" => self.handle_move(&fs, &req, &sfs_path).await,
+            "COPY" => self.handle_copy(&fs, &req, &sfs_path).await,
+            "LOCK" => self.handle_lock(&fs, &req, &sfs_path, &holder).await,
+            "UNLOCK" => self.handle_unlock(&fs, &sfs_path, &holder).await,
             "PROPPATCH" => self.handle_proppatch(&sfs_path),
             _ => HttpResponse::method_not_allowed(),
         }
@@ -530,6 +590,9 @@ fn is_macos_appledouble(path: &str) -> bool {
 
 /// Parses an HTTP Range header `bytes=start-end`.
 fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
+    if file_size == 0 {
+        return None;
+    }
     let clean = header.trim();
     let spec = clean.strip_prefix("bytes=")?;
     let (start_str, end_str) = spec.split_once('-')?;
@@ -537,16 +600,22 @@ fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
     if start_str.is_empty() {
         // Suffix bytes: -500
         let len: u64 = end_str.parse().ok()?;
+        if len == 0 {
+            return None;
+        }
         let start = file_size.saturating_sub(len);
-        let end = file_size.saturating_sub(1);
+        let end = file_size - 1;
         Some((start, end))
     } else {
         let start: u64 = start_str.parse().ok()?;
+        if start >= file_size {
+            return None;
+        }
         let end = if end_str.is_empty() {
-            file_size.saturating_sub(1)
+            file_size - 1
         } else {
             let parsed_end: u64 = end_str.parse().ok()?;
-            parsed_end.min(file_size.saturating_sub(1))
+            parsed_end.min(file_size - 1)
         };
         if start <= end {
             Some((start, end))

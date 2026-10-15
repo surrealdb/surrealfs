@@ -570,8 +570,17 @@ impl SurrealFs {
             .bind(("path", norm))
             .bind(("caller", self.caller.clone()))
             .await?;
-        let content: Option<String> = res.take(0usize)?;
-        content.ok_or_else(|| SurrealFsError::NotFound(format!("File not found: {}", path)))
+        let val: Option<serde_json::Value> = res.take(0usize)?;
+        let v = val.ok_or_else(|| SurrealFsError::NotFound(format!("File not found: {}", path)))?;
+        if let Some(s) = v.as_str() {
+            return Ok(s.to_string());
+        }
+        if let Some(bytes) = extract_bytes(Some(&v)) {
+            return String::from_utf8(bytes).map_err(|e| {
+                SurrealFsError::InvalidArguments(format!("File is not valid UTF-8: {}", e))
+            });
+        }
+        Ok(String::new())
     }
 
     /// Read raw bytes of a file.
@@ -602,20 +611,56 @@ impl SurrealFs {
         if_generation: Option<u64>,
     ) -> Result<FileEntry> {
         let norm = normalize_path(path);
-        if let Ok(text) = std::str::from_utf8(data) {
-            return self.write_text(&norm, text, if_generation).await;
-        }
         let mime = "application/octet-stream";
+        let sql = r#"
+            RETURN {
+                IF $path = '/' { THROW 'sfs:is_a_directory'; };
+                LET $who = $caller ?? fn::sfs_me() ?? 'root';
+                IF fn::sfs_is_legal_hold($path) { THROW 'sfs:legal_hold'; };
+                LET $id = fn::sfs_resolve($path);
+                IF $id IS NOT NONE {
+                    LET $row = (SELECT id, is_folder, owner, mode, group, gate, generation FROM ONLY $id);
+                    IF $row.is_folder { THROW 'sfs:is_a_directory'; };
+                    IF $who != 'root' AND !(fn::sfs_can_write_grp($row.gate, $row.owner, $row.mode, $who, $row.group)) {
+                        THROW 'sfs:permission_denied';
+                    };
+                    IF $if_gen IS NOT NONE AND $row.generation != $if_gen {
+                        THROW 'sfs:conflict';
+                    };
+                    UPDATE $id SET file = <bytes>$data, content = NONE, size = bytes::len(<bytes>$data), content_type = $mime, updated_at = time::now();
+                    RETURN fn::sfs_stat($path);
+                };
+                IF $if_gen IS NOT NONE AND $if_gen != 0 {
+                    THROW 'sfs:conflict';
+                };
+                LET $parent_id = fn::sfs_ensure_parents($path, $who);
+                IF $who != 'root' AND !(fn::sfs_can_enter($parent_id, $who)) {
+                    THROW 'sfs:permission_denied';
+                };
+                LET $raw = string::split($path, '/');
+                LET $segments = array::filter($raw, |$v| string::len($v) > 0);
+                LET $filename = $segments[array::len($segments) - 1];
+                CREATE file CONTENT {
+                    filename: $filename,
+                    parent: $parent_id,
+                    owner: $who,
+                    file: <bytes>$data,
+                    size: bytes::len(<bytes>$data),
+                    content_type: $mime
+                };
+                RETURN fn::sfs_stat($path);
+            };
+        "#;
         let mut res = self
             .db
-            .query("LET $id = fn::sfs_resolve($path); IF $id IS NOT NONE { UPDATE $id SET file = <bytes>$data, content = NONE, content_type = $mime, updated_at = time::now() WHERE $if_gen IS NONE OR generation = $if_gen; RETURN fn::sfs_stat($path); }; LET $parent_id = fn::sfs_ensure_parents($path, $caller); LET $raw = string::split($path, '/'); LET $segments = array::filter($raw, |$v| string::len($v) > 0); LET $filename = $segments[array::len($segments) - 1]; LET $created = (CREATE file CONTENT { filename: $filename, parent: $parent_id, file: <bytes>$data, content_type: $mime }); RETURN fn::sfs_stat($path);")
+            .query(sql)
             .bind(("path", norm.clone()))
             .bind(("data", data.to_vec()))
             .bind(("mime", mime.to_string()))
             .bind(("if_gen", if_generation))
             .bind(("caller", self.caller.clone()))
             .await?;
-        let entry: Option<SValue> = res.take(res.num_statements() - 1)?;
+        let entry: Option<SValue> = res.take(0usize)?;
         let val =
             entry.ok_or_else(|| SurrealFsError::Database(format!("Failed to write: {}", norm)))?;
         value_to_serde(val)
@@ -640,7 +685,7 @@ impl SurrealFs {
         }
         let mut res = self
             .db
-            .query("RETURN fn::sfs_write($path, $content, $if_gen, true, $caller);")
+            .query("RETURN fn::sfs_write($path, $content, $if_gen, true, $caller, NONE);")
             .bind(("path", norm.clone()))
             .bind(("content", content.to_string()))
             .bind(("if_gen", if_generation))
@@ -755,12 +800,15 @@ impl SurrealFs {
     /// Change file mode / permissions.
     pub async fn chmod(&self, path: &str, mode: u32) -> Result<()> {
         let norm = normalize_path(path);
-        let sql = "RETURN fn::sfs_chmod($path, $mode);";
-        self.db
+        let sql = "RETURN fn::sfs_chmod($path, $mode, $caller);";
+        let mut res = self
+            .db
             .query(sql)
             .bind(("path", norm))
             .bind(("mode", mode as i64))
+            .bind(("caller", self.caller.clone()))
             .await?;
+        let _val: Option<SValue> = res.take(0usize)?;
         Ok(())
     }
 
@@ -804,9 +852,10 @@ impl SurrealFs {
         let norm = normalize_path(path);
         let mut res = self
             .db
-            .query("RETURN fn::sfs_history($path, $limit);")
+            .query("RETURN fn::sfs_history($path, $limit, $caller);")
             .bind(("path", norm))
             .bind(("limit", limit.unwrap_or(20) as i64))
+            .bind(("caller", self.caller.clone()))
             .await?;
         let list: Vec<SValue> = res.take(0usize)?;
         list.into_iter().map(value_to_serde).collect()
@@ -1012,11 +1061,14 @@ impl SurrealFs {
         is_regex: bool,
     ) -> Result<Vec<GrepMatch>> {
         let prefix = path_prefix.map(normalize_path).unwrap_or("/".to_string());
+        let caller = self.caller.as_deref().unwrap_or("root");
         let mut res = self
             .db
             .query(
-                "SELECT path, content FROM file WHERE is_folder = false AND content != NONE LIMIT 1000;",
+                "SELECT path, content FROM file WHERE is_folder = false AND deleted_at IS NONE AND content != NONE AND ($caller = 'root' OR fn::sfs_can_read_grp(gate, owner, mode, $caller, group)) AND fn::sfs_under_prefix(path, $prefix) LIMIT 1000;",
             )
+            .bind(("caller", caller.to_string()))
+            .bind(("prefix", prefix.clone()))
             .await?;
         let rows: Vec<SValue> = res.take(0usize)?;
         let mut matches = Vec::new();
@@ -1033,9 +1085,6 @@ impl SurrealFs {
                 row.get("path").and_then(|v| v.as_str()),
                 row.get("content").and_then(|v| v.as_str()),
             ) {
-                if !p.starts_with(&prefix) && prefix != "/" {
-                    continue;
-                }
                 for (idx, line) in c.lines().enumerate() {
                     let matched = if let Some(ref re) = regex {
                         re.is_match(line)
@@ -1058,11 +1107,13 @@ impl SurrealFs {
 
     /// Search files with ranked query.
     pub async fn search(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let caller = self.caller.as_deref().unwrap_or("root");
         let mut res = self
             .db
-            .query("RETURN fn::sfs_search_text($q, $limit);")
+            .query("RETURN fn::sfs_search_text($q, $limit, 'any', $caller);")
             .bind(("q", query.to_string()))
             .bind(("limit", limit as i64))
+            .bind(("caller", caller.to_string()))
             .await?;
         let hits: Vec<SValue> = res.take(0usize)?;
         let mut out = Vec::new();
@@ -1071,11 +1122,17 @@ impl SurrealFs {
             let hit: Value = value_to_serde(hit_val)?;
             if let Ok(entry) = serde_json::from_value::<FileEntry>(hit.clone()) {
                 let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                let snippet = hit
+                let raw_snippet = hit
                     .get("snippet")
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
+                    .filter(|s| !s.is_empty());
+                let snippet = match raw_snippet {
+                    Some(s) => s.to_string(),
+                    None => {
+                        let content = hit.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                        build_snippet(content, query, 200)
+                    }
+                };
                 out.push(SearchHit {
                     entry,
                     score,
@@ -1089,6 +1146,7 @@ impl SurrealFs {
 
     /// Search fine-grained file sections using vector cosine similarity.
     pub async fn search_sections(&self, vector: &[f32], limit: usize) -> Result<Vec<SectionHit>> {
+        let caller = self.caller.as_deref().unwrap_or("root");
         let sql = r#"
             SELECT 
                 file_id.path AS path,
@@ -1099,6 +1157,7 @@ impl SurrealFs {
                 vector::similarity::cosine(embedding, $vec) AS score
             FROM file_section
             WHERE embedding <|80, COSINE|> $vec
+              AND ($caller = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $caller, file_id.group))
             ORDER BY score DESC
             LIMIT $limit;
         "#;
@@ -1107,6 +1166,7 @@ impl SurrealFs {
             .query(sql)
             .bind(("vec", vector.to_vec()))
             .bind(("limit", limit as i64))
+            .bind(("caller", caller.to_string()))
             .await?;
         let rows: Vec<SValue> = res.take(0usize)?;
         let mut out = Vec::new();
@@ -1407,16 +1467,18 @@ impl SurrealFs {
             .unwrap_or(false);
 
         if !chunked {
-            let data_bytes = if let Some(s) = json_val.get("data").and_then(|v| v.as_str()) {
-                s.as_bytes().to_vec()
-            } else {
-                extract_bytes(json_val.get("data")).unwrap_or_default()
-            };
-            return Ok(data_bytes);
+            if let Some(s) = json_val.get("data").and_then(|v| v.as_str()) {
+                return Ok(s.as_bytes().to_vec());
+            }
+            let data_bytes = extract_bytes(json_val.get("data")).unwrap_or_default();
+            let start = (offset as usize).min(data_bytes.len());
+            let end = start.saturating_add(length as usize).min(data_bytes.len());
+            return Ok(data_bytes[start..end].to_vec());
         }
 
         // Chunked file: reassemble requested range from covering chunks
         let mut out = vec![0u8; length as usize];
+        let mut max_written: usize = 0;
         let chunks_arr = json_val
             .get("chunks")
             .and_then(|v| v.as_array())
@@ -1441,13 +1503,18 @@ impl SurrealFs {
                 let target_start = (start - offset) as usize;
 
                 if chunk_slice_start + chunk_slice_len <= decompressed.len() {
-                    out[target_start..target_start + chunk_slice_len].copy_from_slice(
+                    let target_end = target_start + chunk_slice_len;
+                    out[target_start..target_end].copy_from_slice(
                         &decompressed[chunk_slice_start..chunk_slice_start + chunk_slice_len],
                     );
+                    if target_end > max_written {
+                        max_written = target_end;
+                    }
                 }
             }
         }
 
+        out.truncate(max_written);
         Ok(out)
     }
 
@@ -1567,7 +1634,8 @@ impl SurrealFs {
                 .unwrap_or("")
                 .to_string();
             let snippet = c
-                .get("snippet")
+                .get("content")
+                .or_else(|| c.get("snippet"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -1793,9 +1861,13 @@ impl SurrealFs {
         threshold: f64,
     ) -> Result<Vec<(String, f64)>> {
         let h = compute_simhash(text);
+        let caller = self.caller.as_deref().unwrap_or("root");
         let mut res = self
             .db
-            .query("SELECT path, meta.simhash AS simhash FROM file WHERE meta.simhash IS NOT NONE;")
+            .query(
+                "SELECT path, meta.simhash AS simhash FROM file WHERE deleted_at IS NONE AND meta.simhash IS NOT NONE AND ($caller = 'root' OR fn::sfs_can_read_grp(gate, owner, mode, $caller, group));",
+            )
+            .bind(("caller", caller.to_string()))
             .await?;
         let items: Vec<SValue> = res.take(0usize).unwrap_or_default();
         let mut matches = Vec::new();
@@ -2121,14 +2193,16 @@ impl SurrealFs {
     // Legal Hold (Section 24.4)
     pub async fn set_legal_hold(&self, path: &str, enabled: bool) -> Result<FileEntry> {
         let norm = normalize_path(path);
-        let sql = "RETURN fn::sfs_set_legal_hold($path, $enabled);";
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = "RETURN fn::sfs_set_legal_hold($path, $enabled, $caller);";
         let mut res = self
             .db
             .query(sql)
             .bind(("path", norm))
             .bind(("enabled", enabled))
+            .bind(("caller", caller.to_string()))
             .await?;
-        let item: Option<SValue> = res.take(0usize).unwrap_or(None);
+        let item: Option<SValue> = res.take(0usize)?;
         let entry: FileEntry =
             value_to_serde(item.ok_or_else(|| SurrealFsError::NotFound(path.to_string()))?)?;
         Ok(entry)
@@ -2155,6 +2229,7 @@ impl SurrealFs {
         url: &str,
         secret: &str,
     ) -> Result<WebhookRecord> {
+        crate::webhooks::validate_webhook_url(url)?;
         let caller = self.caller.as_deref().unwrap_or("root");
         let sql = "CREATE webhook SET owner = $owner, path_pattern = $pat, events = $events, url = $url, secret = $secret, active = true;";
         let mut res = self
@@ -2200,10 +2275,12 @@ impl SurrealFs {
     }
 
     pub async fn delete_webhook(&self, webhook_id: &str) -> Result<()> {
-        let sql = "DELETE type::record('webhook', $id);";
+        let caller = self.caller.as_deref().unwrap_or("root");
+        let sql = "DELETE type::record('webhook', $id) WHERE $caller = 'root' OR owner = $caller;";
         self.db
             .query(sql)
             .bind(("id", webhook_id.to_string()))
+            .bind(("caller", caller.to_string()))
             .await?;
         Ok(())
     }
@@ -2265,12 +2342,13 @@ impl SurrealFs {
 
     /// Semantic vector search over files (`fn::sfs_search_semantic`).
     pub async fn search_semantic(&self, vector: &[f32], limit: usize) -> Result<Vec<SearchHit>> {
+        let caller = self.caller.as_deref().unwrap_or("root");
         let mut res = self
             .db
             .query("RETURN fn::sfs_search_semantic($vec, $limit, $caller);")
             .bind(("vec", vector.to_vec()))
             .bind(("limit", limit as i64))
-            .bind(("caller", self.caller.clone()))
+            .bind(("caller", caller.to_string()))
             .await?;
         let hits: Vec<SValue> = res.take(0usize)?;
         let mut out = Vec::new();
@@ -2304,13 +2382,14 @@ impl SurrealFs {
         limit: usize,
     ) -> Result<Vec<SearchHit>> {
         let vec_val: Option<Vec<f32>> = vector.map(|v| v.to_vec());
+        let caller = self.caller.as_deref().unwrap_or("root");
         let mut res = self
             .db
             .query("RETURN fn::sfs_hybrid_search($q, $vec, $limit, 'any', $caller);")
             .bind(("q", query.to_string()))
             .bind(("vec", vec_val))
             .bind(("limit", limit as i64))
-            .bind(("caller", self.caller.clone()))
+            .bind(("caller", caller.to_string()))
             .await?;
         let hits: Vec<SValue> = res.take(0usize)?;
         let mut out = Vec::new();

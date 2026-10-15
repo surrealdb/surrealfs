@@ -517,10 +517,25 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
         }
         Commands::Ls(args) => {
             let fs = cli.connect_fs().await?;
-            let entries = fs.ls(&args.path).await?;
-            for e in entries {
-                let kind = if e.is_folder { "DIR " } else { "FILE" };
-                output.push_str(&format!("{:<4} {:>8} bytes  {}\n", kind, e.size, e.path));
+            if args.recursive {
+                let mut queue = std::collections::VecDeque::new();
+                queue.push_back(args.path.clone());
+                while let Some(dir) = queue.pop_front() {
+                    let entries = fs.ls(&dir).await?;
+                    for e in entries {
+                        let kind = if e.is_folder { "DIR " } else { "FILE" };
+                        output.push_str(&format!("{:<4} {:>8} bytes  {}\n", kind, e.size, e.path));
+                        if e.is_folder {
+                            queue.push_back(e.path);
+                        }
+                    }
+                }
+            } else {
+                let entries = fs.ls(&args.path).await?;
+                for e in entries {
+                    let kind = if e.is_folder { "DIR " } else { "FILE" };
+                    output.push_str(&format!("{:<4} {:>8} bytes  {}\n", kind, e.size, e.path));
+                }
             }
         }
         Commands::Cat { path } => {
@@ -577,10 +592,10 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
             let fs = cli.connect_fs().await?;
             let history = fs.history(path, Some(*limit as usize)).await?;
             for v in history {
-                println!(
-                    "gen {:<3} | op {:<6} | author {:<10} | size {:>6} | {}",
+                output.push_str(&format!(
+                    "gen {:<3} | op {:<6} | author {:<10} | size {:>6} | {}\n",
                     v.generation, v.op, v.author, v.size, v.path
-                );
+                ));
             }
         }
         Commands::Restore { path, version } => {
@@ -659,13 +674,14 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                 output.push_str(&format!("To complete NFS mount, run:\n  sudo {}\n", cmd));
                 return Ok(output);
             }
-            let _fs = cli.connect_fs().await?;
+            let fs = cli.connect_fs().await?;
             let caller = cli.caller.as_deref().unwrap_or("root").to_string();
-            let _router = surrealfs_fuse::SyntheticRouter::new(
+            let router = surrealfs_fuse::SyntheticRouter::new(
                 cli.url.clone(),
                 caller.clone(),
                 branch.clone(),
             );
+            let _adapter = surrealfs_fuse::FuseAdapter::new(fs, router);
             let p = std::path::Path::new(mountpoint);
             if !p.exists() {
                 std::fs::create_dir_all(p).with_context(|| {
@@ -880,8 +896,12 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                 }
                 ServeCommands::Nfs { addr, mount_point } => {
                     let nfs_server = surrealfs_server::NfsServer::new(fs);
+                    let port = addr
+                        .rsplit_once(':')
+                        .and_then(|(_, p)| p.parse::<u16>().ok())
+                        .unwrap_or(2049);
                     if let Some(mp) = mount_point {
-                        let cmd = nfs_server.mount_command(mp, 2049);
+                        let cmd = nfs_server.mount_command(mp, port);
                         output.push_str(&format!(
                             "NFS server on {}. Mount command:\n  sudo {}\n",
                             addr, cmd

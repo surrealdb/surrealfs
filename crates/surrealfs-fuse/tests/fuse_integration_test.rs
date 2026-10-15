@@ -19,6 +19,7 @@ async fn test_synthetic_filesystem_operations() {
     )
     .await
     .unwrap();
+    fs.chmod("/docs/system.md", 0o666).await.unwrap();
 
     let router = SyntheticRouter::new("ws://127.0.0.1:8000".into(), "martin".into(), "main".into());
 
@@ -55,11 +56,11 @@ async fn test_synthetic_filesystem_operations() {
 
     let lock_entries = router.readdir(SYNTHETIC_LOCKS_DIR, &fs).await.unwrap();
     assert_eq!(lock_entries.len(), 1);
-    assert_eq!(lock_entries[0].1, "docs_system.md");
+    assert_eq!(lock_entries[0].1, "docs%2Fsystem.md");
 
     // Lookup lock file by name
     let lock_ino = router
-        .lookup(SYNTHETIC_LOCKS_DIR, "docs_system.md")
+        .lookup(SYNTHETIC_LOCKS_DIR, "docs%2Fsystem.md")
         .unwrap();
     let lock_json = String::from_utf8(router.read(lock_ino, &fs).await.unwrap()).unwrap();
     assert!(lock_json.contains("updating specs"));

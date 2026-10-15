@@ -27,14 +27,17 @@ impl SurrealFs {
                                  ELSE IF content IS NOT NONE THEN string::len(content)
                                  ELSE IF file IS NOT NONE THEN bytes::len(file)
                                  ELSE 0 END AS size,
-                                 meta.legal_hold AS hold FROM file);
-            LET $chunks = (SELECT count() FROM chunk GROUP ALL)[0].count ?? 0;
+                                 meta.legal_hold AS hold FROM file WHERE deleted_at IS NONE);
+            LET $fc = (SELECT count() AS c, math::sum(length ?? byte_length ?? 0) AS s FROM file_chunk GROUP ALL)[0];
+            LET $blobs = (SELECT count() AS c, math::sum(stored ?? size ?? 0) AS p FROM blob GROUP ALL)[0];
             LET $shares = (SELECT count() FROM share WHERE revoked = false GROUP ALL)[0].count ?? 0;
             LET $hooks = (SELECT count() FROM webhook WHERE active = true GROUP ALL)[0].count ?? 0;
             LET $groups = (SELECT count() FROM user_group GROUP ALL)[0].count ?? 0;
             RETURN {
                 files: $files,
-                chunks: $chunks,
+                chunks: ($fc.c ?? 0) + ($blobs.c ?? 0),
+                logical_chunk_bytes: $fc.s ?? 0,
+                physical_blob_bytes: $blobs.p ?? 0,
                 shares: $shares,
                 hooks: $hooks,
                 groups: $groups
@@ -42,7 +45,7 @@ impl SurrealFs {
         "#;
 
         let mut res = self.db.query(sql).await?;
-        let data: Option<serde_json::Value> = res.take(5usize)?;
+        let data: Option<serde_json::Value> = res.take(6usize)?;
 
         let mut stats = FsStats::default();
 
@@ -74,10 +77,22 @@ impl SurrealFs {
             stats.active_webhooks = obj.get("hooks").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             stats.groups_count = obj.get("groups").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
 
-            // Calculate deduplication ratio
-            if stats.total_chunks > 0 && stats.total_bytes > 0 {
-                let approx_chunk_bytes = (stats.total_chunks as u64) * 64 * 1024; // Average 64KB per chunk
-                stats.dedup_ratio = (stats.total_bytes as f64) / (approx_chunk_bytes.max(1) as f64);
+            let logical_chunk_bytes = obj
+                .get("logical_chunk_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let physical_blob_bytes = obj
+                .get("physical_blob_bytes")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+
+            if physical_blob_bytes > 0 {
+                let logical = if logical_chunk_bytes > 0 {
+                    logical_chunk_bytes
+                } else {
+                    stats.total_bytes
+                };
+                stats.dedup_ratio = (logical as f64) / (physical_blob_bytes as f64);
             } else {
                 stats.dedup_ratio = 1.0;
             }

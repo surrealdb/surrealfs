@@ -52,8 +52,28 @@ pub struct SyntheticRouter {
     inode_to_node: RwLock<HashMap<u64, SyntheticNode>>,
     dynamic_name_to_inode: RwLock<HashMap<String, u64>>,
     current_branch: RwLock<String>,
-    connected_url: String,
-    caller: String,
+    pub connected_url: String,
+    pub caller: String,
+}
+
+pub fn encode_synthetic_path(path: &str) -> String {
+    path.trim_start_matches('/')
+        .replace('%', "%25")
+        .replace('/', "%2F")
+}
+
+pub fn decode_synthetic_path(name: &str) -> String {
+    if name.starts_with('/') {
+        name.to_string()
+    } else if name.contains("%2F") || name.contains("%2f") || name.contains("%25") {
+        let decoded = name
+            .replace("%2F", "/")
+            .replace("%2f", "/")
+            .replace("%25", "%");
+        format!("/{}", decoded)
+    } else {
+        format!("/{}", name)
+    }
 }
 
 impl SyntheticRouter {
@@ -113,11 +133,7 @@ impl SyntheticRouter {
                     name_map.insert(key, ino);
 
                     let mut node_map = self.inode_to_node.write().unwrap();
-                    let restored_path = if name.starts_with('/') {
-                        name.to_string()
-                    } else {
-                        format!("/{}", name.replace('_', "/"))
-                    };
+                    let restored_path = decode_synthetic_path(name);
                     node_map.insert(
                         ino,
                         SyntheticNode::LockFile {
@@ -156,11 +172,7 @@ impl SyntheticRouter {
                     name_map.insert(key, ino);
 
                     let mut node_map = self.inode_to_node.write().unwrap();
-                    let restored_path = if name.starts_with('/') {
-                        name.to_string()
-                    } else {
-                        format!("/{}", name.replace('_', "/"))
-                    };
+                    let restored_path = decode_synthetic_path(name);
                     node_map.insert(
                         ino,
                         SyntheticNode::HistoryFile {
@@ -212,9 +224,9 @@ impl SyntheticRouter {
                 let locks = fs.list_locks().await.unwrap_or_default();
                 let mut entries = Vec::new();
                 for l in locks {
-                    let sanitized = l.path.trim_start_matches('/').replace('/', "_");
-                    if let Some(child_ino) = self.lookup(SYNTHETIC_LOCKS_DIR, &sanitized) {
-                        entries.push((child_ino, sanitized, false));
+                    let encoded = encode_synthetic_path(&l.path);
+                    if let Some(child_ino) = self.lookup(SYNTHETIC_LOCKS_DIR, &encoded) {
+                        entries.push((child_ino, encoded, false));
                     }
                 }
                 Ok(entries)
@@ -265,7 +277,11 @@ impl SyntheticRouter {
             }
             Some(SyntheticNode::LockFile { path }) => {
                 let locks = fs.list_locks().await.unwrap_or_default();
-                if let Some(lock) = locks.into_iter().find(|l| l.path == path) {
+                let legacy_path = path.replace('_', "/");
+                if let Some(lock) = locks
+                    .into_iter()
+                    .find(|l| l.path == path || l.path == legacy_path)
+                {
                     let json = serde_json::to_string_pretty(&lock).unwrap();
                     Ok(format!("{}\n", json).into_bytes())
                 } else {
@@ -282,7 +298,11 @@ impl SyntheticRouter {
                 Ok(format!("{}\n", json).into_bytes())
             }
             Some(SyntheticNode::HistoryFile { path }) => {
-                let history = fs.history(&path, Some(20)).await.unwrap_or_default();
+                let mut history = fs.history(&path, Some(20)).await.unwrap_or_default();
+                if history.is_empty() && path.contains('_') {
+                    let legacy_path = path.replace('_', "/");
+                    history = fs.history(&legacy_path, Some(20)).await.unwrap_or_default();
+                }
                 let json = serde_json::to_string_pretty(&history).unwrap();
                 Ok(format!("{}\n", json).into_bytes())
             }
@@ -323,7 +343,10 @@ impl SyntheticRouter {
 
         match node {
             Some(SyntheticNode::LockFile { path }) => {
-                fs.release_lock(&path, &self.caller).await?;
+                if fs.release_lock(&path, &self.caller).await.is_err() && path.contains('_') {
+                    let legacy_path = path.replace('_', "/");
+                    fs.release_lock(&legacy_path, &self.caller).await?;
+                }
                 Ok(())
             }
             _ => Err(SurrealFsError::PermissionDenied(
@@ -361,6 +384,21 @@ mod tests {
 
         let branch_curr = router.lookup(SYNTHETIC_BRANCHES_DIR, "current").unwrap();
         assert_eq!(branch_curr, SYNTHETIC_BRANCH_CURRENT);
+    }
+
+    #[test]
+    fn test_synthetic_path_roundtrip_with_underscores() {
+        let original = "/docs/my_notes_v2/report_final.md";
+        let encoded = encode_synthetic_path(original);
+        assert_eq!(encoded, "docs%2Fmy_notes_v2%2Freport_final.md");
+        let decoded = decode_synthetic_path(&encoded);
+        assert_eq!(decoded, original);
+
+        // Root-level file with underscore must NOT turn underscore into slash
+        let root_file = "/my_file.txt";
+        let encoded_root = encode_synthetic_path(root_file);
+        assert_eq!(encoded_root, "my_file.txt");
+        assert_eq!(decode_synthetic_path(&encoded_root), "/my_file.txt");
     }
 
     #[tokio::test]

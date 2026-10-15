@@ -9,6 +9,10 @@ license.workspace = true
 name = "surrealfs_shim"
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = []
+preload = []
+
 [dependencies]
 surrealfs-core = { path = "../surrealfs-core" }
 tokio = { workspace = true, features = ["full"] }

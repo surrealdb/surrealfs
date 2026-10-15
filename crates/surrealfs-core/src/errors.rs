@@ -68,7 +68,9 @@ impl SurrealFsError {
             SurrealFsError::IsADirectory(msg)
         } else if msg.contains("sfs:not_empty") {
             SurrealFsError::DirectoryNotEmpty(msg)
-        } else if msg.contains("sfs:already_exists") {
+        } else if msg.contains("sfs:locked") {
+            SurrealFsError::Lock(msg)
+        } else if msg.contains("sfs:already_exists") || msg.contains("sfs:exists") {
             SurrealFsError::AlreadyExists(msg)
         } else {
             SurrealFsError::Database(msg)
