@@ -630,7 +630,7 @@ impl SurrealFs {
                     UPDATE $id SET file = <bytes>$data, content = NONE, size = bytes::len(<bytes>$data), content_type = $mime, updated_at = time::now();
                     RETURN fn::sfs_stat($path);
                 };
-                IF $if_gen IS NOT NONE AND $if_gen != 0 {
+                IF $if_gen IS NOT NONE {
                     THROW 'sfs:conflict';
                 };
                 LET $parent_id = fn::sfs_ensure_parents($path, $who);
@@ -699,9 +699,27 @@ impl SurrealFs {
 
     /// Append chunk to text file.
     pub async fn append_text(&self, path: &str, chunk: &str) -> Result<FileEntry> {
+        self.append_text_if_generation(path, chunk, None).await
+    }
+
+    /// Append chunk to text file with optional optimistic concurrency check.
+    pub async fn append_text_if_generation(
+        &self,
+        path: &str,
+        chunk: &str,
+        if_generation: Option<u64>,
+    ) -> Result<FileEntry> {
         let norm = normalize_path(path);
         if let Ok(Some(existing)) = self.stat(&norm).await {
             if existing.crdt {
+                if let Some(expected) = if_generation {
+                    if existing.generation != expected {
+                        return Err(SurrealFsError::Conflict(format!(
+                            "sfs:conflict: generation mismatch on {}",
+                            norm
+                        )));
+                    }
+                }
                 let (mut doc, next_seq, base_gen) = self.load_crdt_doc(&norm).await?;
                 let (delta, updated) = doc.apply_append(chunk)?;
                 return self
@@ -711,9 +729,10 @@ impl SurrealFs {
         }
         let mut res = self
             .db
-            .query("RETURN fn::sfs_append($path, $chunk, NONE, $caller);")
+            .query("RETURN fn::sfs_append($path, $chunk, $if_gen, $caller);")
             .bind(("path", norm.clone()))
             .bind(("chunk", chunk.to_string()))
+            .bind(("if_gen", if_generation))
             .bind(("caller", self.caller.clone()))
             .await?;
         let entry: Option<SValue> = res.take(0usize)?;
@@ -774,6 +793,18 @@ impl SurrealFs {
     /// List directory contents.
     pub async fn ls(&self, path: &str) -> Result<Vec<FileEntry>> {
         let norm = normalize_path(path);
+        if norm != "/" {
+            let target = self
+                .stat(&norm)
+                .await?
+                .ok_or_else(|| SurrealFsError::NotFound(format!("Directory not found: {}", norm)))?;
+            if !target.is_folder {
+                return Err(SurrealFsError::InvalidPath(format!(
+                    "sfs:not_a_directory: {}",
+                    norm
+                )));
+            }
+        }
         let mut res = self
             .db
             .query("RETURN fn::sfs_ls($path);")
@@ -1147,23 +1178,9 @@ impl SurrealFs {
     /// Search fine-grained file sections using vector cosine similarity.
     pub async fn search_sections(&self, vector: &[f32], limit: usize) -> Result<Vec<SectionHit>> {
         let caller = self.caller.as_deref().unwrap_or("root");
-        let sql = r#"
-            SELECT 
-                file_id.path AS path,
-                heading,
-                line_start,
-                line_end,
-                content,
-                vector::similarity::cosine(embedding, $vec) AS score
-            FROM file_section
-            WHERE embedding <|80, COSINE|> $vec
-              AND ($caller = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $caller, file_id.group))
-            ORDER BY score DESC
-            LIMIT $limit;
-        "#;
         let mut res = self
             .db
-            .query(sql)
+            .query("RETURN fn::sfs_search_sections($vec, $limit, $caller, NONE);")
             .bind(("vec", vector.to_vec()))
             .bind(("limit", limit as i64))
             .bind(("caller", caller.to_string()))
@@ -1171,7 +1188,14 @@ impl SurrealFs {
         let rows: Vec<SValue> = res.take(0usize)?;
         let mut out = Vec::new();
         for r in rows {
-            let hit: SectionHit = value_to_serde(r)?;
+            let mut val: Value = value_to_serde(r)?;
+            if let Some(obj) = val.as_object_mut() {
+                if !obj.contains_key("score") {
+                    let dist = obj.get("distance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    obj.insert("score".to_string(), serde_json::json!(1.0 - dist));
+                }
+            }
+            let hit: SectionHit = serde_json::from_value(val)?;
             out.push(hit);
         }
         Ok(out)
@@ -2355,7 +2379,11 @@ impl SurrealFs {
         for hit_val in hits {
             let hit: Value = value_to_serde(hit_val)?;
             if let Ok(entry) = serde_json::from_value::<FileEntry>(hit.clone()) {
-                let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let score = hit
+                    .get("score")
+                    .and_then(|v| v.as_f64())
+                    .or_else(|| hit.get("distance").and_then(|v| v.as_f64()).map(|d| 1.0 - d))
+                    .unwrap_or(0.0);
                 let snippet = hit
                     .get("snippet")
                     .and_then(|v| v.as_str())
@@ -2396,7 +2424,11 @@ impl SurrealFs {
         for hit_val in hits {
             let hit: Value = value_to_serde(hit_val)?;
             if let Ok(entry) = serde_json::from_value::<FileEntry>(hit.clone()) {
-                let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let score = hit
+                    .get("rrf_score")
+                    .or_else(|| hit.get("score"))
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
                 let raw_snippet = hit
                     .get("snippet")
                     .and_then(|v| v.as_str())
@@ -2427,7 +2459,8 @@ impl SurrealFs {
                 IF $file_id IS NONE { THROW 'sfs:not_found' };
                 UPDATE $file_id SET
                     embedding = $vec,
-                    embedding_model = $model,
+                    indexer_version = $model,
+                    embedded_hash = hash,
                     embedded_at = time::now();
                 RETURN true;
             };
@@ -2453,7 +2486,6 @@ impl SurrealFs {
             items.push(serde_json::json!({
                 "section_idx": idx as i64,
                 "heading": sec.heading,
-                "level": sec.level as i64,
                 "content": sec.content,
                 "line_start": sec.line_start as i64,
                 "line_end": sec.line_end as i64,
@@ -2464,18 +2496,19 @@ impl SurrealFs {
             RETURN {
                 LET $file_id = fn::sfs_resolve($path);
                 IF $file_id IS NONE { THROW 'sfs:not_found' };
+                LET $frow = (SELECT hash FROM ONLY $file_id);
+                LET $shash = $frow.hash ?? '';
                 DELETE file_section WHERE file_id = $file_id;
                 FOR $sec IN $sections {
                     CREATE file_section CONTENT {
                         file_id: $file_id,
                         section_idx: $sec.section_idx,
                         heading: $sec.heading,
-                        level: $sec.level,
                         content: $sec.content,
                         line_start: $sec.line_start,
                         line_end: $sec.line_end,
                         embedding: $sec.embedding,
-                        updated_at: time::now()
+                        source_hash: $shash
                     };
                 };
                 RETURN array::len($sections);

@@ -72,6 +72,13 @@ impl SurrealFsError {
             SurrealFsError::Lock(msg)
         } else if msg.contains("sfs:already_exists") || msg.contains("sfs:exists") {
             SurrealFsError::AlreadyExists(msg)
+        } else if msg.contains("sfs:invalid_move")
+            || msg.contains("sfs:invalid_copy")
+            || msg.contains("sfs:invalid_path")
+            || msg.contains("sfs:invalid_name")
+            || msg.contains("sfs:not_a_directory")
+        {
+            SurrealFsError::InvalidPath(msg)
         } else {
             SurrealFsError::Database(msg)
         }
