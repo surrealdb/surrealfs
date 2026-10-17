@@ -1,51 +1,9 @@
-import { Box, Group, Text, Tree, type TreeNodeData, useTree } from "@mantine/core";
+import { Box, Group, Text, Tree, useTree } from "@mantine/core";
 import { Icon, iconChevronRight, iconFile, iconOpenFolder } from "@surrealdb/ui";
 import { useEffect, useMemo, useState } from "react";
 
+import { type Node, isDir, toTreeData } from "../tree";
 import type { Entry } from "../types";
-
-interface Node extends TreeNodeData {
-    /** Absent for an implicit folder -- a path segment with no row of its own. */
-    entry?: Entry;
-    children: Node[];
-}
-
-const isDir = (node: Node) => !!node.entry?.is_folder || node.children.length > 0;
-
-/**
- * The flat `/api/tree` list as a tree, synthesising the folders that have no row
- * of their own, and sorting folders first.
- */
-function toTreeData(entries: Entry[]): Node[] {
-    const roots: Node[] = [];
-    const byPath = new Map<string, Node>();
-
-    for (const entry of entries) {
-        const parts = entry.path.split("/").filter(Boolean);
-        let prefix = "";
-        let siblings = roots;
-        parts.forEach((part, i) => {
-            prefix += `/${part}`;
-            let node = byPath.get(prefix);
-            if (!node) {
-                node = { value: prefix, label: part, children: [] };
-                byPath.set(prefix, node);
-                siblings.push(node);
-            }
-            if (i === parts.length - 1) node.entry = entry;
-            siblings = node.children;
-        });
-    }
-
-    const sort = (nodes: Node[]): Node[] => {
-        nodes.sort(
-            (a, b) => Number(isDir(b)) - Number(isDir(a)) || a.value.localeCompare(b.value),
-        );
-        for (const node of nodes) sort(node.children);
-        return nodes;
-    };
-    return sort(roots);
-}
 
 export function FileTree({
     entries,
