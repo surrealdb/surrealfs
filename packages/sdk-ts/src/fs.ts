@@ -9,6 +9,7 @@ import {
   InvalidPathError,
   IsADirectoryError,
   mapSurrealError,
+  NotADirectoryError,
   NotFoundError,
   PermissionDeniedError,
   SurrealFsError,
@@ -257,6 +258,12 @@ export class SurrealFs {
 
   async ls(path: string = "/"): Promise<FileEntry[]> {
     const clean = normalize(path);
+    if (clean !== "/") {
+      const st = await this.stat(clean);
+      if (!st.isFolder) {
+        throw new NotADirectoryError(clean);
+      }
+    }
     try {
       const res = await this.queryRaw<unknown[]>(
         "RETURN fn::sfs_ls($path);",
@@ -433,8 +440,7 @@ export class SurrealFs {
                 THROW 'sfs:is_a_directory';
             };
             IF $if_gen IS NOT NONE {
-                LET $actual = IF $existing IS NONE OR $existing.deleted_at IS NOT NONE { 0 } ELSE { $existing.generation };
-                IF $actual != $if_gen {
+                IF $existing IS NONE OR $existing.deleted_at IS NOT NONE OR $existing.generation != $if_gen {
                     THROW 'sfs:conflict';
                 };
             };

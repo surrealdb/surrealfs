@@ -4,11 +4,18 @@ import { resolve } from "node:path";
 import { type Subprocess, spawn } from "bun";
 import { Surreal } from "surrealdb";
 import {
+  AlreadyExistsError,
   ConflictError,
+  DirectoryNotEmptyError,
+  InvalidPathError,
+  IsADirectoryError,
+  NotADirectoryError,
   NotFoundError,
   PermissionDeniedError,
+  RECORD_AUTH_SCHEMA,
   SCHEMA_SQL,
   SurrealFs,
+  SurrealFsError,
   applySchema,
   createSurrealFsTools,
   fileName,
@@ -26,6 +33,15 @@ describe("SurrealFS TypeScript SDK", () => {
       );
       const canonical = readFileSync(canonicalPath, "utf8");
       expect(SCHEMA_SQL).toBe(canonical);
+    });
+
+    test("RECORD_AUTH_SCHEMA matches surrealfs/schema/record_auth.surql byte-for-byte", () => {
+      const canonicalPath = resolve(
+        import.meta.dir,
+        "../../../surrealfs/schema/record_auth.surql"
+      );
+      const canonical = readFileSync(canonicalPath, "utf8");
+      expect(RECORD_AUTH_SCHEMA).toBe(canonical);
     });
   });
 
@@ -464,6 +480,516 @@ describe("SurrealFS TypeScript SDK", () => {
       await fs.compactCrdt("/collab/notes.md");
       const read3 = await fs.readText("/collab/notes.md");
       expect(read3).toBe("# Meeting Notes\n\n- Item 1 (Approved)\n- Point 2\n");
+    });
+
+    test("POSIX negative paths and error hierarchy", async () => {
+      // NotFoundError on missing paths
+      await expect(fs.stat("/does/not/exist.txt")).rejects.toBeInstanceOf(
+        NotFoundError
+      );
+      await expect(fs.readText("/does/not/exist.txt")).rejects.toBeInstanceOf(
+        NotFoundError
+      );
+      await expect(fs.readBytes("/does/not/exist.txt")).rejects.toBeInstanceOf(
+        NotFoundError
+      );
+      await expect(fs.rm("/does/not/exist.txt")).rejects.toBeInstanceOf(
+        NotFoundError
+      );
+      await expect(
+        fs.mv("/does/not/exist.txt", "/does/not/dst.txt")
+      ).rejects.toBeInstanceOf(NotFoundError);
+      await expect(
+        fs.cp("/does/not/exist.txt", "/does/not/dst.txt")
+      ).rejects.toBeInstanceOf(NotFoundError);
+      await expect(
+        fs.chmod("/does/not/exist.txt", 0o600)
+      ).rejects.toBeInstanceOf(NotFoundError);
+      await expect(
+        fs.chgrp("/does/not/exist.txt", "eng")
+      ).rejects.toBeInstanceOf(NotFoundError);
+      await expect(
+        fs.undelete("/does/not/exist.txt")
+      ).rejects.toBeInstanceOf(NotFoundError);
+
+      // Setup directory and file for type mismatch errors
+      await fs.mkdir("/posix/dir", { parents: true });
+      await fs.writeText("/posix/dir/child.txt", "child content");
+
+      // IsADirectoryError when reading/writing a directory as a file
+      await expect(fs.readText("/posix/dir")).rejects.toBeInstanceOf(
+        IsADirectoryError
+      );
+      await expect(fs.writeText("/posix/dir", "overwrite")).rejects.toBeInstanceOf(
+        IsADirectoryError
+      );
+      await expect(fs.appendText("/posix/dir", "more")).rejects.toBeInstanceOf(
+        IsADirectoryError
+      );
+      await expect(
+        fs.writeBytes("/posix/dir", new Uint8Array([1, 2, 3]))
+      ).rejects.toBeInstanceOf(IsADirectoryError);
+
+      // NotADirectoryError when listing a regular file
+      await expect(fs.ls("/posix/dir/child.txt")).rejects.toBeInstanceOf(
+        NotADirectoryError
+      );
+
+      // DirectoryNotEmptyError when removing non-empty folder without recursive: true
+      await expect(
+        fs.rm("/posix/dir", { recursive: false })
+      ).rejects.toBeInstanceOf(DirectoryNotEmptyError);
+
+      // mkdir without parents: true when intermediate parent does not exist
+      await expect(
+        fs.mkdir("/posix/missing_parent/leaf", { parents: false })
+      ).rejects.toBeInstanceOf(NotFoundError);
+
+      // mkdir on a path that already exists as a regular file
+      await expect(
+        fs.mkdir("/posix/dir/child.txt", { parents: false })
+      ).rejects.toBeInstanceOf(AlreadyExistsError);
+
+      // Moving a folder into its own subtree is rejected
+      await expect(
+        fs.mv("/posix/dir", "/posix/dir/sub/into_self")
+      ).rejects.toBeInstanceOf(InvalidPathError);
+
+      // editText negative cases: empty oldText, missing pattern, ambiguous multi-match
+      await expect(
+        fs.editText("/posix/dir/child.txt", "", "x")
+      ).rejects.toBeInstanceOf(InvalidPathError);
+      await expect(
+        fs.editText("/posix/dir/child.txt", "nonexistent_substring", "x")
+      ).rejects.toBeInstanceOf(ConflictError);
+
+      await fs.writeText("/posix/dir/dup.txt", "repeat repeat");
+      await expect(
+        fs.editText("/posix/dir/dup.txt", "repeat", "once", {
+          replaceAll: false,
+        })
+      ).rejects.toBeInstanceOf(ConflictError);
+      const replacedAll = await fs.editText(
+        "/posix/dir/dup.txt",
+        "repeat",
+        "once",
+        { replaceAll: true }
+      );
+      expect(replacedAll.generation).toBe(2);
+      expect(await fs.readText("/posix/dir/dup.txt")).toBe("once once");
+    });
+
+    test("lsRecursive lists all nested entries", async () => {
+      await fs.mkdir("/tree_rec/a/b", { parents: true });
+      await fs.writeText("/tree_rec/a/one.txt", "1");
+      await fs.writeText("/tree_rec/a/b/two.txt", "2");
+
+      const all = await fs.lsRecursive("/tree_rec");
+      const paths = all.map((e) => e.path);
+      expect(paths).toContain("/tree_rec/a");
+      expect(paths).toContain("/tree_rec/a/one.txt");
+      expect(paths).toContain("/tree_rec/a/b");
+      expect(paths).toContain("/tree_rec/a/b/two.txt");
+    });
+
+    test("optimistic concurrency (ifGeneration) across writeText, appendText, editText, and writeBytes", async () => {
+      // writeText with ifGeneration on non-existent file throws ConflictError
+      await expect(
+        fs.writeText("/occ/doc.txt", "gen1", { ifGeneration: 1 })
+      ).rejects.toBeInstanceOf(ConflictError);
+
+      const created = await fs.writeText("/occ/doc.txt", "gen1");
+      expect(created.generation).toBe(1);
+
+      // writeText with wrong generation fails
+      await expect(
+        fs.writeText("/occ/doc.txt", "bad", { ifGeneration: 99 })
+      ).rejects.toBeInstanceOf(ConflictError);
+      expect(await fs.readText("/occ/doc.txt")).toBe("gen1");
+
+      // writeText with matching generation succeeds
+      const updated = await fs.writeText("/occ/doc.txt", "gen2", {
+        ifGeneration: 1,
+      });
+      expect(updated.generation).toBe(2);
+
+      // appendText with wrong generation fails, matching succeeds
+      await expect(
+        fs.appendText("/occ/doc.txt", "!", { ifGeneration: 1 })
+      ).rejects.toBeInstanceOf(ConflictError);
+      const appended = await fs.appendText("/occ/doc.txt", "!", {
+        ifGeneration: 2,
+      });
+      expect(appended.generation).toBe(3);
+      expect(await fs.readText("/occ/doc.txt")).toBe("gen2!");
+
+      // editText with wrong generation fails, matching succeeds
+      await expect(
+        fs.editText("/occ/doc.txt", "gen2!", "gen4", { ifGeneration: 2 })
+      ).rejects.toBeInstanceOf(ConflictError);
+      const edited = await fs.editText("/occ/doc.txt", "gen2!", "gen4", {
+        ifGeneration: 3,
+      });
+      expect(edited.generation).toBe(4);
+      expect(await fs.readText("/occ/doc.txt")).toBe("gen4");
+
+      // writeBytes with ifGeneration on non-existent file fails, then succeeds on existing
+      await expect(
+        fs.writeBytes("/occ/bin.dat", new Uint8Array([1, 2]), {
+          ifGeneration: 1,
+        })
+      ).rejects.toBeInstanceOf(ConflictError);
+      const b1 = await fs.writeBytes("/occ/bin.dat", new Uint8Array([1, 2]));
+      expect(b1.generation).toBe(1);
+      await expect(
+        fs.writeBytes("/occ/bin.dat", new Uint8Array([3, 4]), {
+          ifGeneration: 9,
+        })
+      ).rejects.toBeInstanceOf(ConflictError);
+      const b2 = await fs.writeBytes(
+        "/occ/bin.dat",
+        new Uint8Array([3, 4]),
+        { ifGeneration: 1 }
+      );
+      expect(b2.generation).toBe(2);
+    });
+
+    test("multi-user POSIX permissions and group ACL enforcement", async () => {
+      const fsAlice = new SurrealFs(db, { user: "alice" });
+      const fsBob = new SurrealFs(db, { user: "bob" });
+      const fsCarol = new SurrealFs(db, { user: "carol" });
+
+      // Root creates /acl shared directory (0o777) so alice can create files inside
+      await fs.mkdir("/acl", { parents: true });
+      await fs.chmod("/acl", 0o777);
+
+      // Alice creates a private file (0o600)
+      await fsAlice.writeText("/acl/secret.txt", "alice eyes only");
+      await fsAlice.chmod("/acl/secret.txt", 0o600);
+
+      // Bob cannot read, write, append, edit, chmod, or rm Alice's 0o600 file
+      await expect(fsBob.readText("/acl/secret.txt")).rejects.toBeInstanceOf(
+        PermissionDeniedError
+      );
+      await expect(
+        fsBob.writeText("/acl/secret.txt", "hacked")
+      ).rejects.toBeInstanceOf(PermissionDeniedError);
+      await expect(
+        fsBob.appendText("/acl/secret.txt", "hacked")
+      ).rejects.toBeInstanceOf(PermissionDeniedError);
+      await expect(
+        fsBob.chmod("/acl/secret.txt", 0o666)
+      ).rejects.toBeInstanceOf(PermissionDeniedError);
+      await expect(fsBob.rm("/acl/secret.txt")).rejects.toBeInstanceOf(
+        PermissionDeniedError
+      );
+
+      // Alice sets group to 'research' and mode to 0o640 (group read)
+      await db.query(
+        `CREATE user_group CONTENT { name: 'research', description: 'Research team' };
+         CREATE group_member CONTENT { group_name: 'research', user_id: 'bob' };`
+      );
+      await fsAlice.chgrp("/acl/secret.txt", "research");
+      await fsAlice.chmod("/acl/secret.txt", 0o640);
+
+      // Bob (in group 'research') can now read, but still cannot write; Carol (not in group) cannot read
+      expect(await fsBob.readText("/acl/secret.txt")).toBe("alice eyes only");
+      await expect(
+        fsBob.writeText("/acl/secret.txt", "bob edit")
+      ).rejects.toBeInstanceOf(PermissionDeniedError);
+      await expect(fsCarol.readText("/acl/secret.txt")).rejects.toBeInstanceOf(
+        PermissionDeniedError
+      );
+
+      // Alice grants group write (0o660) -> Bob can now write and append, Carol still denied
+      await fsAlice.chmod("/acl/secret.txt", 0o660);
+      await fsBob.appendText("/acl/secret.txt", " + bob contribution");
+      expect(await fsAlice.readText("/acl/secret.txt")).toBe(
+        "alice eyes only + bob contribution"
+      );
+      await expect(
+        fsCarol.writeText("/acl/secret.txt", "carol edit")
+      ).rejects.toBeInstanceOf(PermissionDeniedError);
+
+      // Home directory anti-squatting: Bob cannot write into /home/alice
+      await fsAlice.writeText("/home/alice/notes.md", "my home note");
+      await expect(
+        fsBob.writeText("/home/alice/intrude.md", "nope")
+      ).rejects.toBeInstanceOf(PermissionDeniedError);
+    });
+
+    test("record-auth database user login and table-level permission isolation", async () => {
+      // Apply record_auth schema
+      await applySchema(db, { recordAuth: true });
+
+      // Provision record user 'dave' and 'erin' as admin
+      await db.query(
+        `UPSERT type::record('user', 'dave') CONTENT { password: crypto::argon2::generate('dave-pass-123') };
+         UPSERT type::record('user', 'erin') CONTENT { password: crypto::argon2::generate('erin-pass-123') };`
+      );
+
+      // Connect a fresh client signed in as record user 'dave'
+      const daveDb = new Surreal();
+      await daveDb.connect(url);
+      await daveDb.use({ namespace: "test", database: "test" });
+      await daveDb.signin({
+        namespace: "test",
+        database: "test",
+        access: "account",
+        variables: { user: "dave", pass: "dave-pass-123" },
+      });
+
+      const erinDb = new Surreal();
+      await erinDb.connect(url);
+      await erinDb.use({ namespace: "test", database: "test" });
+      await erinDb.signin({
+        namespace: "test",
+        database: "test",
+        access: "account",
+        variables: { user: "erin", pass: "erin-pass-123" },
+      });
+
+      try {
+        const fsDave = new SurrealFs(daveDb, { user: "dave" });
+        const fsErin = new SurrealFs(erinDb, { user: "erin" });
+
+        await fsDave.writeText("/home/dave/diary.md", "Dear diary");
+        await fsDave.chmod("/home/dave/diary.md", 0o600);
+        expect(await fsDave.readText("/home/dave/diary.md")).toBe("Dear diary");
+
+        // Erin is blocked even if she tries to read /home/dave/diary.md
+        await expect(
+          fsErin.readText("/home/dave/diary.md")
+        ).rejects.toBeInstanceOf(SurrealFsError);
+
+        // Even if Erin spoofs caller='dave' in SurrealFs options, fn::sfs_caller($caller) uses $auth ('erin')!
+        const fsErinSpoof = new SurrealFs(erinDb, { user: "dave" });
+        await expect(
+          fsErinSpoof.readText("/home/dave/diary.md")
+        ).rejects.toBeInstanceOf(SurrealFsError);
+      } finally {
+        await daveDb.close();
+        await erinDb.close();
+      }
+    });
+
+    test("search modes (any vs all), searchSemantic, and searchHybrid", async () => {
+      await fs.writeText(
+        "/search_modes/alpha.md",
+        "neural network architecture with transformer attention layers"
+      );
+      await fs.writeText(
+        "/search_modes/beta.md",
+        "neural compiler optimization pass for gpu kernels"
+      );
+
+      const anyHits = await fs.search("neural transformer", { match: "any" });
+      expect(anyHits.some((h) => h.path === "/search_modes/alpha.md")).toBe(
+        true
+      );
+      expect(anyHits.some((h) => h.path === "/search_modes/beta.md")).toBe(
+        true
+      );
+
+      const allHits = await fs.search("neural transformer", { match: "all" });
+      expect(allHits.some((h) => h.path === "/search_modes/alpha.md")).toBe(
+        true
+      );
+      expect(allHits.some((h) => h.path === "/search_modes/beta.md")).toBe(
+        false
+      );
+
+      // Attach 1536-dim embeddings to alpha.md and beta.md
+      const vecAlpha = Array.from({ length: 1536 }, (_, i) =>
+        i === 1 ? 1.0 : 0.0
+      );
+      const vecBeta = Array.from({ length: 1536 }, (_, i) =>
+        i === 2 ? 1.0 : 0.0
+      );
+      const statAlpha = await fs.stat("/search_modes/alpha.md");
+      const statBeta = await fs.stat("/search_modes/beta.md");
+      await db.query("UPDATE $id SET embedding = $vec;", {
+        id: statAlpha.id,
+        vec: vecAlpha,
+      });
+      await db.query("UPDATE $id SET embedding = $vec;", {
+        id: statBeta.id,
+        vec: vecBeta,
+      });
+
+      const semHits = await fs.searchSemantic(vecAlpha, { limit: 5 });
+      expect(semHits.length).toBeGreaterThanOrEqual(1);
+      expect(semHits[0].path).toBe("/search_modes/alpha.md");
+
+      const hybHits = await fs.searchHybrid("transformer", vecAlpha, {
+        limit: 5,
+        match: "any",
+      });
+      expect(hybHits.length).toBeGreaterThanOrEqual(1);
+      expect(hybHits[0].path).toBe("/search_modes/alpha.md");
+    });
+
+    test("discardWorkspace and listLocks", async () => {
+      await fs.writeText("/ws_discard/base.txt", "original");
+      await fs.forkWorkspace("temp-branch", "main");
+      await fs.writeWorkspaceText("temp-branch", "/ws_discard/base.txt", "changed");
+
+      const discarded = await fs.discardWorkspace("temp-branch");
+      expect(discarded.discarded).toBe("temp-branch");
+      expect(await fs.readText("/ws_discard/base.txt")).toBe("original");
+
+      const workspaces = await fs.listWorkspaces();
+      expect(workspaces.some((w) => w.name === "temp-branch")).toBe(false);
+
+      // listLocks returns active locks
+      await fs.acquireLock("/ws_discard/base.txt", {
+        ttlSeconds: 60,
+        reason: "testing listLocks",
+      });
+      const locks = await fs.listLocks();
+      expect(locks.some((l) => l.path === "/ws_discard/base.txt")).toBe(true);
+      await fs.releaseLock("/ws_discard/base.txt");
+    });
+
+    test("watch delivers live events and unsubscribes cleanly", async () => {
+      const events: Array<{ action: string; path: string }> = [];
+      const sub = await fs.watch("/watched/**", (ev) => {
+        events.push({ action: ev.action, path: ev.path });
+      });
+
+      try {
+        await fs.writeText("/watched/live.txt", "hello live");
+        // Allow async live notification to arrive
+        const deadline = Date.now() + 2000;
+        while (events.length === 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        expect(events.some((e) => e.path === "/watched/live.txt")).toBe(true);
+      } finally {
+        await sub.unsubscribe();
+      }
+    });
+
+    test("complete AI toolset execution coverage", async () => {
+      const tools = createSurrealFsTools(fs);
+
+      // mkdir + write_file + append_file + edit_file + stat
+      await tools.mkdir.execute({ path: "/aitools/sub", parents: true });
+      await tools.write_file.execute({
+        path: "/aitools/sub/note.md",
+        content: "Line 1\n",
+      });
+      await tools.append_file.execute({
+        path: "/aitools/sub/note.md",
+        suffix: "Line 2\n",
+      });
+      await tools.edit_file.execute({
+        path: "/aitools/sub/note.md",
+        old_text: "Line 2",
+        new_text: "Line Two",
+      });
+      const st = await tools.stat.execute({ path: "/aitools/sub/note.md" });
+      expect(st.generation).toBe(3);
+
+      // glob + tree
+      const globRes = await tools.glob.execute({ pattern: "/aitools/**/*.md" });
+      expect(globRes.map((e: any) => e.path)).toEqual(["/aitools/sub/note.md"]);
+      const treeRes = await tools.tree.execute({ path: "/aitools" });
+      expect(treeRes).toContain("/aitools/sub/note.md");
+
+      // history + diff + restore
+      const hist = await tools.history.execute({ path: "/aitools/sub/note.md" });
+      expect(hist.length).toBeGreaterThanOrEqual(2);
+      const diffTxt = await tools.diff.execute({
+        path: "/aitools/sub/note.md",
+        from_gen: 1,
+        to_gen: 2,
+      });
+      expect(diffTxt).toContain("+Line 2");
+      await tools.restore.execute({ path: "/aitools/sub/note.md", version: 1 });
+      expect(await tools.read_file.execute({ path: "/aitools/sub/note.md" })).toBe(
+        "Line 1\n"
+      );
+
+      // cp + mv + chmod + rm + undelete
+      await tools.cp.execute({
+        src: "/aitools/sub/note.md",
+        dst: "/aitools/sub/copy.md",
+      });
+      await tools.mv.execute({
+        src: "/aitools/sub/copy.md",
+        dst: "/aitools/sub/moved.md",
+      });
+      const mod = await tools.chmod.execute({
+        path: "/aitools/sub/moved.md",
+        mode: 0o640,
+      });
+      expect(mod.mode).toBe(0o640);
+      await tools.rm.execute({ path: "/aitools/sub/moved.md" });
+      expect(await fs.exists("/aitools/sub/moved.md")).toBe(false);
+      await tools.undelete.execute({ path: "/aitools/sub/moved.md" });
+      expect(await fs.exists("/aitools/sub/moved.md")).toBe(true);
+
+      // relate + backlinks
+      await tools.relate.execute({
+        src: "/aitools/sub/moved.md",
+        relation: "references",
+        dst: "/aitools/sub/note.md",
+      });
+      const bks = await tools.backlinks.execute({
+        path: "/aitools/sub/note.md",
+        relation: "references",
+      });
+      expect(bks.length).toBe(1);
+
+      // search_text + search_semantic + search_hybrid + search_sections
+      const stHits = await tools.search_text.execute({
+        query: "entanglement",
+        limit: 5,
+      });
+      expect(stHits.length).toBeGreaterThanOrEqual(1);
+      const vec = Array.from({ length: 1536 }, (_, i) => (i === 0 ? 1.0 : 0.0));
+      const semHits = await tools.search_semantic.execute({
+        vector: vec,
+        limit: 5,
+      });
+      expect(Array.isArray(semHits)).toBe(true);
+      const hybHits = await tools.search_hybrid.execute({
+        query: "entanglement",
+        vector: vec,
+        limit: 5,
+      });
+      expect(hybHits.length).toBeGreaterThanOrEqual(1);
+      const secHits = await tools.search_sections.execute({
+        vector: vec,
+        path_prefix: "/corpus",
+        limit: 5,
+      });
+      expect(secHits.length).toBeGreaterThanOrEqual(1);
+
+      // acquire_lease + release_lease
+      const lease = await tools.acquire_lease.execute({
+        path: "/aitools/sub/note.md",
+        ttl_seconds: 30,
+        reason: "tool test",
+      });
+      expect(lease.holder).toBe("root");
+      const rel = await tools.release_lease.execute({
+        path: "/aitools/sub/note.md",
+      });
+      expect(rel).toBe(true);
+
+      // fork_workspace + merge_workspace
+      const forked = await tools.fork_workspace.execute({
+        dst_branch: "ai-branch",
+        src_branch: "main",
+      });
+      expect(forked.workspace).toBe("ai-branch");
+      const merged = await tools.merge_workspace.execute({
+        branch: "ai-branch",
+        target: "main",
+      });
+      expect(merged.status).toBe("ok");
     });
   });
 });

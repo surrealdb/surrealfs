@@ -174,11 +174,20 @@ export function createSurrealFsTools(fs: SurrealFs): Record<string, ToolDefiniti
         properties: {
           path: { type: "string", description: "Path to restore" },
           generation: { type: "number", description: "Target generation number" },
+          version: { type: "number", description: "Alias for generation" },
         },
         required: ["path", "generation"],
       },
-      execute: async ({ path, generation }: { path: string; generation: number }) => {
-        const entry = await fs.restore(path, generation);
+      execute: async ({
+        path,
+        generation,
+        version,
+      }: {
+        path: string;
+        generation?: number;
+        version?: number;
+      }) => {
+        const entry = await fs.restore(path, (generation ?? version)!);
         return { path: entry.path, generation: entry.generation };
       },
     },
@@ -214,15 +223,25 @@ export function createSurrealFsTools(fs: SurrealFs): Record<string, ToolDefiniti
       },
       execute: async ({
         source_path,
+        source,
+        src,
         relation,
         target_path,
+        target,
+        dst,
       }: {
-        source_path: string;
+        source_path?: string;
+        source?: string;
+        src?: string;
         relation: string;
-        target_path: string;
+        target_path?: string;
+        target?: string;
+        dst?: string;
       }) => {
-        await fs.relate(source_path, relation, target_path);
-        return { source: source_path, relation, target: target_path };
+        const s = (source_path ?? source ?? src)!;
+        const t = (target_path ?? target ?? dst)!;
+        await fs.relate(s, relation, t);
+        return { source: s, relation, target: t };
       },
     },
 
@@ -406,6 +425,183 @@ export function createSurrealFsTools(fs: SurrealFs): Record<string, ToolDefiniti
         target?: string;
       }) => {
         return await fs.mergeWorkspace(branch, target);
+      },
+    },
+
+    glob: {
+      description: "Find files matching a glob pattern",
+      parameters: {
+        type: "object",
+        properties: {
+          pattern: { type: "string", description: "Glob pattern (e.g. /notes/**/*.md)" },
+        },
+        required: ["pattern"],
+      },
+      execute: async ({ pattern }: { pattern: string }) => {
+        return await fs.glob(pattern);
+      },
+    },
+
+    tree: {
+      description: "Render a directory tree starting at path",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Root path (default: /)" },
+        },
+        required: [],
+      },
+      execute: async ({ path = "/" }: { path?: string }) => {
+        return await fs.tree(path);
+      },
+    },
+
+    mkdir: {
+      description: "Create a directory",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Directory path" },
+          parents: { type: "boolean", description: "Create missing parent directories" },
+        },
+        required: ["path"],
+      },
+      execute: async ({ path, parents = true }: { path: string; parents?: boolean }) => {
+        return await fs.mkdir(path, { parents });
+      },
+    },
+
+    rm: {
+      description: "Soft-delete a file or directory",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to delete" },
+          recursive: { type: "boolean", description: "Delete directory contents recursively" },
+        },
+        required: ["path"],
+      },
+      execute: async ({ path, recursive = false }: { path: string; recursive?: boolean }) => {
+        await fs.rm(path, { recursive });
+        return { deleted: path };
+      },
+    },
+
+    mv: {
+      description: "Move or rename a file or directory",
+      parameters: {
+        type: "object",
+        properties: {
+          src: { type: "string", description: "Source path" },
+          dst: { type: "string", description: "Destination path" },
+        },
+        required: ["src", "dst"],
+      },
+      execute: async ({ src, dst }: { src: string; dst: string }) => {
+        return await fs.mv(src, dst);
+      },
+    },
+
+    stat: {
+      description: "Inspect metadata of a file or directory",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Path to inspect" },
+        },
+        required: ["path"],
+      },
+      execute: async ({ path }: { path: string }) => {
+        return await fs.stat(path);
+      },
+    },
+
+    history: {
+      description: "List version history for a file",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path" },
+          limit: { type: "number", description: "Maximum versions to return" },
+        },
+        required: ["path"],
+      },
+      execute: async ({ path, limit }: { path: string; limit?: number }) => {
+        return await fs.history(path, limit);
+      },
+    },
+
+    diff: {
+      description: "Compute unified diff between two generations of a file",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "File path" },
+          from_gen: { type: "number", description: "Base generation" },
+          to_gen: { type: "number", description: "Target generation (optional, defaults to current)" },
+        },
+        required: ["path", "from_gen"],
+      },
+      execute: async ({
+        path,
+        from_gen,
+        to_gen,
+      }: {
+        path: string;
+        from_gen: number;
+        to_gen?: number;
+      }) => {
+        return await fs.diff(path, from_gen, to_gen);
+      },
+    },
+
+    search_semantic: {
+      description: "Vector semantic search over file embeddings",
+      parameters: {
+        type: "object",
+        properties: {
+          vector: {
+            type: "array",
+            items: { type: "number" },
+            description: "Query embedding vector",
+          },
+          limit: { type: "number", description: "Max results" },
+        },
+        required: ["vector"],
+      },
+      execute: async ({ vector, limit = 10 }: { vector: number[]; limit?: number }) => {
+        return await fs.searchSemantic(vector, { limit });
+      },
+    },
+
+    search_hybrid: {
+      description: "Hybrid BM25 + vector search using Reciprocal Rank Fusion",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Full-text search query" },
+          vector: {
+            type: "array",
+            items: { type: "number" },
+            description: "Query embedding vector",
+          },
+          limit: { type: "number", description: "Max results" },
+          match: { type: "string", enum: ["any", "all"], description: "Match mode" },
+        },
+        required: ["query", "vector"],
+      },
+      execute: async ({
+        query,
+        vector,
+        limit = 10,
+        match = "any",
+      }: {
+        query: string;
+        vector: number[];
+        limit?: number;
+        match?: "any" | "all";
+      }) => {
+        return await fs.searchHybrid(query, vector, { limit, match });
       },
     },
   };
