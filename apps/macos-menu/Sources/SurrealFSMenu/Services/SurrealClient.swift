@@ -16,6 +16,7 @@ public final class SurrealClient: @unchecked Sendable {
     private let queue = DispatchQueue(label: "io.surrealfs.client")
     
     private var _state: SurrealConnectionState = .disconnected
+    private var currentCaller: String = "root"
     public var state: SurrealConnectionState {
         queue.sync { _state }
     }
@@ -25,7 +26,11 @@ public final class SurrealClient: @unchecked Sendable {
     }
     
     public func connect(profile: ConnectionProfile, secret: String? = nil) async throws {
-        queue.sync { _state = .connecting }
+        let caller = profile.username.isEmpty ? "root" : profile.username
+        queue.sync {
+            _state = .connecting
+            currentCaller = caller
+        }
         
         guard let url = URL(string: profile.endpoint) else {
             queue.sync { _state = .error(message: "Invalid URL") }
@@ -73,6 +78,7 @@ public final class SurrealClient: @unchecked Sendable {
             }
             do {
                 _ = try await sendRpc(method: "signin", params: [authPayload])
+                _ = try await sendRpc(method: "use", params: [profile.namespace, profile.database])
             } catch {
                 queue.sync { _state = .error(message: error.localizedDescription) }
                 throw error
@@ -101,8 +107,8 @@ public final class SurrealClient: @unchecked Sendable {
         let items: [[String: Any]]
         if let envelope = response as? [[String: Any]],
            let first = envelope.first,
-           let result = first["result"] as? [[String: Any]] {
-            items = result
+           first["status"] != nil {
+            items = (first["result"] as? [[String: Any]]) ?? []
         } else if let direct = response as? [[String: Any]] {
             items = direct
         } else {
@@ -111,10 +117,11 @@ public final class SurrealClient: @unchecked Sendable {
         
         return items.map { item in
             let path = item["path"] as? String ?? ""
+            let snippet = (item["snippet"] as? String) ?? (item["content"] as? String) ?? ""
             return SearchResult(
                 path: path,
                 filename: (path as NSString).lastPathComponent,
-                snippet: item["snippet"] as? String ?? "",
+                snippet: snippet,
                 score: item["score"] as? Double ?? 0.0,
                 matchType: "fulltext"
             )
@@ -122,30 +129,30 @@ public final class SurrealClient: @unchecked Sendable {
     }
     
     public func search(query: String, limit: Int = 20) async throws -> [SearchResult] {
-        let isConn: Bool = queue.sync {
-            if case .connected = _state { return true }
-            return false
+        let (isConn, caller): (Bool, String) = queue.sync {
+            if case .connected = _state { return (true, currentCaller) }
+            return (false, currentCaller)
         }
         
         guard isConn else {
             return []
         }
         
-        let sql = "RETURN fn::sfs_search_text($q, $limit, 'any', NONE);"
-        let response = try await queryRaw(sql: sql, vars: ["q": query, "limit": limit])
+        let sql = "RETURN fn::sfs_search_text($q, $limit, 'any', $caller);"
+        let response = try await queryRaw(sql: sql, vars: ["q": query, "limit": limit, "caller": caller])
         return Self.parseSearchResponse(response)
     }
     
     public func undo(path: String, generation: Int) async throws -> Bool {
-        let isConn: Bool = queue.sync {
-            if case .connected = _state { return true }
-            return false
+        let (isConn, caller): (Bool, String) = queue.sync {
+            if case .connected = _state { return (true, currentCaller) }
+            return (false, currentCaller)
         }
         
         guard isConn else { return false }
         let prevGen = max(1, generation - 1)
-        let sql = "RETURN fn::sfs_restore($path, $version, NONE);"
-        _ = try await queryRaw(sql: sql, vars: ["path": path, "version": prevGen])
+        let sql = "RETURN fn::sfs_restore($path, $version, $caller);"
+        _ = try await queryRaw(sql: sql, vars: ["path": path, "version": prevGen, "caller": caller])
         return true
     }
     
@@ -192,8 +199,9 @@ public final class SurrealClient: @unchecked Sendable {
             "params": params
         ]
         
-        let data = try JSONSerialization.data(withJSONObject: payload)
-        let message = URLSessionWebSocketTask.Message.data(data)
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
+        let jsonString = String(data: data, encoding: .utf8) ?? "{}"
+        let message = URLSessionWebSocketTask.Message.string(jsonString)
         
         return try await withCheckedThrowingContinuation { continuation in
             queue.sync {
@@ -245,6 +253,9 @@ public final class SurrealClient: @unchecked Sendable {
         let continuation: CheckedContinuation<Any, Error>? = queue.sync {
             if let id = json["id"] as? Int {
                 return pendingRequests.removeValue(forKey: id)
+            }
+            if json["error"] != nil, let firstKey = pendingRequests.keys.sorted().first {
+                return pendingRequests.removeValue(forKey: firstKey)
             }
             return nil
         }
