@@ -402,3 +402,150 @@ console.log('TS_CRDT_VERIFIED');
 """
     ts_verify_out = run_ts_code(ts_verify, surreal_url, namespace)
     assert "TS_CRDT_VERIFIED" in ts_verify_out
+
+
+@requires_cargo_and_bun
+@pytest.mark.asyncio
+async def test_cross_language_remote_server_rpc_gateway(fs, surreal_url, namespace):
+    """Verify Python, TS, and Rust remote RPC clients against surrealfs-rs gateway."""
+    import asyncio
+    import socket
+
+    import httpx
+
+    from surrealfs.fs import ROOT, SurrealFs
+
+    _ensure_rust_cli()
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    gateway_addr = f"127.0.0.1:{port}"
+    gateway_http = f"http://{gateway_addr}"
+    gateway_sfs = f"sfs+http://{gateway_addr}"
+
+    proc = subprocess.Popen(
+        [
+            str(RUST_CLI_BIN),
+            "--url",
+            surreal_url,
+            "--ns",
+            namespace,
+            "--db",
+            "test",
+            "--user",
+            "root",
+            "--pass",
+            "root",
+            "serve",
+            "gateway",
+            "--addr",
+            gateway_addr,
+        ],
+        cwd=REPO_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    try:
+        # Wait for gateway /api/health to respond 200
+        ready = False
+        async with httpx.AsyncClient(timeout=2.0) as client:
+            for _ in range(50):
+                if proc.poll() is not None:
+                    out, err = proc.communicate()
+                    raise RuntimeError(f"Gateway exited early: {err}\n{out}")
+                try:
+                    r = await client.get(f"{gateway_http}/api/health")
+                    if r.status_code == 200:
+                        ready = True
+                        break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.1)
+        assert ready, f"Gateway did not become ready on {gateway_http}"
+
+        # 1. Python SDK in remote server mode (no direct DB connection)
+        remote_py = SurrealFs.from_server(gateway_http, user=ROOT)
+        e1 = await remote_py.write_text("/gateway/spec.md", "# Gateway Spec\nLine 1\n")
+        assert e1.path == "/gateway/spec.md"
+        assert e1.generation == 1
+
+        await remote_py.write_bytes("/gateway/bin.dat", b"\x00\x01\x02\xff")
+        assert await remote_py.read_bytes("/gateway/bin.dat") == b"\x00\x01\x02\xff"
+
+        # 2. TypeScript SDK in remote server mode (SurrealFs.connectServer)
+        ts_remote_script = f"""
+import {{ SurrealFs }} from './packages/sdk-ts/src/index.ts';
+
+const rfs = SurrealFs.connectServer({{ url: '{gateway_sfs}', user: 'root' }});
+const text = await rfs.readText('/gateway/spec.md');
+if (!text.includes('# Gateway Spec')) {{
+    throw new Error('TS remote readText mismatch: ' + text);
+}}
+const updated = await rfs.appendText(
+    '/gateway/spec.md',
+    'Appended via TS connectServer\\n',
+    1,
+);
+if (updated.generation !== 2) {{
+    throw new Error('Expected generation 2, got ' + updated.generation);
+}}
+const raw = await rfs.readBytes('/gateway/bin.dat');
+if (raw.byteLength !== 4 || raw[3] !== 255) {{
+    throw new Error('TS remote readBytes mismatch: ' + JSON.stringify(Array.from(raw)));
+}}
+await rfs.acquireLock('/gateway/spec.md', 'ts-remote-agent', 60, 'remote-rpc-test');
+console.log('TS_REMOTE_SERVER_OK');
+"""
+        res_ts = subprocess.run(
+            ["bun", "-e", ts_remote_script],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert res_ts.returncode == 0, (
+            f"TS remote script failed: {res_ts.stderr}\n{res_ts.stdout}"
+        )
+        assert "TS_REMOTE_SERVER_OK" in res_ts.stdout
+
+        # 3. Rust CLI in remote client mode (--url sfs+http://...)
+        cat_out = run_rust_cli(["cat", "/gateway/spec.md"], gateway_sfs, namespace)
+        assert "# Gateway Spec" in cat_out
+        assert "Appended via TS connectServer" in cat_out
+
+        locks_out = run_rust_cli(["lock", "list"], gateway_sfs, namespace)
+        assert "/gateway/spec.md" in locks_out
+
+        run_rust_cli(
+            [
+                "write",
+                "/gateway/rust_remote.txt",
+                "Written via Rust RemoteServerClient",
+            ],
+            gateway_sfs,
+            namespace,
+        )
+
+        # 4. Verify back in Python remote client
+        final_text = await remote_py.read_text("/gateway/spec.md")
+        assert "Appended via TS connectServer" in final_text
+        final_stat = await remote_py.stat("/gateway/spec.md")
+        assert final_stat.generation == 2
+
+        rust_remote_text = await remote_py.read_text("/gateway/rust_remote.txt")
+        assert rust_remote_text == "Written via Rust RemoteServerClient"
+
+        entries = await remote_py.ls("/gateway")
+        names = {e.filename for e in entries}
+        assert {"spec.md", "bin.dat", "rust_remote.txt"}.issubset(names)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+

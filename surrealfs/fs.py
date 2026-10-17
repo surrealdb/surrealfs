@@ -284,7 +284,9 @@ class _ServerRpcClient:
             elif isinstance(v, datetime):
                 out_vars[k] = v.isoformat()
             elif k == "payload" and isinstance(v, dict):
-                payload_copy = dict(v)
+                payload_copy = {
+                    pk: pv for pk, pv in v.items() if pv is not None
+                }
                 patches: list[str] = []
                 if isinstance(payload_copy.get("parent"), RecordID):
                     p_rec: RecordID = payload_copy.pop("parent")
@@ -307,6 +309,7 @@ class _ServerRpcClient:
         headers = {
             "Accept": "application/json",
             "Content-Type": "application/json",
+            "X-SurrealFS-User": self.user,
             "X-SurrealFS-Caller": self.user,
         }
         if self.token:
@@ -321,7 +324,8 @@ class _ServerRpcClient:
             data = resp.json()
             if resp.status_code >= 400 and "error" in data:
                 return {"error": {"message": str(data["error"])}}
-            return {"result": data.get("results", [])}
+            stmts = data.get("result") if "result" in data else data.get("results", [])
+            return {"result": stmts}
 
     async def close(self) -> None:
         pass

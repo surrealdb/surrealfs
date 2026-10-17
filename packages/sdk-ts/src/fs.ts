@@ -146,23 +146,28 @@ class ServerRpcClient {
     if (this.token) {
       headers["Authorization"] = `Bearer ${this.token}`;
     }
+    const serializedVars: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(vars)) {
+      serializedVars[k] = v instanceof Uint8Array ? Array.from(v) : v;
+    }
     const resp = await fetch(this.rpcUrl, {
       method: "POST",
       headers,
       body: JSON.stringify({
         sql,
-        vars,
+        vars: serializedVars,
         caller: this.user,
       }),
     });
     const body = (await resp.json()) as {
       error?: string;
+      result?: Array<{ status?: string; result?: unknown }>;
       results?: Array<{ status?: string; result?: unknown }>;
     };
     if (!resp.ok || body.error) {
       throw new Error(body.error || `Server RPC error (${resp.status})`);
     }
-    const stmts = body.results ?? [];
+    const stmts = body.result ?? body.results ?? [];
     const out: unknown[] = [];
     for (const stmt of stmts) {
       if (stmt.status === "ERR") {

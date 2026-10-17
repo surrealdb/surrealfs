@@ -325,7 +325,7 @@ impl<'a> QueryBuilder<'a> {
                     if v.is_null() {
                         q = q.bind((k, Option::<String>::None));
                     } else {
-                        q = q.bind((k, v));
+                        q = q.bind((k, strip_json_nulls(v)));
                     }
                 }
                 let res = q.await?;
@@ -334,6 +334,21 @@ impl<'a> QueryBuilder<'a> {
             DbClient::Http(http) => http.execute(&self.sql, self.vars).await,
             DbClient::Remote(remote) => remote.execute(&self.sql, self.vars).await,
         }
+    }
+}
+
+fn strip_json_nulls(v: Value) -> Value {
+    match v {
+        Value::Object(map) => {
+            let cleaned = map
+                .into_iter()
+                .filter(|(_, val)| !val.is_null())
+                .map(|(k, val)| (k, strip_json_nulls(val)))
+                .collect();
+            Value::Object(cleaned)
+        }
+        Value::Array(arr) => Value::Array(arr.into_iter().map(strip_json_nulls).collect()),
+        other => other,
     }
 }
 

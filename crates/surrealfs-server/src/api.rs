@@ -528,15 +528,22 @@ async fn handle_rpc(
                     Err(err) => json!({ "status": "ERR", "result": err.to_string() }),
                 })
                 .collect();
-            HttpResponse::json(200, &json!({ "result": envelopes }))
+            HttpResponse::json(
+                200,
+                &json!({ "result": envelopes, "results": envelopes }),
+            )
         }
-        Err(err) => HttpResponse::json(
-            200,
-            &json!({
-                "result": [
-                    { "status": "ERR", "result": err.to_string() }
-                ]
-            }),
-        ),
+        Err(err) => {
+            let err_env = json!([
+                { "status": "ERR", "result": err.to_string() }
+            ]);
+            HttpResponse::json(
+                200,
+                &json!({
+                    "result": err_env,
+                    "results": err_env
+                }),
+            )
+        }
     }
 }

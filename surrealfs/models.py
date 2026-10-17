@@ -35,6 +35,10 @@ def _to_record_id(val: Any) -> Any:
         return val
     if isinstance(val, str) and ":" in val:
         table, rec_id = val.split(":", 1)
+        if (rec_id.startswith("⟨") and rec_id.endswith("⟩")) or (
+            rec_id.startswith("`") and rec_id.endswith("`")
+        ):
+            rec_id = rec_id[1:-1]
         return RecordID(table, rec_id)
     if isinstance(val, dict) and "tb" in val and "id" in val:
         return RecordID(str(val["tb"]), val["id"])

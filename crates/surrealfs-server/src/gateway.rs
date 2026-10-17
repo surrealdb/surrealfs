@@ -61,6 +61,7 @@ impl SurrealFsGateway {
         let requested_user = req
             .headers
             .get("x-surrealfs-user")
+            .or_else(|| req.headers.get("x-surrealfs-caller"))
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
 
