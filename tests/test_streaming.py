@@ -143,6 +143,39 @@ async def test_write_stream_rejects_what_is_not_bytes(fs, db):
     assert await chunk_count(db) == 0
 
 
+async def test_one_huge_piece_is_cut_into_exact_chunks():
+    from surrealfs.fs import _rechunk
+
+    data = random.Random(8).randbytes(8 * 1024 * 1024 + 123)
+
+    cut = [piece async for piece in _rechunk([data], 4096)]
+
+    assert all(len(piece) == 4096 for piece in cut[:-1])
+    assert len(cut[-1]) == 123
+    assert b"".join(cut) == data
+
+
+async def test_tiny_and_huge_pieces_mixed_cut_the_same_chunks():
+    from surrealfs.fs import _rechunk
+
+    rng = random.Random(9)
+    data = rng.randbytes(200_000)
+    sizes = [1, 3, 5000, 1, 70_000, 2, 4095, 4096, 4097, 0, 100_000]
+    pieces_in, at = [], 0
+    for size in sizes:
+        pieces_in.append(
+            memoryview(data)[at : at + size] if size % 2 else data[at : at + size]
+        )
+        at += size
+    pieces_in.append(data[at:])
+
+    cut = [piece async for piece in _rechunk(pieces_in, 4096)]
+
+    assert all(len(piece) == 4096 for piece in cut[:-1])
+    assert 0 < len(cut[-1]) <= 4096
+    assert b"".join(cut) == data
+
+
 # ------------------------------------------------------------------- reading
 
 INLINE_TEXT = "héllo wörld, once more"
@@ -404,6 +437,22 @@ async def test_a_file_that_stops_being_text_stops_matching_vector_search(fs, db)
     assert await fs.search_semantic(vector, k=5) == []
 
 
+async def test_a_row_deleted_mid_stream_is_not_found_and_not_resurrected(fs, db):
+    await put(fs)
+
+    async def deleting():
+        yield b"a" * (2 * CHUNK)
+        await fs.rm("/big.bin")
+        yield b"a" * 5
+
+    with pytest.raises(NotFound):
+        await fs.write_stream("/big.bin", deleting(), chunk_size=CHUNK)
+
+    assert not await fs.exists("/big.bin")
+    assert await rows(db, "SELECT * FROM file WHERE filename IS NONE") == []
+    assert await chunk_count(db) == 0
+
+
 async def test_gc_removes_chunks_no_file_points_at(fs, db):
     await put(fs)
     for index in range(2):
@@ -657,6 +706,42 @@ async def test_raw_refuses_a_range_past_the_end(fs):
             )
             assert response.status_code == 416
             assert response.headers["content-range"] == f"bytes */{len(PAYLOAD)}"
+
+
+@pytest.mark.parametrize("swap_to", ["inline", "other blob"])
+async def test_raw_never_sends_a_body_that_disagrees_with_its_headers(
+    fs, monkeypatch, swap_to
+):
+    """A rewrite between the headers' size and the body fails; it does not skew."""
+    await put(fs)
+    original = fs._open_resolved
+
+    async def resolve_then_rewrite(path):
+        resolved = await original(path)
+        if swap_to == "inline":
+            await fs.write_text(path, "tiny")
+        else:
+            await put(fs, data=b"q" * (CHUNK + 1))
+        return resolved
+
+    monkeypatch.setattr(fs, "_open_resolved", resolve_then_rewrite)
+    async with client(fs) as http:
+        response = await http.get("/raw", params={"path": "/big.bin"})
+
+    assert response.status_code == 404
+    assert "changed while it was being read" in response.json()["error"]
+
+
+async def test_a_resolved_entry_keeps_reading_the_blob_it_named(fs):
+    await put(fs)
+    entry, total = await fs._open_resolved("/big.bin")
+    assert total == len(PAYLOAD)
+    assert await collect(fs._stream(entry, 0, None)) == PAYLOAD
+
+    await put(fs, data=b"q" * (CHUNK + 1))
+
+    with pytest.raises(NotFound):
+        await collect(fs._stream(entry, 0, None))
 
 
 async def test_raw_serves_a_multi_range_request_in_full(fs):

@@ -30,6 +30,15 @@ Recoverable mistakes — a wrong path, text that is not in the file — are rais
 malformed query) propagate: they are our bug, not the model's, and a retry would
 only burn a turn.
 
+## Large files
+
+`read_bytes` replies with JSON rather than bare base64: `data_base64`, the file's
+`size`, the `offset` it started at, and `next_offset` (`null` at the end of the
+file). It returns at most 64 KiB per call, so a large or chunked file is read by
+passing `next_offset` back as `offset`. There is no streaming write tool:
+`write_bytes` carries its whole file as base64 in one call, and a large file is
+written from Python with `SurrealFs.write_stream`.
+
 ## Hybrid search
 
 `search` is full-text only unless you opt in, because match-by-meaning needs an

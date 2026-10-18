@@ -99,6 +99,9 @@ _UNCHUNKED = "blob = NONE, blob_size = NONE, blob_chunk_size = NONE"
 # in a transaction it has to become one, or the statements before it commit.
 _DENIED = "sfs:denied"
 
+# Raised by the stream swap when the row it meant to replace is no longer there.
+_GONE = "sfs:gone"
+
 # Whether a multi-word full-text query needs just one term or every term.
 MatchMode = Literal["any", "all"]
 
@@ -375,6 +378,8 @@ class SurrealFs:
         except QueryError as exc:
             if _DENIED in str(exc):
                 raise PermissionDenied(f"Permission denied: {path}") from exc
+            if _GONE in str(exc):
+                raise NotFound(f"No such file or directory: {path}") from exc
             raise
         # The envelope has an entry for COMMIT itself, after the body's last.
         return results[-2]
@@ -587,6 +592,19 @@ class SurrealFs:
             return b"".join(pieces), entry.size
         data = _inline_bytes(entry)
         return data[offset : offset + length], len(data)
+
+    async def _open_resolved(self, path: str) -> tuple[FileEntry, int]:
+        """Resolve and permission-check a file once, with its size in bytes.
+
+        The entry is what `_stream` reads, so a caller that sends the size ahead
+        of the body -- a `Content-Length` -- and then streams the same entry
+        cannot see the two disagree: a rewrite in between removes the chunks the
+        entry names and the stream raises `NotFound`.
+        """
+        entry = await self._require_file(path, fields=_FIELDS_WITH_CONTENT)
+        if entry.blob is not None:
+            return entry, entry.size
+        return entry, len(_inline_bytes(entry))
 
     async def _stream(
         self,
@@ -883,7 +901,12 @@ class SurrealFs:
         )
 
     async def _replace(
-        self, existing: FileEntry, assignments: str, variables: dict[str, Any]
+        self,
+        existing: FileEntry,
+        assignments: str,
+        variables: dict[str, Any],
+        *,
+        must_exist: bool = False,
     ) -> FileEntry:
         """Point a file row at new content, dropping the chunks it held.
 
@@ -892,10 +915,17 @@ class SurrealFs:
         orphan the other's. It is deleted before the row is updated, while the
         row still names it, because that is when a record user's rights over the
         chunks are the file's. A denied update rolls the deletion back with it.
+
+        With ``must_exist`` a row that has vanished since the caller resolved it
+        raises `NotFound`; an UPDATE of a missing id would otherwise create a
+        row with no filename. Not the default because the read behind it is
+        permission-filtered, and a record user holding only the write bit cannot
+        see the row it is writing.
         """
         rows = await self._transact(
             "LET $cur = (SELECT blob FROM ONLY $id);\n"
-            "IF $cur.blob IS NOT NONE {\n"
+            + (f"IF $cur IS NONE {{ THROW '{_GONE}' }};\n" if must_exist else "")
+            + "IF $cur.blob IS NOT NONE {\n"
             "    DELETE file_chunk:[$cur.blob, 0]..=[$cur.blob, $hi];\n"
             "};\n"
             f"LET $row = (UPDATE $id SET {assignments} RETURN {_FIELDS});\n"
@@ -1019,6 +1049,7 @@ class SurrealFs:
                         "chunk_size": chunk_size,
                         "content_type": content_type,
                     },
+                    must_exist=True,
                 )
             parent_id = await self._ensure_parent(normalized, create=create_parents)
             return await self._create(
@@ -1598,16 +1629,26 @@ async def _rechunk(
 ) -> AsyncIterator[bytes]:
     """Re-buffer pieces of any length into ``size`` bytes each, the last shorter.
 
-    Holds at most ``size`` bytes plus the piece being added.
+    Each input byte is copied once: a piece's full chunks are cut straight from
+    it, and only the tail shorter than ``size`` is carried to the next piece.
     """
     pending = bytearray()
     async for piece in _source(chunks):
         if not isinstance(piece, bytes | bytearray | memoryview):
             raise TypeError(f"chunks must yield bytes, not {type(piece).__name__}")
-        pending += piece
-        while len(pending) >= size:
-            yield bytes(pending[:size])
-            del pending[:size]
+        view = memoryview(piece).cast("B")
+        pos = 0
+        if pending:
+            pos = min(size - len(pending), len(view))
+            pending += view[:pos]
+            if len(pending) < size:
+                continue
+            yield bytes(pending)
+            pending.clear()
+        while len(view) - pos >= size:
+            yield bytes(view[pos : pos + size])
+            pos += size
+        pending += view[pos:]
     if pending:
         yield bytes(pending)
 

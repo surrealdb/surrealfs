@@ -96,6 +96,27 @@ async def test_a_write_is_mirrored_and_a_read_is_not(ctx):
     assert sent[-1] == ("/brain/acme/risks/okta.md", "cert expires 2026-11-30")
 
 
+async def test_read_bytes_answers_in_json_over_mcp(ctx):
+    import base64
+    import json
+
+    await ctx.fs.write_bytes("/x.bin", b"\x00\x01\x02")
+    result = await mcp.run_tool(ctx, "read_bytes", {"path": "/x.bin", "length": 2})
+
+    assert json.loads(result) == {
+        "data_base64": base64.b64encode(b"\x00\x01").decode(),
+        "size": 3,
+        "offset": 0,
+        "next_offset": 2,
+    }
+    schema = next(
+        spec["schema"]
+        for spec in mcp.tool_specs(recall=False)
+        if spec["name"] == "read_bytes"
+    )
+    assert {"path", "offset", "length"} == set(schema["properties"])
+
+
 async def test_a_failed_write_is_not_mirrored(ctx):
     sent: list[str] = []
 

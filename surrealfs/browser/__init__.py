@@ -63,7 +63,6 @@ from ..errors import (
     AlreadyExists,
     DirectoryNotEmpty,
     InvalidPath,
-    IsADirectory,
     NotFound,
     PermissionDenied,
     SurrealFsError,
@@ -224,16 +223,14 @@ class Browser:
         """The file's bytes, with single-range ``Range`` support.
 
         A chunked file streams from the database a chunk at a time, so serving
-        it holds one chunk, not the file. An inline file is read whole -- its
-        total is then its byte length, which `entry.size` is not for text -- and
-        sliced.
+        it holds one chunk, not the file. An inline file is already on its row,
+        and its total is its byte length, which `entry.size` is not for text.
         """
         path = _param(request, "path")
-        entry = await self.fs.stat(path)
-        if entry.is_folder:
-            raise IsADirectory(f"Is a directory: {entry.path}")
-        data = None if entry.is_chunked else await self.fs.read_bytes(path)
-        total = entry.size if data is None else len(data)
+        # One resolution feeds both the headers and the body, so a concurrent
+        # rewrite surfaces as a missing chunk instead of a body whose length
+        # disagrees with the `Content-Length` already sent.
+        entry, total = await self.fs._open_resolved(path)
         try:
             span = _byte_range(request.headers.get("range"), total)
         except ValueError:
@@ -247,23 +244,13 @@ class Browser:
         # if opened directly rather than through the iframe.
         headers = {
             "Accept-Ranges": "bytes",
+            "Content-Length": str(max(0, last - first + 1)),
             "X-Content-Type-Options": "nosniff",
             "Content-Security-Policy": "sandbox",
         }
         if span is not None:
             headers["Content-Range"] = f"bytes {first}-{last}/{total}"
-        status = 200 if span is None else 206
-        if data is not None:
-            return Response(
-                data[first : last + 1],
-                status_code=status,
-                media_type=entry.content_type,
-                headers=headers,
-            )
-        headers["Content-Length"] = str(max(0, last - first + 1))
-        stream = self.fs.open_stream(
-            path, offset=first, length=last - first + 1, chunk_size=DEFAULT_CHUNK_SIZE
-        )
+        stream = self.fs._stream(entry, first, last - first + 1, DEFAULT_CHUNK_SIZE)
         # Pulled before the response starts: a failure raised from the generator
         # after the status line is on the wire can only truncate the body.
         head = await anext(stream, b"")
@@ -276,7 +263,7 @@ class Browser:
 
         return StreamingResponse(
             body(),
-            status_code=status,
+            status_code=200 if span is None else 206,
             media_type=entry.content_type,
             headers=headers,
         )
