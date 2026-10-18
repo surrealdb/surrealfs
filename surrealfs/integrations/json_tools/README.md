@@ -22,6 +22,15 @@ either way.
 loop needs to hand the model something it can recover from. Genuine bugs — a
 dropped connection, a schema mismatch — still propagate.
 
+## Large files
+
+`read_bytes` replies with JSON rather than bare base64: `data_base64`, the file's
+`size`, the `offset` it started at, and `next_offset` (`null` at the end of the
+file). It returns at most 64 KiB per call, so a large or chunked file is read by
+passing `next_offset` back as `offset`. There is no streaming write tool:
+`write_bytes` carries its whole file as base64 in one call, and a large file is
+written from Python with `SurrealFs.write_stream`.
+
 ## Hybrid search
 
 Pass `semantic=True` to **both** calls, and put an `embed` function in the

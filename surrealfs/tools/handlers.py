@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import json
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
@@ -36,6 +37,10 @@ from .args import (
 __all__ = ["ToolContext"]
 
 Embedder = Callable[[str], Awaitable[Sequence[float]]]
+
+# The most `read_bytes` returns per call. The reply is base64 inside a model's
+# context, so what a call may carry has to be bounded whatever the file's size.
+READ_BYTES_CAP = 64 * 1024
 
 
 @dataclass
@@ -97,8 +102,20 @@ async def cat(ctx: ToolContext, args: CatArgs) -> str:
 
 
 async def read_bytes(ctx: ToolContext, args: ReadBytesArgs) -> str:
-    data = await ctx.fs.read_bytes(args.path)
-    return base64.b64encode(data).decode("ascii")
+    length = READ_BYTES_CAP if args.length is None else args.length
+    data, size = await ctx.fs.read_slice(
+        args.path, args.offset, min(length, READ_BYTES_CAP)
+    )
+    end = args.offset + len(data)
+    return json.dumps(
+        {
+            "data_base64": base64.b64encode(data).decode("ascii"),
+            "size": size,
+            "offset": args.offset,
+            # Where to resume, or null once the file is exhausted.
+            "next_offset": end if end < size else None,
+        }
+    )
 
 
 async def tail(ctx: ToolContext, args: TailArgs) -> str:

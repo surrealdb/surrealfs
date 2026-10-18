@@ -131,6 +131,38 @@ undeletable, while still holding its name in `child_unique`. `SurrealFs.rm`
 raises `DirectoryNotEmpty`; `fn::sfs_has_children` is the same rule for a raw
 client. A recursive delete goes deepest-first, which satisfies both.
 
+## A chunk answers to the file that names its blob
+
+A chunked file's bytes live in `file_chunk` rows keyed `[blob, idx]`, and a chunk
+has no owner or mode that decides anything about a file. `fn::sfs_chunk_allows`
+finds the `file` row whose `blob` is the chunk's through a UNIQUE index and
+applies that row's rule: read needs `fn::sfs_can_read`, write needs
+`fn::sfs_can_write`, and delete needs reachability plus either the write bit or
+`fn::sfs_can_enter` on the folder — the same two doors `rm` and an overwrite
+already use. A chunk of a file you cannot read is invisible to a raw `SELECT`.
+
+The UNIQUE index is part of the rule, not an optimisation: if two files could
+name one blob, the lookup would pick one and the other's readers would be judged
+by a stranger's mode.
+
+Two rows exist that no file names: the staging area of an upload in progress,
+and the old blob in the instant between a swap and its cleanup. For those the
+rule is the chunk's own `owner`, stamped with the writer. That is why a chunked
+write attaches the blob only at the end, in one transaction: staging needs no
+permission beyond being yourself, and the file row's own clauses decide whether
+the attach is allowed. The swap deletes the old chunks *before* it updates the
+row, while the row still names them, so a writer who is not the old chunks'
+owner is judged as the file's writer; if the update is then refused the
+transaction throws and the deletion rolls back.
+
+Staged chunks are readable by their owner as well. A `CREATE` hands its row back
+through the select clause, and a writer who could not read what it just staged
+would have every write look like a refusal.
+
+Deleting chunks is as wide as deleting the file, and no wider: anyone who could
+`rm` the file can already destroy its content. What the clause refuses is
+touching the chunks of a file you may neither write nor remove.
+
 ## Only root may reindex embeddings
 
 `reindex_embeddings` has to read every text file in the tree in order to embed

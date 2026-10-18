@@ -14,6 +14,10 @@ a sandboxed iframe, images display.
 This module is the JSON API and nothing else. The page is a React SPA built from
 `surrealfs/browser/ui/` into `surrealfs/browser/static/` -- run `just ui`.
 
+`GET /raw` serves a file with `Range` support and streams a chunked one from the
+database a chunk at a time; `PUT /api/upload?path=...` streams the request body
+into `SurrealFs.write_stream`.
+
 Search is hybrid -- full-text and vector results fused by rank. The vector arm
 needs OPENAI_API_KEY; without it search quietly falls back to full-text only.
 The chat panel needs ANTHROPIC_API_KEY; without it the rest of the page works
@@ -23,6 +27,7 @@ and sending a message reports the missing key.
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 from collections.abc import AsyncIterator
@@ -58,11 +63,12 @@ from ..errors import (
     AlreadyExists,
     DirectoryNotEmpty,
     InvalidPath,
+    IsADirectory,
     NotFound,
     PermissionDenied,
     SurrealFsError,
 )
-from ..fs import ROOT, SurrealFs
+from ..fs import _EXTENSION_TYPES, DEFAULT_CHUNK_SIZE, ROOT, SurrealFs
 from ..integrations._connect import connect
 from ..schema import apply_schema
 from ..tools import ToolContext
@@ -154,6 +160,38 @@ def _param(request: Request, name: str) -> str:
     return value
 
 
+_RANGE = re.compile(r"^bytes=(\d*)-(\d*)$")
+
+
+def _byte_range(header: str | None, total: int) -> tuple[int, int] | None:
+    """The inclusive ``(first, last)`` a ``Range`` header asks for, or None.
+
+    None means "serve the whole thing": no header, or one this server does not
+    honour. That is a multi-range request, which RFC 9110 lets a server answer
+    in full, or a malformed one, which it must ignore. A single range that
+    cannot be satisfied -- it starts at or past the end -- raises `ValueError`,
+    for the caller to turn into a 416.
+    """
+    match = _RANGE.match((header or "").strip())
+    if match is None:
+        return None
+    first, last = match.groups()
+    if not first and not last:
+        return None
+    if not first:  # "-n": the final n bytes
+        n = int(last)
+        if n == 0 or total == 0:
+            raise ValueError("unsatisfiable")
+        return max(0, total - n), total - 1
+    start = int(first)
+    if start >= total:
+        raise ValueError("unsatisfiable")
+    end = min(int(last), total - 1) if last else total - 1
+    if end < start:
+        return None  # inverted: a malformed range is ignored, not refused
+    return start, end
+
+
 def _entry_json(entry: Any) -> dict[str, Any]:
     return {
         "path": entry.path,
@@ -183,21 +221,84 @@ class Browser:
         return JSONResponse([_entry_json(e) for e in entries])
 
     async def raw(self, request: Request) -> Response:
+        """The file's bytes, with single-range ``Range`` support.
+
+        A chunked file streams from the database a chunk at a time, so serving
+        it holds one chunk, not the file. An inline file is read whole -- its
+        total is then its byte length, which `entry.size` is not for text -- and
+        sliced.
+        """
         path = _param(request, "path")
         entry = await self.fs.stat(path)
-        data = await self.fs.read_bytes(path)
+        if entry.is_folder:
+            raise IsADirectory(f"Is a directory: {entry.path}")
+        data = None if entry.is_chunked else await self.fs.read_bytes(path)
+        total = entry.size if data is None else len(data)
+        try:
+            span = _byte_range(request.headers.get("range"), total)
+        except ValueError:
+            return Response(
+                status_code=416, headers={"Content-Range": f"bytes */{total}"}
+            )
+        first, last = span or (0, total - 1)
         # This serves agent-authored HTML from our own origin. nosniff stops a
         # text/plain file being re-read as script; `CSP: sandbox` drops the
         # response into an opaque origin so it cannot touch the browser UI even
         # if opened directly rather than through the iframe.
-        return Response(
-            data,
-            media_type=entry.content_type,
-            headers={
-                "X-Content-Type-Options": "nosniff",
-                "Content-Security-Policy": "sandbox",
-            },
+        headers = {
+            "Accept-Ranges": "bytes",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": "sandbox",
+        }
+        if span is not None:
+            headers["Content-Range"] = f"bytes {first}-{last}/{total}"
+        status = 200 if span is None else 206
+        if data is not None:
+            return Response(
+                data[first : last + 1],
+                status_code=status,
+                media_type=entry.content_type,
+                headers=headers,
+            )
+        headers["Content-Length"] = str(max(0, last - first + 1))
+        stream = self.fs.open_stream(
+            path, offset=first, length=last - first + 1, chunk_size=DEFAULT_CHUNK_SIZE
         )
+        # Pulled before the response starts: a failure raised from the generator
+        # after the status line is on the wire can only truncate the body.
+        head = await anext(stream, b"")
+
+        async def body() -> AsyncIterator[bytes]:
+            if head:
+                yield head
+            async for piece in stream:
+                yield piece
+
+        return StreamingResponse(
+            body(),
+            status_code=status,
+            media_type=entry.content_type,
+            headers=headers,
+        )
+
+    async def upload(self, request: Request) -> Response:
+        """Write the request body to ``path``, streamed rather than buffered."""
+        path = _param(request, "path")
+        # The extension table `write_text` sniffs with comes before the system's
+        # mime database, which a minimal host may not have: a markdown upload
+        # must be stored as the note `write_text` would have made it.
+        extension = path.rpartition(".")[2].lower()
+        content_type = (
+            request.headers.get("content-type")
+            or _EXTENSION_TYPES.get(extension)
+            or mimetypes.guess_type(path)[0]
+            or "application/octet-stream"
+        )
+        entry = await self.fs.write_stream(
+            path, request.stream(), content_type=content_type
+        )
+        await self._reindex()
+        return JSONResponse(_entry_json(entry))
 
     async def save(self, request: Request) -> Response:
         body = await request.json()
@@ -380,6 +481,7 @@ def build_app(fs: SurrealFs, embed: Any = None, agent: Any = None) -> Starlette:
             Route("/api/file", b.save, methods=["PUT"]),
             Route("/api/file", b.create, methods=["POST"]),
             Route("/api/file", b.delete, methods=["DELETE"]),
+            Route("/api/upload", b.upload, methods=["PUT"]),
             # Everything vite emits alongside index.html: hashed js, css, fonts.
             # check_dir=False: `build_app` must work with no build output,
             # for tests and for the "run `just ui`" message in `serve`.
