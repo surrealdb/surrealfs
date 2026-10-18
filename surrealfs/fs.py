@@ -17,9 +17,18 @@ every path an agent has into the tree runs the checks below. See
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import difflib
 import re
-from collections.abc import Awaitable, Callable, Sequence
+import uuid
+from collections.abc import (
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterable,
+    Sequence,
+)
 from dataclasses import replace
 from typing import Any, Literal
 
@@ -40,6 +49,7 @@ from .errors import (
 from .models import FOLDER_CONTENT_TYPE, FileEntry, SearchHit
 
 __all__ = [
+    "DEFAULT_CHUNK_SIZE",
     "ROOT",
     "SurrealFs",
     "default_mode",
@@ -66,6 +76,31 @@ _RETRY_BACKOFF = 0.02  # seconds; doubles per attempt
 
 # How the schema's `parent_key` field spells "no parent". Must match file.surql.
 ROOT_KEY = "root"
+
+# Bytes per `file_chunk` row, and per piece `open_stream` yields by default. Large
+# enough that a megabyte is a handful of queries, small enough that one query's
+# payload stays well inside any server or WebSocket message limit.
+DEFAULT_CHUNK_SIZE = 256 * 1024
+
+# Upper bound of a `file_chunk:[blob, idx]` range that must cover every chunk of
+# a blob whatever its length: an `int` is 64-bit in SurrealQL.
+_MAX_CHUNK_IDX = 2**63 - 1
+
+# Media types a small stream is stored as text under, besides `text/*`.
+_TEXT_TYPES = frozenset(
+    {"application/json", "application/yaml", "application/toml", "application/xml"}
+)
+
+# Clears a row's chunk fields, for a write that leaves it holding inline content.
+_UNCHUNKED = "blob = NONE, blob_size = NONE, blob_chunk_size = NONE"
+
+# Raised by the swap and delete transactions below when the table's PERMISSIONS
+# clause refused a row. That is not an error status -- it is an empty result -- and
+# in a transaction it has to become one, or the statements before it commit.
+_DENIED = "sfs:denied"
+
+# Raised by the stream swap when the row it meant to replace is no longer there.
+_GONE = "sfs:gone"
 
 # Whether a multi-word full-text query needs just one term or every term.
 MatchMode = Literal["any", "all"]
@@ -139,9 +174,10 @@ def default_owner(path: str, *, is_folder: bool, creator: str) -> str:
 # the only way to get a path or an ancestry check at all.
 _FIELDS = (
     "id, filename, path, content_type, is_folder, owner, mode, gate, "
-    "hash, created_at, updated_at, "
+    "hash, created_at, updated_at, blob, blob_chunk_size, "
     "IF content IS NOT NONE THEN string::len(content) "
     "ELSE IF file IS NOT NONE THEN bytes::len(file) "
+    "ELSE IF blob IS NOT NONE THEN blob_size "
     "ELSE 0 END AS size"
 )
 _FIELDS_WITH_CONTENT = f"{_FIELDS}, content, file"
@@ -159,21 +195,37 @@ def raise_for_status(raw: Any) -> list[Any]:
     results = raw.get("result", raw) if isinstance(raw, dict) else raw
     if not isinstance(results, list):
         return [results]
-    for statement in results:
-        if isinstance(statement, dict) and statement.get("status") == "ERR":
-            message = str(statement.get("result", "unknown query error"))
-            # The kind sits at the top level on some versions and under
-            # `details` on others, so check both.
-            kind = statement.get("kind") or (statement.get("details") or {}).get("kind")
-            raise QueryError(
-                message,
-                retryable=kind == "TransactionConflict"
-                or "retry the transaction" in message,
-            )
+    failed = [s for s in results if isinstance(s, dict) and s.get("status") == "ERR"]
+    if failed:
+        # In a transaction the statements before the failing one report
+        # `NotExecuted`, which names no cause; report the one that does.
+        statement = next(
+            (
+                s
+                for s in failed
+                if (s.get("details") or {}).get("kind") != "NotExecuted"
+            ),
+            failed[0],
+        )
+        message = str(statement.get("result", "unknown query error"))
+        raise QueryError(message, retryable=any(map(_retryable, failed)))
     return [
         statement.get("result") if isinstance(statement, dict) else statement
         for statement in results
     ]
+
+
+def _retryable(statement: dict[str, Any]) -> bool:
+    """Whether a failed statement is a conflict that can simply be retried.
+
+    The kind sits at the top level on some versions and under `details` on
+    others, so check both. A transaction can report its conflict on a different
+    statement from the one `raise_for_status` names, so every failure is asked.
+    """
+    kind = statement.get("kind") or (statement.get("details") or {}).get("kind")
+    return kind == "TransactionConflict" or "retry the transaction" in str(
+        statement.get("result", "")
+    )
 
 
 def _written(rows: Any, path: str) -> Any:
@@ -288,8 +340,10 @@ class SurrealFs:
 
     # ---------------------------------------------------------------- querying
 
-    async def _query(self, sql: str, variables: dict[str, Any] | None = None) -> Any:
-        """Run one or more statements and return the *last* statement's result.
+    async def _query_all(
+        self, sql: str, variables: dict[str, Any] | None = None
+    ) -> list[Any]:
+        """Run one or more statements and return every statement's result.
 
         Retries transaction conflicts with a short backoff: the schema's
         ``evt_file_hash`` event updates a row just after its content changes, so
@@ -297,16 +351,38 @@ class SurrealFs:
         """
         for attempt in range(_MAX_RETRIES):
             try:
-                results = raise_for_status(
-                    await self.db.query_raw(sql, variables or {})
-                )
+                return raise_for_status(await self.db.query_raw(sql, variables or {}))
             except QueryError as exc:
                 if not exc.retryable or attempt == _MAX_RETRIES - 1:
                     raise
                 await asyncio.sleep(_RETRY_BACKOFF * (2**attempt))
-                continue
-            return results[-1] if results else None
         raise AssertionError("unreachable")  # pragma: no cover
+
+    async def _query(self, sql: str, variables: dict[str, Any] | None = None) -> Any:
+        """Run one or more statements and return the *last* statement's result."""
+        results = await self._query_all(sql, variables)
+        return results[-1] if results else None
+
+    async def _transact(
+        self, body: str, variables: dict[str, Any], *, path: str
+    ) -> Any:
+        """Run ``body`` as one transaction and return its last statement's result.
+
+        Nothing in ``body`` commits unless all of it does, which is what lets a
+        content swap delete the old chunks and repoint the row together. A body
+        that ``THROW``s `_DENIED` -- the way it reports a row the table's
+        PERMISSIONS clause refused -- surfaces as `PermissionDenied`.
+        """
+        try:
+            results = await self._query_all(f"BEGIN;\n{body}\nCOMMIT;", variables)
+        except QueryError as exc:
+            if _DENIED in str(exc):
+                raise PermissionDenied(f"Permission denied: {path}") from exc
+            if _GONE in str(exc):
+                raise NotFound(f"No such file or directory: {path}") from exc
+            raise
+        # The envelope has an entry for COMMIT itself, after the body's last.
+        return results[-2]
 
     async def _resolve(self, path: str, *, fields: str = _FIELDS) -> FileEntry | None:
         """Look up a path in a single round trip.
@@ -448,11 +524,121 @@ class SurrealFs:
         return entry.content
 
     async def read_bytes(self, path: str) -> bytes:
-        """Raw bytes of a file, encoding text content as UTF-8 if needed."""
+        """Raw bytes of a file, encoding text content as UTF-8 if needed.
+
+        A chunked file is reassembled in memory, so this holds the whole file;
+        use :meth:`open_stream` or :meth:`read_range` to avoid that.
+        """
         entry = await self._require_file(path, fields=_FIELDS_WITH_CONTENT)
-        if entry.data is not None:
-            return entry.data
-        return (entry.content or "").encode("utf-8")
+        if entry.blob is not None:
+            return b"".join([piece async for piece in self._stream(entry, 0, None)])
+        return _inline_bytes(entry)
+
+    async def open_stream(
+        self,
+        path: str,
+        *,
+        offset: int = 0,
+        length: int | None = None,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+    ) -> AsyncIterator[bytes]:
+        """Yield the bytes ``[offset, offset + length)`` of a file in pieces.
+
+        Each piece is at most ``chunk_size`` bytes. ``length=None`` runs to the
+        end of the file, and a range that starts at or past the end is empty.
+        Text is served as its UTF-8 bytes.
+
+        A chunked file fetches only the chunks the range covers, one per query,
+        so neither the caller nor any single query holds the whole file. If the
+        file is rewritten while a stream is open, the chunks it was reading are
+        gone and the stream raises `NotFound` rather than splicing old bytes to
+        new. An inline file is fetched once and sliced -- the schema has no
+        byte slice -- which is bounded by `write_bytes`/`write_text` payloads
+        being whole values.
+
+        This is an async generator, so arguments and permissions are checked on
+        the first ``__anext__``, not on the call.
+        """
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        if length is not None and length < 0:
+            raise ValueError("length must not be negative")
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        entry = await self._require_file(path, fields=_FIELDS_WITH_CONTENT)
+        async for piece in self._stream(entry, offset, length, chunk_size):
+            yield piece
+
+    async def read_range(self, path: str, offset: int, length: int) -> bytes:
+        """The bytes ``[offset, offset + length)`` of a file; short at the end."""
+        return (await self.read_slice(path, offset, length))[0]
+
+    async def read_slice(
+        self, path: str, offset: int, length: int
+    ) -> tuple[bytes, int]:
+        """:meth:`read_range`, with the file's total size in bytes.
+
+        The total is the one the bytes were cut from, so ``offset + len(data)
+        < total`` says there is more. `FileEntry.size` cannot say that for text,
+        which it counts in characters.
+        """
+        if offset < 0:
+            raise ValueError("offset must not be negative")
+        if length < 0:
+            raise ValueError("length must not be negative")
+        entry = await self._require_file(path, fields=_FIELDS_WITH_CONTENT)
+        if entry.blob is not None:
+            pieces = [p async for p in self._stream(entry, offset, length)]
+            return b"".join(pieces), entry.size
+        data = _inline_bytes(entry)
+        return data[offset : offset + length], len(data)
+
+    async def _open_resolved(self, path: str) -> tuple[FileEntry, int]:
+        """Resolve and permission-check a file once, with its size in bytes.
+
+        The entry is what `_stream` reads, so a caller that sends the size ahead
+        of the body -- a `Content-Length` -- and then streams the same entry
+        cannot see the two disagree: a rewrite in between removes the chunks the
+        entry names and the stream raises `NotFound`.
+        """
+        entry = await self._require_file(path, fields=_FIELDS_WITH_CONTENT)
+        if entry.blob is not None:
+            return entry, entry.size
+        return entry, len(_inline_bytes(entry))
+
+    async def _stream(
+        self,
+        entry: FileEntry,
+        offset: int,
+        length: int | None,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+    ) -> AsyncIterator[bytes]:
+        """`open_stream` for a file that has already been resolved and checked."""
+        if entry.blob is None:
+            data = _inline_bytes(entry)
+            end = len(data) if length is None else min(len(data), offset + length)
+            for start in range(offset, end, chunk_size):
+                yield data[start : min(start + chunk_size, end)]
+            return
+
+        stored = entry.chunk_size or DEFAULT_CHUNK_SIZE
+        end = entry.size if length is None else min(entry.size, offset + length)
+        if offset >= end:
+            return
+        for index in range(offset // stored, (end - 1) // stored + 1):
+            row = await self._query(
+                "SELECT VALUE data FROM ONLY type::record('file_chunk', [$blob, $i])",
+                {"blob": entry.blob, "i": index},
+            )
+            base = index * stored
+            if row is None or len(row) != min(stored, entry.size - base):
+                raise NotFound(
+                    f"Chunk {index} of {entry.path} is missing: "
+                    "the file changed while it was being read"
+                )
+            lo, hi = max(offset, base) - base, min(end, base + stored) - base
+            for start in range(lo, hi, chunk_size):
+                yield bytes(row[start : min(start + chunk_size, hi)])
 
     async def tail(self, path: str, n: int = 10) -> str:
         """Last ``n`` lines of a text file."""
@@ -594,15 +780,19 @@ class SurrealFs:
         path: str,
         content: str | None = None,
         data: bytes | None = None,
+        chunks: tuple[str, int, int] | None = None,
         mode: int | None = None,
     ) -> FileEntry:
         """Insert one row, stamped with this user and a default mode.
+
+        ``chunks`` is ``(blob, size, chunk_size)`` for a file whose content is
+        already staged in ``file_chunk``.
 
         ``path`` is passed in rather than derived because the schema computes it
         from the parent chain only *after* the row exists, and `default_mode`
         has to know whether this is a home directory before then.
         """
-        is_folder = content is None and data is None
+        is_folder = content is None and data is None and chunks is None
         if mode is None or home_owner(path, is_folder=is_folder) is not None:
             # A home's mode is the path's to decide, never the caller's. `cp`
             # passes the source folder's mode straight through (`mkdir(dst,
@@ -622,6 +812,8 @@ class SurrealFs:
             payload["content"] = content
         if data is not None:
             payload["file"] = data
+        if chunks is not None:
+            payload["blob"], payload["blob_size"], payload["blob_chunk_size"] = chunks
         rows = await self._query(
             f"CREATE {self.table} CONTENT $payload RETURN {_FIELDS}",
             {"payload": payload},
@@ -665,16 +857,12 @@ class SurrealFs:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
             self._check(existing, WRITE, "write to")
-            rows = await self._query(
-                f"UPDATE $id SET content = $content, file = NONE, "
-                f"content_type = $content_type RETURN {_FIELDS}",
-                {
-                    "id": existing.id,
-                    "content": content,
-                    "content_type": resolved_type,
-                },
+            return await self._replace(
+                existing,
+                "content = $content, file = NONE, content_type = $content_type, "
+                + _UNCHUNKED,
+                {"content": content, "content_type": resolved_type},
             )
-            return FileEntry.from_row(_written(rows, normalized))
 
         parent_id = await self._ensure_parent(normalized, create=create_parents)
         return await self._create(
@@ -700,17 +888,190 @@ class SurrealFs:
             if existing.is_folder:
                 raise IsADirectory(f"Is a directory: {normalized}")
             self._check(existing, WRITE, "write to")
-            rows = await self._query(
-                f"UPDATE $id SET file = $data, content = NONE, "
-                f"content_type = $content_type RETURN {_FIELDS}",
-                {"id": existing.id, "data": data, "content_type": content_type},
+            return await self._replace(
+                existing,
+                "file = $data, content = NONE, content_type = $content_type, "
+                + _UNCHUNKED,
+                {"data": data, "content_type": content_type},
             )
-            return FileEntry.from_row(_written(rows, normalized))
 
         parent_id = await self._ensure_parent(normalized, create=create_parents)
         return await self._create(
             filename, parent_id, content_type, path=normalized, data=data
         )
+
+    async def _replace(
+        self,
+        existing: FileEntry,
+        assignments: str,
+        variables: dict[str, Any],
+        *,
+        must_exist: bool = False,
+    ) -> FileEntry:
+        """Point a file row at new content, dropping the chunks it held.
+
+        The old blob is read inside the transaction, never beforehand: two
+        writers racing on one path would each delete the blob they saw and
+        orphan the other's. It is deleted before the row is updated, while the
+        row still names it, because that is when a record user's rights over the
+        chunks are the file's. A denied update rolls the deletion back with it.
+
+        With ``must_exist`` a row that has vanished since the caller resolved it
+        raises `NotFound`; an UPDATE of a missing id would otherwise create a
+        row with no filename. Not the default because the read behind it is
+        permission-filtered, and a record user holding only the write bit cannot
+        see the row it is writing.
+        """
+        rows = await self._transact(
+            "LET $cur = (SELECT blob FROM ONLY $id);\n"
+            + (f"IF $cur IS NONE {{ THROW '{_GONE}' }};\n" if must_exist else "")
+            + "IF $cur.blob IS NOT NONE {\n"
+            "    DELETE file_chunk:[$cur.blob, 0]..=[$cur.blob, $hi];\n"
+            "};\n"
+            f"LET $row = (UPDATE $id SET {assignments} RETURN {_FIELDS});\n"
+            f"IF array::len($row) = 0 {{ THROW '{_DENIED}' }};\n"
+            "RETURN $row;",
+            {**variables, "id": existing.id, "hi": _MAX_CHUNK_IDX},
+            path=existing.path,
+        )
+        return FileEntry.from_row(_written(rows, existing.path))
+
+    async def write_stream(
+        self,
+        path: str,
+        chunks: AsyncIterable[bytes] | Iterable[bytes],
+        *,
+        content_type: str = "application/octet-stream",
+        create_parents: bool = True,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+    ) -> FileEntry:
+        """Create or replace a file from a sequence of byte pieces.
+
+        The pieces are re-buffered into exactly ``chunk_size`` bytes (the last
+        may be short), so neither this call nor any one query holds the whole
+        file. A stream that fits in a single chunk is stored inline, as
+        :meth:`write_text` when ``content_type`` is a text type and the bytes
+        are UTF-8 and as :meth:`write_bytes` otherwise; only longer streams are
+        chunked, and every other method treats a chunked file as binary.
+
+        Chunks are staged under a fresh blob id, one query each, and then one
+        transaction points the file at the blob and deletes the blob it held.
+        A reader therefore sees the old content or the new, never a mix, and
+        a stream that fails part-way leaves the file untouched and its staged
+        chunks deleted. A process killed outright cannot clean up after itself;
+        ``python -m surrealfs.schema --gc-chunks`` collects what it leaves.
+
+        Permission and parent checks are those of :meth:`write_bytes`.
+        """
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be positive")
+        normalized = paths.normalize(path)
+        if not paths.basename(normalized):
+            raise InvalidPath("cannot write to the root directory")
+
+        pieces = _rechunk(chunks, chunk_size)
+        first = await anext(pieces, b"")
+        second = await anext(pieces, None)
+        if second is None:
+            if _is_text_type(content_type):
+                with contextlib.suppress(UnicodeDecodeError):
+                    return await self.write_text(
+                        normalized,
+                        first.decode("utf-8"),
+                        content_type=content_type,
+                        create_parents=create_parents,
+                    )
+            return await self.write_bytes(
+                normalized,
+                first,
+                content_type=content_type,
+                create_parents=create_parents,
+            )
+        return await self._write_chunked(
+            normalized,
+            _chain([first, second], pieces),
+            content_type=content_type,
+            create_parents=create_parents,
+            chunk_size=chunk_size,
+        )
+
+    async def _write_chunked(
+        self,
+        normalized: str,
+        pieces: AsyncIterator[bytes],
+        *,
+        content_type: str,
+        create_parents: bool,
+        chunk_size: int,
+        mode: int | None = None,
+    ) -> FileEntry:
+        """Stage ``pieces`` as a new blob and make the file at ``normalized`` it.
+
+        ``pieces`` must already be ``chunk_size`` bytes each but the last. The
+        checks that can refuse the write run before the first piece is pulled,
+        so a denied writer never makes the source do its work.
+        """
+        existing = await self._resolve_reachable(normalized)
+        if existing is not None:
+            if existing.is_folder:
+                raise IsADirectory(f"Is a directory: {normalized}")
+            self._check(existing, WRITE, "write to")
+        elif create_parents:
+            await self._require_writable_dir(paths.parent_of(normalized), normalized)
+        else:
+            await self._parent_id(normalized, write=True)
+
+        blob = uuid.uuid4().hex
+        size = 0
+        try:
+            async for index, piece in _enumerate(pieces):
+                rows = await self._query(
+                    "CREATE type::record('file_chunk', [$blob, $idx]) "
+                    "CONTENT { blob: $blob, idx: $idx, data: $data, owner: $owner } "
+                    "RETURN id",
+                    {
+                        "blob": blob,
+                        "idx": index,
+                        "data": piece,
+                        "owner": self.user,
+                    },
+                )
+                _written(rows, normalized)
+                size += len(piece)
+            if existing is not None:
+                return await self._replace(
+                    existing,
+                    "blob = $blob, blob_size = $size, blob_chunk_size = $chunk_size, "
+                    "file = NONE, content = NONE, content_type = $content_type",
+                    {
+                        "blob": blob,
+                        "size": size,
+                        "chunk_size": chunk_size,
+                        "content_type": content_type,
+                    },
+                    must_exist=True,
+                )
+            parent_id = await self._ensure_parent(normalized, create=create_parents)
+            return await self._create(
+                paths.basename(normalized),
+                parent_id,
+                content_type,
+                path=normalized,
+                chunks=(blob, size, chunk_size),
+                mode=mode,
+            )
+        except BaseException:
+            # Unless a file already names the blob: an error that surfaces
+            # after the swap committed (a dropped reply, a cancellation) must
+            # not take the content the file now points at.
+            with contextlib.suppress(Exception):
+                await self._query(
+                    "IF (SELECT VALUE id FROM ONLY file WHERE blob = $blob LIMIT 1) "
+                    "IS NONE { DELETE file_chunk:[$blob, 0]..=[$blob, $hi] "
+                    "RETURN NONE };",
+                    {"blob": blob, "hi": _MAX_CHUNK_IDX},
+                )
+            raise
 
     async def touch(self, path: str, *, create_parents: bool = True) -> FileEntry:
         """Create an empty file if it does not exist; otherwise leave it alone.
@@ -816,6 +1177,8 @@ class SurrealFs:
         if await self._resolve(dst_normalized) is not None:
             raise AlreadyExists(f"File exists: {dst_normalized}")
 
+        if entry.blob is not None:
+            return await self._copy_chunked(entry, dst_normalized, create_parents=True)
         if not entry.is_folder:
             parent_id = await self._ensure_parent(dst_normalized, create=True)
             return await self._create(
@@ -871,6 +1234,9 @@ class SurrealFs:
                 source = await self._require_file(
                     child.path, fields=_FIELDS_WITH_CONTENT
                 )
+                if source.blob is not None:
+                    await self._copy_chunked(source, target, create_parents=False)
+                    continue
                 await self._create(
                     paths.basename(target),
                     await self._parent_id(target, write=True),
@@ -887,6 +1253,38 @@ class SurrealFs:
             if mode & 0o700 != 0o700:
                 await self.chmod(path, mode)
         return await self.stat(dst_normalized)
+
+    async def _copy_chunked(
+        self, source: FileEntry, target: str, *, create_parents: bool
+    ) -> FileEntry:
+        """Copy a chunked file into a blob of its own, one chunk in memory at a time."""
+        stored = source.chunk_size or DEFAULT_CHUNK_SIZE
+        return await self._write_chunked(
+            target,
+            _rechunk(self._stream(source, 0, None, stored), stored),
+            content_type=source.content_type,
+            create_parents=create_parents,
+            chunk_size=stored,
+            mode=source.mode,
+        )
+
+    async def _delete_rows(self, ids: list[Any], blobs: list[str], path: str) -> int:
+        """Delete rows and the chunks of ``blobs`` in one transaction.
+
+        Chunks go first, while their files still exist to say who may delete
+        them. A row the table's PERMISSIONS clause refuses rolls all of it back,
+        so a refused `rm` never leaves a file whose content is gone.
+        """
+        return await self._transact(
+            "FOR $b IN $blobs {\n"
+            "    DELETE file_chunk:[$b, 0]..=[$b, $hi];\n"
+            "};\n"
+            "LET $gone = (DELETE $ids RETURN BEFORE);\n"
+            f"IF array::len($gone) != array::len($ids) {{ THROW '{_DENIED}' }};\n"
+            "RETURN array::len($gone);",
+            {"ids": ids, "blobs": blobs, "hi": _MAX_CHUNK_IDX},
+            path=path,
+        )
 
     async def rm(self, path: str, *, recursive: bool = False) -> int:
         """Delete a file, or a folder and its contents with ``recursive=True``.
@@ -907,6 +1305,8 @@ class SurrealFs:
         # Unix keys deletion on the containing folder, not on the entry: a
         # read-only file in a folder you can write is yours to remove.
         await self._require_writable_dir(paths.parent_of(entry.path), entry.path)
+        if entry.blob is not None:
+            return await self._delete_rows([entry.id], [entry.blob], entry.path)
         if not entry.is_folder:
             # RETURN BEFORE for the same reason `edit` and `chmod` read back:
             # a delete the table's PERMISSIONS clause rejects is not an error,
@@ -933,6 +1333,9 @@ class SurrealFs:
         # Deepest first, so no row is ever orphaned mid-delete.
         ids = [c.id for c in sorted(children, key=lambda c: c.path, reverse=True)]
         ids.append(entry.id)
+        blobs = [c.blob for c in children if c.blob is not None]
+        if blobs:
+            return await self._delete_rows(ids, blobs, entry.path)
         removed = await self._query("DELETE $ids RETURN BEFORE", {"ids": ids})
         # The subtree was vetted above, so a short count means the schema
         # refused a row this layer allowed -- in practice `!fn::sfs_has_children`
@@ -1190,6 +1593,78 @@ class SurrealFs:
                     {"id": row["id"], "vector": list(vector), "version": version},
                 )
                 total += 1
+
+
+def _inline_bytes(entry: FileEntry) -> bytes:
+    """The bytes of a file whose content is on its row, text as UTF-8."""
+    if entry.data is not None:
+        return entry.data
+    return (entry.content or "").encode("utf-8")
+
+
+def _is_text_type(content_type: str) -> bool:
+    """Whether a media type names text a small stream may be stored as."""
+    base = content_type.partition(";")[0].strip().lower()
+    return (
+        base.startswith("text/")
+        or base in _TEXT_TYPES
+        or base.endswith(("+json", "+xml"))
+    )
+
+
+async def _source(
+    chunks: AsyncIterable[bytes] | Iterable[bytes],
+) -> AsyncIterator[bytes]:
+    """A sync or async iterable of byte pieces, as an async iterator."""
+    if hasattr(chunks, "__aiter__"):
+        async for piece in chunks:  # type: ignore[union-attr]
+            yield piece
+    else:
+        for piece in chunks:  # type: ignore[union-attr]
+            yield piece
+
+
+async def _rechunk(
+    chunks: AsyncIterable[bytes] | Iterable[bytes], size: int
+) -> AsyncIterator[bytes]:
+    """Re-buffer pieces of any length into ``size`` bytes each, the last shorter.
+
+    Each input byte is copied once: a piece's full chunks are cut straight from
+    it, and only the tail shorter than ``size`` is carried to the next piece.
+    """
+    pending = bytearray()
+    async for piece in _source(chunks):
+        if not isinstance(piece, bytes | bytearray | memoryview):
+            raise TypeError(f"chunks must yield bytes, not {type(piece).__name__}")
+        view = memoryview(piece).cast("B")
+        pos = 0
+        if pending:
+            pos = min(size - len(pending), len(view))
+            pending += view[:pos]
+            if len(pending) < size:
+                continue
+            yield bytes(pending)
+            pending.clear()
+        while len(view) - pos >= size:
+            yield bytes(view[pos : pos + size])
+            pos += size
+        pending += view[pos:]
+    if pending:
+        yield bytes(pending)
+
+
+async def _chain(head: list[bytes], tail: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    for piece in head:
+        yield piece
+    async for piece in tail:
+        yield piece
+
+
+async def _enumerate(pieces: AsyncIterator[bytes]) -> AsyncIterator[tuple[int, bytes]]:
+    index = 0
+    async for piece in pieces:
+        yield index, piece
+        index += 1
 
 
 _EXTENSION_TYPES = {

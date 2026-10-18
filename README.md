@@ -100,10 +100,50 @@ pre-formatted strings. Build whatever integration you like on top.
 
 |          |                                                               |
 | -------- | ------------------------------------------------------------- |
-| Read     | `read_text` `read_bytes` `tail` `ls` `glob` `stat` `exists`   |
-| Write    | `write_text` `write_bytes` `edit` `touch` `mkdir`             |
+| Read     | `read_text` `read_bytes` `open_stream` `read_range` `tail` `ls` `glob` `stat` `exists` |
+| Write    | `write_text` `write_bytes` `write_stream` `edit` `touch` `mkdir` |
 | Organise | `mv` `cp` `rm` `chmod`                                        |
 | Search   | `search` `search_text` `search_semantic` `reindex_embeddings` |
+
+## Large files
+
+`write_stream` takes an async or sync iterable of byte pieces and `open_stream`
+yields a byte range back, so neither your process nor any single query holds the
+whole file:
+
+```python
+async def upload(fs, path, source):  # source: an async iterator of bytes
+    await fs.write_stream(path, source, content_type="video/mp4")
+
+
+async for piece in fs.open_stream("/media/clip.mp4", offset=1_000_000, length=65_536):
+    ...
+```
+
+A stream longer than one chunk (`chunk_size`, 256 KiB by default) is stored as
+`file_chunk` rows and the file is *chunked*; a shorter one is stored inline, as
+text when its `content_type` is a text type and the bytes are UTF-8, so a small
+note streamed in stays searchable and editable. A chunked file is binary to
+everything else: `read_text`, `edit` and `tail` raise `NotATextFile`, it has no
+`hash`, and it is not in the full-text or vector index. `read_bytes` reassembles
+it in memory; `cp` copies it a chunk at a time; `rm` deletes its chunks.
+
+Chunks are staged under a fresh blob id and one transaction then points the file
+at them and deletes the blob it held, so a reader sees the old content or the new
+and never a mix, and a stream that fails part-way leaves the file as it was. A
+reader that is mid-file when the file is rewritten gets `NotFound`, not a splice.
+The one thing that cannot clean up after itself is a process killed mid-write;
+`python -m surrealfs.schema --gc-chunks` deletes chunks no file points at, once
+they are older than an hour (`--gc-grace` changes that).
+
+The agent tools stay whole-value: `read_bytes` pages through a file 64 KiB at a
+time, and there is no streaming write tool, because base64 inside a JSON tool call
+cannot stream. The file browser's `GET /raw` serves a file with `Range` support,
+and `PUT /api/upload?path=…` streams a request body into `write_stream`.
+
+SurrealDB's `DEFINE BUCKET` is not used for this: its `file::get`, `file::put`
+and `file::copy` take no byte range or offset, so a bucket cannot serve a ranged
+read, and `file::get` returns the whole object.
 
 ## Integrations
 

@@ -160,6 +160,42 @@ DEFINE FUNCTION OVERWRITE fn::sfs_home_ok(
     END;
 };
 
+-- Whether `$me` may perform `$op` ('read', 'write' or 'delete') on a chunk of
+-- `$blob`. A chunk has no mode of its own: it follows the `file` row whose `blob`
+-- is `$blob`, so the same gate that hides a file hides its content.
+--
+-- `delete` is wider than `write` by the same step `file`'s own DELETE clause
+-- takes: unix lets whoever may remove an entry from its folder remove a
+-- read-only file, so a chunk goes with it. Without that, `rm` of a 0444 chunked
+-- file would delete the row and leave its chunks behind.
+--
+-- No file row points at `$blob` while an upload is staging, and after a swap
+-- while the old blob is being cleared. Every operation then falls back to the
+-- chunk's own `owner`, which `SurrealFs` stamps with the writer; the file row's
+-- permissions are what decide whether that blob is ever attached. Reads are
+-- included because a CREATE returns the new row through the select clause, so a
+-- writer who could not read what it just staged would see every write refused.
+--
+-- The lookup is the UNIQUE index on `file.blob`. It is also what makes the rule
+-- sound: were two rows allowed to name one blob, the chunks would answer to
+-- whichever the lookup found first.
+DEFINE FUNCTION OVERWRITE fn::sfs_chunk_allows(
+    $blob: string, $owner: string, $op: string, $me: option<string>
+) {
+    LET $f = (SELECT owner, mode, parent FROM ONLY file WHERE blob = $blob LIMIT 1);
+    RETURN IF $f IS NONE THEN
+            $me IS NOT NONE AND $owner = $me
+        ELSE IF $op = 'read' THEN
+            fn::sfs_can_read(fn::sfs_gate($f.parent), $f.owner, $f.mode, $me)
+        ELSE IF $op = 'write' THEN
+            fn::sfs_can_write(fn::sfs_gate($f.parent), $f.owner, $f.mode, $me)
+        ELSE
+            fn::sfs_reachable(fn::sfs_gate($f.parent), $me)
+                AND (fn::sfs_w($f.owner, $f.mode, $me)
+                     OR fn::sfs_can_enter($f.parent, $me))
+        END;
+};
+
 -- Ownership and unix mode bits are enforced in two places, and the split is
 -- deliberate. `SurrealFs` applies the exact unix rules with the exact errors,
 -- and is the only way an agent gets in -- no tool exposes raw SurrealQL. The
@@ -245,6 +281,7 @@ DEFINE FIELD OVERWRITE path ON file COMPUTED (
 ) TYPE string;
 DEFINE FIELD OVERWRITE is_folder ON TABLE file COMPUTED (
     $this.file IS NONE AND $this.content IS NONE AND $this.symlink IS NONE
+        AND $this.blob IS NONE
 );
 
 -- Who may traverse down to this row: NONE when every directory above it is
@@ -284,6 +321,48 @@ DEFINE FIELD OVERWRITE content_type ON TABLE file TYPE string
     PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
 DEFINE FIELD OVERWRITE hash       ON file TYPE string DEFAULT '';
 
+-- Chunked content. A file is chunked exactly when `blob` is set, and then `file`
+-- and `content` are NONE: the bytes live in `file_chunk` rows keyed by
+-- `[blob, idx]`, `blob_chunk_size` bytes each except a shorter last one, and
+-- `blob_size` is the total. A chunked file is binary-shaped -- no `hash`, no
+-- FULLTEXT or embedding entry. The three fields are written together, and
+-- swapped to a new blob in one transaction (see `SurrealFs.write_stream`), so
+-- a reader sees the old content or the new and never a mix.
+DEFINE FIELD OVERWRITE blob            ON TABLE file TYPE option<string> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE blob_size       ON TABLE file TYPE option<int> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+DEFINE FIELD OVERWRITE blob_chunk_size ON TABLE file TYPE option<int> DEFAULT NONE
+    PERMISSIONS FOR update WHERE fn::sfs_w(owner, mode, fn::sfs_me());
+
+-- One chunk of a chunked file.
+--
+-- The record id `file_chunk:[blob, idx]` is the key: it makes a chunk unique
+-- without an index, and a byte range a record-id range scan,
+-- `file_chunk:[$blob, $from]..[$blob, $to]`. `blob` is an opaque id minted per
+-- write, never the file's own id, so a file can be swapped onto new content
+-- while readers still hold the old.
+--
+-- Chunks are immutable: written once, then deleted with the blob they belong
+-- to. `owner` is whoever staged the chunk and gates it only while no file row
+-- points at its blob; see `fn::sfs_chunk_allows`. A create must also carry the
+-- id its fields spell: permissions are judged by `blob`, and a chunk filed under
+-- another blob's id would sit outside the range that blob's delete covers.
+DEFINE TABLE OVERWRITE file_chunk SCHEMAFULL
+    PERMISSIONS
+        FOR select WHERE fn::sfs_chunk_allows(blob, owner, 'read', fn::sfs_me())
+        FOR create WHERE fn::sfs_chunk_allows(blob, owner, 'write', fn::sfs_me())
+            AND record::id(id) = [blob, idx]
+        FOR update NONE
+        FOR delete WHERE fn::sfs_chunk_allows(blob, owner, 'delete', fn::sfs_me());
+DEFINE FIELD OVERWRITE blob ON TABLE file_chunk TYPE string;
+DEFINE FIELD OVERWRITE idx ON TABLE file_chunk TYPE int;
+DEFINE FIELD OVERWRITE data ON TABLE file_chunk TYPE bytes;
+DEFINE FIELD OVERWRITE owner ON TABLE file_chunk TYPE string;
+-- Lets `--gc-chunks` leave a chunk alone while its upload may still be running.
+DEFINE FIELD OVERWRITE created_at ON TABLE file_chunk TYPE datetime
+    VALUE time::now() READONLY;
+
 -- Timestamps
 DEFINE FIELD OVERWRITE created_at ON TABLE file TYPE datetime VALUE time::now() READONLY;
 DEFINE FIELD OVERWRITE updated_at ON TABLE file TYPE datetime VALUE time::now();
@@ -294,10 +373,20 @@ DEFINE FIELD OVERWRITE deleted_at ON TABLE file TYPE option<datetime> DEFAULT NO
 -- Update hash when content changes. Guard on $event: a DELETE also satisfies
 -- `$before.content != $after.content` ($after is NONE), and `UPDATE NONE` then
 -- errors out and aborts the DELETE.
+--
+-- A write that leaves no text behind -- bytes or a chunked file replacing text --
+-- has nothing to hash, which `crypto::md5` rejects, and nothing to embed: it
+-- clears the hash and the embedding, or the file would keep matching a vector
+-- search for content it no longer holds.
 DEFINE EVENT OVERWRITE evt_file_hash ON file
     WHEN $event != "DELETE" AND $before.content != $after.content
     THEN (
-        UPDATE $after.id SET hash = crypto::md5($after.content)
+        IF $after.content IS NONE {
+            UPDATE $after.id SET hash = '', embedding = NONE, embedded_at = NONE,
+                embedded_hash = NONE, indexer_version = NONE
+        } ELSE {
+            UPDATE $after.id SET hash = crypto::md5($after.content)
+        }
 );
 
 
@@ -322,6 +411,12 @@ DEFINE FIELD OVERWRITE indexer_version ON TABLE file TYPE option<string>       D
 -- library (ls, path resolution, recursive rm/cp). The reverse order forces a
 -- table scan for `WHERE parent_key = $k`, verified with EXPLAIN.
 DEFINE INDEX OVERWRITE child_unique ON TABLE file FIELDS parent_key, filename UNIQUE;
+
+-- One file per blob. `fn::sfs_chunk_allows` looks a chunk's file up through
+-- this, and `rm`/`cp` go from a file to its chunks the other way; without it every
+-- chunk read under record auth scans `file`. NONE (an unchunked file) is skipped
+-- by a UNIQUE index, so any number of files may leave `blob` unset.
+DEFINE INDEX OVERWRITE file_blob ON TABLE file FIELDS blob UNIQUE;
 
 -- Vector search
 DEFINE INDEX IF NOT EXISTS idx_hnsw_file_embedding ON file

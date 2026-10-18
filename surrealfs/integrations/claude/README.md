@@ -154,6 +154,15 @@ Settings → Capabilities → Skills, pointed at [`skills/brain/`](skills/brain)
 if you use agent memory, [`skills/brain-memory/`](skills/brain-memory).
 The plugin does both at once.
 
+## Reading binary files
+
+`read_bytes` replies with JSON rather than bare base64: `data_base64`, the file's
+`size`, the `offset` it started at, and `next_offset` (`null` at the end of the
+file). It returns at most 64 KiB per call, so a large or chunked file is read by
+passing `next_offset` back as `offset`. There is no streaming write tool:
+`write_bytes` carries its whole file as base64 in one call, and a large file is
+written from Python with `SurrealFs.write_stream`.
+
 ## When a client shows no tools
 
 Run [`surrealfs-mcp --selftest`](../mcp/README.md#checking-it-works) first — it
