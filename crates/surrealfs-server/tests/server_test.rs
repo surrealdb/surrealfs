@@ -10,9 +10,54 @@ use surrealfs_server::Authenticator;
 
 static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+static SERVER_URL: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+static SERVER_PROC: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+async fn server_url() -> String {
+    SERVER_URL
+        .get_or_init(|| async {
+            if let Ok(u) = std::env::var("SURREALFS_TEST_URL") {
+                return u;
+            }
+            let port = std::net::TcpListener::bind("127.0.0.1:0")
+                .expect("bind a free port")
+                .local_addr()
+                .unwrap()
+                .port();
+            let proc = std::process::Command::new("surreal")
+                .args([
+                    "start",
+                    "--allow-all",
+                    "-u",
+                    "root",
+                    "-p",
+                    "root",
+                    "--bind",
+                    &format!("127.0.0.1:{port}"),
+                    "memory",
+                ])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("Failed to start surreal process. Ensure `surreal` is on PATH.");
+            *SERVER_PROC.lock().unwrap() = Some(proc);
+            for _ in 0..100 {
+                if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                    .await
+                    .is_ok()
+                {
+                    return format!("127.0.0.1:{port}/rpc");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            panic!("SurrealDB server failed to become ready on port {port}");
+        })
+        .await
+        .clone()
+}
+
 async fn setup_test_fs() -> SurrealFs {
-    let url =
-        std::env::var("SURREALFS_TEST_URL").unwrap_or_else(|_| "ws://localhost:8000".to_string());
+    let url = server_url().await;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()

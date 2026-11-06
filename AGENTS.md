@@ -47,7 +47,7 @@ surrealfs/
                     claude/ (the MCP server plus the brain and brain-memory
                     skills; the directory doubles as a Claude plugin, listed by
                     the .claude-plugin/marketplace.json at the repo root)
-examples/           chat_agent.py, anthropic_loop.py, semantic_search.py,
+examples/           anthropic_loop.py,
                     company-brain/ (the Claude Desktop demo, markdown only)
 tests/
 ```

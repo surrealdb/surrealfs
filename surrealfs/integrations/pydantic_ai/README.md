@@ -50,8 +50,3 @@ a tool advertised as hybrid that quietly runs one arm.
 objects, taking the same `semantic` and `get_context` arguments.
 `build_fs_toolset()` also forwards `**toolset_kwargs` (`max_retries`, `timeout`,
 …) to `FunctionToolset`.
-
-## Examples
-
-- `examples/chat_agent.py` — the note-taking chat agent (`just agent`).
-- `examples/semantic_search.py` — the hybrid setup end to end.
