@@ -25,15 +25,15 @@ DEFINE FUNCTION OVERWRITE fn::sfs_me() {
     RETURN IF $auth IS NONE THEN NONE ELSE record::id($auth) END;
 };
 
--- The gate on `$parent`'s children: who -- if anyone -- may traverse down to
+-- The gate on `$dir`'s children: who -- if anyone -- may traverse down to
 -- them. NONE when every directory above is world-traversable, the owner when
 -- every closed one above is that same owner, and `'!closed'` when two closed
 -- directories with different owners are in the chain.
 --
 -- Unix needs the `x` bit on *every* ancestor, and a permission check cannot
 -- loop, so the whole chain has to collapse into this one column. It recurses
--- through `$parent.gate` -- that parent's own COMPUTED field -- but only
--- *after* consulting `$parent`'s own mode: short-circuiting on the inherited
+-- through `$dir.gate` -- that parent's own COMPUTED field -- but only
+-- *after* consulting `$dir`'s own mode: short-circuiting on the inherited
 -- value instead would report the outermost closed ancestor and let a nested
 -- private folder be read by whoever owns something above it.
 --
@@ -102,24 +102,29 @@ DEFINE FUNCTION OVERWRITE fn::sfs_under_prefix($path: string, $prefix: option<st
 };
 
 
-DEFINE FUNCTION OVERWRITE fn::sfs_gate($parent: option<record<file>>) {
-    IF $parent IS NONE {
+DEFINE FUNCTION OVERWRITE fn::sfs_gate($dir: option<record<file>>) {
+    IF $dir IS NONE {
         RETURN NONE;
     };
-    LET $mode = $parent.mode ?? 493;
+    -- `owner` always has a value, so NONE means the caller cannot read the
+    -- folder (or it no longer exists): nobody can traverse through it.
+    IF $dir.owner IS NONE {
+        RETURN '!closed';
+    };
+    LET $mode = $dir.mode ?? 493;
     LET $closed = ($mode % 2 = 0);
-    LET $parent_gate = $parent.gate;
+    LET $parent_gate = $dir.gate;
 
     IF !$closed {
         RETURN $parent_gate;
     };
 
     -- When closed to others, determine reachable tokens for this folder
-    LET $owner_token = $parent.owner;
+    LET $owner_token = $dir.owner;
     LET $base_tokens = [$owner_token];
     -- If group has execute and group is set, group members can traverse
-    LET $tokens = IF (math::floor($mode / 8) % 2 = 1) AND $parent.group IS NOT NONE
-        THEN array::concat($base_tokens, ['group:' + $parent.group])
+    LET $tokens = IF (math::floor($mode / 8) % 2 = 1) AND $dir.group IS NOT NONE
+        THEN array::concat($base_tokens, ['group:' + $dir.group])
         ELSE $base_tokens
     END;
 
@@ -160,12 +165,12 @@ DEFINE FUNCTION OVERWRITE fn::sfs_reachable($gate: option<string>, $me: option<s
     };
 
     LET $tokens = string::split($gate, ',');
-    FOR $token IN $tokens {
-        IF $token = $me OR $token = ('owner:' + $me) {
+    FOR $tok IN $tokens {
+        IF $tok = $me OR $tok = ('owner:' + $me) {
             RETURN true;
         };
-        IF string::starts_with($token, 'group:') {
-            LET $grp = string::replace($token, 'group:', '');
+        IF string::starts_with($tok, 'group:') {
+            LET $grp = string::replace($tok, 'group:', '');
             IF fn::sfs_is_member($grp, $me) {
                 RETURN true;
             };
@@ -227,15 +232,16 @@ DEFINE FUNCTION OVERWRITE fn::sfs_can_write(
     RETURN fn::sfs_can_write_grp($gate, $owner, $mode, $me, NONE);
 };
 
--- Whether `$me` may add or remove an *entry* in `$parent`: write and execute on
--- the folder, consulting the group digit when caller is in $parent.group.
+-- Whether `$me` may add or remove an *entry* in `$dir`: write and execute on
+-- the folder, consulting the group digit when caller is in $dir.group.
 DEFINE FUNCTION OVERWRITE fn::sfs_can_enter(
-    $parent: option<record<file>>, $me: option<string>
+    $dir: option<record<file>>, $me: option<string>
 ) {
     RETURN IF $me IS NONE THEN false
-        ELSE IF $parent IS NONE THEN true
-        ELSE fn::sfs_reachable($parent.gate, $me)
-             AND (fn::sfs_bits_grp($parent.owner, ($parent.mode ?? 493), $me, $parent.group) ?? 7) % 4 = 3
+        ELSE IF $dir IS NONE THEN true
+        ELSE IF $dir.owner IS NONE THEN false
+        ELSE fn::sfs_reachable($dir.gate, $me)
+             AND (fn::sfs_bits_grp($dir.owner, ($dir.mode ?? 493), $me, $dir.group) ?? 7) % 4 = 3
     END;
 };
 
@@ -267,10 +273,11 @@ DEFINE FUNCTION OVERWRITE fn::sfs_has_children($row: record<file>) {
 -- `/home` is 0777 so that a user can make their own home, one DELETE takes
 -- `/home` itself, orphaning every home to the top level with a dangling parent.
 DEFINE FUNCTION OVERWRITE fn::sfs_home_ok(
-    $parent: option<record<file>>, $filename: string, $me: option<string>
+    $dir: option<record<file>>, $filename: string, $me: option<string>
 ) {
-    RETURN IF $parent IS NONE THEN $filename != 'home'
-        ELSE IF $parent.parent IS NONE AND $parent.filename = 'home'
+    RETURN IF $dir IS NONE THEN $filename != 'home'
+        ELSE IF $dir.owner IS NONE THEN false
+        ELSE IF $dir.parent IS NONE AND $dir.filename = 'home'
         THEN $filename = $me
         ELSE true
     END;
@@ -705,21 +712,34 @@ DEFINE FUNCTION OVERWRITE fn::sfs_search_semantic(
 };
 
 -- Semantic search over fine-grained file sections
+--
+-- The KNN scan runs alone and the read predicate filters its candidates in a
+-- second query: a variable assigned from a function call is not visible to
+-- predicates sharing a WHERE clause with a KNN operator, and the scan would
+-- return nothing.
 DEFINE FUNCTION OVERWRITE fn::sfs_search_sections(
     $qvec: array<float>, $k: option<int>, $me: option<string>, $path_prefix: option<string>
 ) {
     LET $who = fn::sfs_searcher($me);
     LET $lim = $k ?? 20;
-    RETURN SELECT
-            file_id.path AS path,
+    LET $cands = SELECT
+            file_id,
             heading,
             line_start,
             line_end,
             content,
             vector::distance::knn() AS distance
         FROM file_section
-        WHERE embedding <|80,160|> $qvec
-          AND ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who, file_id.group))
+        WHERE embedding <|80,160|> $qvec;
+    RETURN SELECT
+            file_id.path AS path,
+            heading,
+            line_start,
+            line_end,
+            content,
+            distance
+        FROM $cands
+        WHERE ($who = 'root' OR fn::sfs_can_read_grp(fn::sfs_gate(file_id.parent), file_id.owner, file_id.mode, $who, file_id.group))
           AND fn::sfs_under_prefix(file_id.path, $path_prefix)
         ORDER BY distance ASC
         LIMIT $lim;
