@@ -1,48 +1,69 @@
-<br>
+<a href="https://surrealdb.com#gh-dark-mode-only" target="_blank">
+    <img width="100%" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/white/hero.png" alt="SurrealDB Hero">
+</a>
+<a href="https://surrealdb.com#gh-light-mode-only" target="_blank">
+    <img width="100%" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/black/hero.png" alt="SurrealDB Hero">
+</a>
 
-<p align="center">
-    <img width=120 src="https://raw.githubusercontent.com/surrealdb/icons/main/surreal.svg" />
-</p>
-
-<h1 align="center">SurrealDB filesystem</h1><br/>
+<h1 align="center">SurrealFS</h1>
 <p align="center">A filesystem-based memory layer for agents, with hybrid search, backed by SurrealDB.</p>
 
-<br>
+<p align="center">
+    <img src="https://img.shields.io/badge/status-beta-f2a33c.svg?style=flat-square" alt="Beta">
+    &nbsp;
+    <a href="https://github.com/surrealdb/surrealfs"><img src="https://img.shields.io/badge/built_with-Rust-dca282.svg?style=flat-square" alt="Built with Rust"></a>
+    &nbsp;
+    <a href="https://github.com/surrealdb/surrealfs/actions"><img src="https://img.shields.io/github/actions/workflow/status/surrealdb/surrealfs/ci.yml?style=flat-square&branch=next" alt="CI"></a>
+    &nbsp;
+    <a href="https://www.apache.org/licenses/LICENSE-2.0"><img src="https://img.shields.io/badge/license-Apache_2.0-00bfff.svg?style=flat-square" alt="License"></a>
+</p>
 
 <p align="center">
-    <a href="https://surrealdb.com"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/surrealdb/default.svg" alt="SurrealDB" width="48" height="48" /></a>
+    <a href="https://crates.io/crates/surrealdb"><img src="https://img.shields.io/crates/d/surrealdb?color=dca282&label=rust&style=flat-square" alt="Rust"></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/examples/semantic_search.py"> <img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/python/default.svg" alt="Python" width="48" height="48" /></a>
+    <a href="https://www.npmjs.com/package/surrealdb"><img src="https://img.shields.io/npm/dt/surrealdb?color=f7df1e&label=javascript&style=flat-square" alt="JavaScript"></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/pydantic_ai/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/pydantic/default.svg" alt="Pydantic" width="48" height="48" /></a>
+    <a href="https://pypi.org/project/surrealdb/"><img src="https://img.shields.io/pepy/dt/surrealdb?color=426c99&label=python&style=flat-square" alt="Python"></a>
+</p>
+
+<p align="center">
+    <a href="https://surrealdb.com/discord"><img src="https://img.shields.io/discord/902568124350599239?label=discord&style=flat-square&color=5a66f6" alt="Discord"></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/hermes/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/nousresearch-hermes/default.svg" alt="NousResearch (Hermes)" width="48" height="48" /></a>
+    <a href="https://x.com/surrealdb"><img src="https://img.shields.io/badge/x-follow_us-222222.svg?style=flat-square" alt="X"></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/openai/default.svg" alt="OpenAI" width="48" height="48" /></a>
+    <a href="https://dev.to/surrealdb"><img src="https://img.shields.io/badge/dev-join_us-86f7b7.svg?style=flat-square" alt="Dev"></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/json_tools/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/anthropic/default.svg" alt="Anthropic" width="48" height="48" /></a>
+    <a href="https://www.linkedin.com/company/surrealdb/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=flat-square" alt="LinkedIn"></a>
     &nbsp;
-    <a href="https://github.com/surrealdb/surrealfs/blob/main/surrealfs/integrations/claude/README.md"><img src="https://cdn.jsdelivr.net/gh/glincker/thesvg@main/public/icons/claude/default.svg" alt="Claude" width="48" height="48" /></a>
+    <a href="https://www.youtube.com/@surrealdb"><img src="https://img.shields.io/badge/youtube-subscribe-fc1c1c.svg?style=flat-square" alt="YouTube"></a>
+</p>
+
+<p align="center">
+    <a href="https://surrealdb.com/blog"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/blog.svg" alt="Blog"></a>
+    &nbsp;
+    <a href="https://github.com/surrealdb/surrealfs"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/github.svg" alt="Github"></a>
+    &nbsp;
+    <a href="https://www.linkedin.com/company/surrealdb/"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/linkedin.svg" alt="LinkedIn"></a>
+    &nbsp;
+    <a href="https://x.com/surrealdb"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/x.svg" alt="X"></a>
+    &nbsp;
+    <a href="https://www.youtube.com/@surrealdb"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/youtube.svg" alt="YouTube"></a>
+    &nbsp;
+    <a href="https://dev.to/surrealdb"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/dev.svg" alt="Dev"></a>
+    &nbsp;
+    <a href="https://surrealdb.com/discord"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/discord.svg" alt="Discord"></a>
+    &nbsp;
+    <a href="https://stackoverflow.com/questions/tagged/surrealdb"><img height="25" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/social/stack-overflow.svg" alt="Stack Overflow"></a>
 </p>
 
 <br>
-
-<p align="center">
-    <img src="https://img.shields.io/badge/status-beta-f2a33c.svg?style=flat-square" alt="Beta" />
-    &nbsp;
-    <a href="https://surrealdb.com/discord"><img src="https://img.shields.io/discord/902568124350599239?label=discord&style=flat-square&color=5a66f6"></a>
-    &nbsp;
-    <a href="https://x.com/surrealdb"><img alt="X (formerly Twitter) Follow" src="https://img.shields.io/twitter/follow/surrealdb"></a>
-    &nbsp;
-    <a href="https://www.linkedin.com/company/surrealdb/"><img src="https://img.shields.io/badge/linkedin-connect_with_us-0a66c2.svg?style=flat-square"></a>
-    &nbsp;
-    <a href="https://www.youtube.com/@SurrealDB"><img src="https://img.shields.io/badge/youtube-subscribe-fc1c1c.svg?style=flat-square"></a>
-</p>
 
 > [!WARNING]
 > **SurrealFS is in beta.** The API, schema, and CLI may change in breaking ways
 > between releases, and it is not yet recommended for production use. Bug
 > reports and feedback are very welcome.
+
+<h2><img height="20" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/whatissurreal.svg">&nbsp;&nbsp;What is SurrealFS?</h2>
 
 Give an agent somewhere durable to keep its work. SurrealFS is a `file` table plus everything needed to hand it to a model, a person or a program: files and folders, versions, full-text and semantic search, unix-style permissions, and live collaboration, all queryable with SurrealQL because it is just a table.
 
