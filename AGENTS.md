@@ -4,8 +4,26 @@ Guidance for agents working on this repository.
 
 ## What this is
 
-`surrealfs` is a pure-Python library: a SurrealDB `file` table schema plus six
-ways to expose it to an AI agent — five tool surfaces and a Hermes memory provider.
+`surrealfs` is a SurrealDB `file` table schema plus two client stacks and the
+servers around them:
+
+- a Python library (`surrealfs/`) with six ways to expose the table to an AI
+  agent — five tool surfaces and a Hermes memory provider;
+- a Rust workspace (`crates/`): `surrealfs-core` (client), `surrealfs-server`
+  (HTTP gateway, REST/RPC, MCP, WebDAV, S3, NFS, SFTP), `surrealfs-cli`,
+  `surrealfs-fuse`, `surrealfs-shim`, `surrealfs-sim` (fault-injection simulator);
+- a TypeScript SDK (`packages/sdk-ts/`), a macOS menu-bar app (`apps/macos-menu/`)
+  and a Cloudflare Worker (`worker/`).
+
+The schema in `surrealfs/schema/file.surql` is the single source of truth for
+permissions and search; the Python and Rust clients must both agree with it.
+
+Gateway auth: `SURREALFS_SERVER_TOKEN` lets a trusted caller act as the user named
+in `X-SurrealFS-User` (default `root`). Without a token the identity headers are
+ignored, and the server refuses a non-loopback bind unless
+`SURREALFS_ALLOW_ANONYMOUS=1`. Credentials created with `surrealfs credential
+create` are stored as salted PBKDF2 hashes, except `s3`, whose signing key must
+stay recoverable.
 
 ## Layout
 
