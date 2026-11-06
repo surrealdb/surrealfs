@@ -71,9 +71,9 @@ public final class MountManager: @unchecked Sendable {
     
     private func findSurrealFsBinary() -> String? {
         let candidates = [
-            "/usr/local/bin/surrealfs-rs",
-            "/opt/homebrew/bin/surrealfs-rs",
-            (NSHomeDirectory() as NSString).appendingPathComponent(".cargo/bin/surrealfs-rs")
+            "/usr/local/bin/surrealfs",
+            "/opt/homebrew/bin/surrealfs",
+            (NSHomeDirectory() as NSString).appendingPathComponent(".cargo/bin/surrealfs")
         ]
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
     }

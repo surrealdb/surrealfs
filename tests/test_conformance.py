@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-RUST_CLI_BIN = REPO_ROOT / "target" / "debug" / "surrealfs-rs"
+RUST_CLI_BIN = REPO_ROOT / "target" / "debug" / "surrealfs"
 
 requires_cargo_and_bun = pytest.mark.skipif(
     shutil.which("cargo") is None or shutil.which("bun") is None,
@@ -407,7 +407,7 @@ console.log('TS_CRDT_VERIFIED');
 @requires_cargo_and_bun
 @pytest.mark.asyncio
 async def test_cross_language_remote_server_rpc_gateway(fs, surreal_url, namespace):
-    """Verify Python, TS, and Rust remote RPC clients against surrealfs-rs gateway."""
+    """Verify Python, TS, and Rust remote RPC clients against surrealfs gateway."""
     import asyncio
     import socket
 

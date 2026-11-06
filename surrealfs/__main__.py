@@ -1,17 +1,17 @@
 """The unified SurrealFS command-line interface.
 
 Usage:
-    surrealfs status
-    surrealfs schema apply [--record-auth]
-    surrealfs users [add|list|del]
-    surrealfs lock [acquire|release|list]
-    surrealfs history <path>
-    surrealfs restore <path> <generation>
-    surrealfs grep <pattern> [--path <prefix>] [--glob <glob>]
-    surrealfs init
-    surrealfs mcp
-    surrealfs browser
-    surrealfs embed
+    surrealfs-py status
+    surrealfs-py schema apply [--record-auth]
+    surrealfs-py users [add|list|del]
+    surrealfs-py lock [acquire|release|list]
+    surrealfs-py history <path>
+    surrealfs-py restore <path> <generation>
+    surrealfs-py grep <pattern> [--path <prefix>] [--glob <glob>]
+    surrealfs-py init
+    surrealfs-py mcp
+    surrealfs-py browser
+    surrealfs-py embed
 """
 
 from __future__ import annotations
@@ -236,7 +236,7 @@ def _run_coroutine(coro):
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        prog="surrealfs",
+        prog="surrealfs-py",
         description="SurrealFS unified management CLI",
     )
     parser.add_argument(

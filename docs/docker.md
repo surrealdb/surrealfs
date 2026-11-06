@@ -20,7 +20,7 @@ docker compose up -d
 ### Services Started:
 
 1. **`surrealdb`**: SurrealDB 3.x database server on port `8000`.
-2. **`surrealfs-init`**: One-shot setup job that connects using root credentials, executes `surrealfs schema apply --record-auth`, and provisions record user accounts (`agent-1`, `indexer`).
+2. **`surrealfs-init`**: One-shot setup job that connects using root credentials, executes `surrealfs-py schema apply --record-auth`, and provisions record user accounts (`agent-1`, `indexer`).
 3. **`surrealfs-browser`**: SurrealFS Browser Studio on `http://localhost:7933` signed in with record auth.
 4. **`surrealfs-embed`**: Continuous embedding daemon automatically indexing updated documents.
 5. **`surrealfs-mcp`**: Agent-native MCP server.

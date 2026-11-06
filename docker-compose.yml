@@ -52,7 +52,7 @@ services:
       - |
         set -e
         echo "Applying SurrealFS schema with record auth..."
-        surrealfs schema apply --record-auth
+        surrealfs-py schema apply --record-auth
         echo "Provisioning initial record agent accounts..."
         python -m surrealfs.users add agent-1 --password "$$SURREALFS_AGENT_PASS"
         python -m surrealfs.users add indexer --password "$$SURREALFS_INDEXER_PASS"

@@ -59,7 +59,7 @@ One schema, several ways to reach it.
 | `surrealfs/schema/`              | The data model: the `file` table, permissions, search and every `fn::sfs_*` function |
 | `crates/surrealfs-core`          | The Rust client: files, search, history, workspaces, CRDTs, storage, trust       |
 | `crates/surrealfs-server`        | The gateway: REST and RPC, MCP, chat, embeddings, WebDAV, S3, NFS, SFTP, browser UI |
-| `crates/surrealfs-cli`           | The `surrealfs-rs` command line and the `git-remote-surrealfs` helper           |
+| `crates/surrealfs-cli`           | The `surrealfs` command line and the `git-remote-surrealfs` helper           |
 | `crates/surrealfs-fuse`          | Mount a SurrealFS as a local directory                                           |
 | `crates/surrealfs-shim`          | A zero-privilege `LD_PRELOAD` interceptor and a WASI adapter                    |
 | `crates/surrealfs-sim`           | A deterministic simulator that checks tree, lock and branch invariants          |
@@ -96,7 +96,7 @@ The CLI reads `SURREALDB_URL` (default `ws://127.0.0.1:8000/rpc`), `SURREALDB_NS
 
 ## The gateway server
 
-`surrealfs-server` (or `surrealfs-rs serve gateway`) is the single process that exposes a database to everything else.
+`surrealfs-server` (or `surrealfs serve gateway`) is the single process that exposes a database to everything else.
 
 | Surface          | Path or port                       | Notes                                                       |
 | ---------------- | ---------------------------------- | ----------------------------------------------------------- |
@@ -104,7 +104,7 @@ The CLI reads `SURREALDB_URL` (default `ws://127.0.0.1:8000/rpc`), `SURREALDB_NS
 | REST             | `/api/*`, `/raw`                   | Files, tree, search, history, graph, activity, chat, RPC    |
 | MCP              | `/mcp`                             | JSON-RPC tools for any MCP client                           |
 | WebDAV           | `/dav/*`                           | Mountable from Finder or Explorer; supports locking         |
-| S3               | `/s3/*`                            | SigV4 with credentials created by `surrealfs-rs credential` |
+| S3               | `/s3/*`                            | SigV4 with credentials created by `surrealfs credential` |
 | NFS and SFTP     | `serve nfs`, `serve sftp`          | Separate listeners                                          |
 
 Configuration is by environment variable or flag:
@@ -124,31 +124,33 @@ Configuration is by environment variable or flag:
 
 With `SURREALFS_SERVER_TOKEN` set, a caller sends `Authorization: Bearer <token>` and acts as the user named in `X-SurrealFS-User` (default `root`). Without a token the identity headers are ignored and every request runs as the gateway's own identity, so the server refuses a non-loopback bind unless `SURREALFS_ALLOW_ANONYMOUS=1`.
 
-Credentials for WebDAV, S3, NFS and SFTP are created with `surrealfs-rs credential create`. Secrets are stored as salted PBKDF2-HMAC-SHA256 hashes, except for `s3`, whose signing key has to stay recoverable.
+Credentials for WebDAV, S3, NFS and SFTP are created with `surrealfs credential create`. Secrets are stored as salted PBKDF2-HMAC-SHA256 hashes, except for `s3`, whose signing key has to stay recoverable.
 
 ## The command line
 
-`surrealfs-rs` covers the whole surface. A selection:
+`surrealfs` covers the whole surface. A selection:
 
 ```bash
-surrealfs-rs ls /notes                     # list
-surrealfs-rs write /a.md "text"            # write
-surrealfs-rs grep "pattern"                # full-text search
-surrealfs-rs history /a.md                 # versions
-surrealfs-rs restore /a.md 2               # roll back to generation 2
-surrealfs-rs fork <src> <dst>              # zero-copy workspace branch
-surrealfs-rs diff <branch>                 # what the branch changed
-surrealfs-rs merge <src> <dst>             # merge it back
-surrealfs-rs mount ~/brain                 # FUSE mount
-surrealfs-rs import-git ./repo /code       # import a repository with history
-surrealfs-rs pack "how do refunds work"    # context packed to a token budget
-surrealfs-rs backup / ./snapshots          # content-addressed backup
-surrealfs-rs --help                        # everything else
+surrealfs ls /notes                     # list
+surrealfs write /a.md "text"            # write
+surrealfs grep "pattern"                # full-text search
+surrealfs history /a.md                 # versions
+surrealfs restore /a.md 2               # roll back to generation 2
+surrealfs fork <src> <dst>              # zero-copy workspace branch
+surrealfs diff <branch>                 # what the branch changed
+surrealfs merge <src> <dst>             # merge it back
+surrealfs mount ~/brain                 # FUSE mount
+surrealfs import-git ./repo /code       # import a repository with history
+surrealfs pack "how do refunds work"    # context packed to a token budget
+surrealfs backup / ./snapshots          # content-addressed backup
+surrealfs --help                        # everything else
 ```
 
 Content is stored in FastCDC chunks addressed by BLAKE3, so large files are deduplicated, range reads are cheap and `du` is instant. Files can be encrypted with AES-256-GCM, shared by link, placed under legal hold, or exported as tar and zip.
 
 ## The Python library
+
+The Python package installs its own command as `surrealfs-py`; `surrealfs` is the Rust CLI.
 
 ```python
 from surrealdb import AsyncSurreal
@@ -208,7 +210,7 @@ cd packages/sdk-ts && bun install && bun test
 
 ## Mounting and intercepting
 
-- **FUSE.** `surrealfs-rs mount <dir>` mounts a filesystem, including a synthetic `/proc`-style tree and extended attributes for metadata.
+- **FUSE.** `surrealfs mount <dir>` mounts a filesystem, including a synthetic `/proc`-style tree and extended attributes for metadata.
 - **Shim.** `surrealfs-shim` redirects `/surrealfs/...` paths to SurrealFS for any program, without privileges, using `LD_PRELOAD`. A WASI adapter does the same for WebAssembly guests.
 - **macOS menu bar.** `apps/macos-menu` shows connection state, mounts a profile, streams agent activity with one-click undo and offers a global search window (`swift build` and `swift test` in that directory).
 
@@ -227,7 +229,7 @@ npx wrangler secret put SURREALFS_SERVER_TOKEN
 just deploy                              # wrangler runs the cargo and wasm-bindgen build
 ```
 
-Apply the schema to the target database once with `surrealfs-rs init` (or `python -m surrealfs.schema`). `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are optional secrets that enable embeddings and chat. To try the Worker without deploying, run `npx wrangler dev --local --var SURREALDB_URL:http://127.0.0.1:8000 --var SURREALDB_USER:root --var SURREALDB_PASS:root`.
+Apply the schema to the target database once with `surrealfs init` (or `python -m surrealfs.schema`). `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are optional secrets that enable embeddings and chat. To try the Worker without deploying, run `npx wrangler dev --local --var SURREALDB_URL:http://127.0.0.1:8000 --var SURREALDB_USER:root --var SURREALDB_PASS:root`.
 
 ## Semantic search
 
@@ -271,7 +273,7 @@ A folder is a row with no `content`, no `file` bytes and no `symlink`, also comp
 Apply it without writing code:
 
 ```bash
-surrealfs-rs init                              # from Rust
+surrealfs init                              # from Rust
 python -m surrealfs.schema                     # uses SURREALDB_* env vars
 python -m surrealfs.schema --print             # dump the DDL, connect to nothing
 ```

@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY surrealfs/schema ./surrealfs/schema
-RUN cargo build --release -p surrealfs-cli --bin surrealfs-rs --bin git-remote-surrealfs
+RUN cargo build --release -p surrealfs-cli --bin surrealfs --bin git-remote-surrealfs
 
 # Stage 2: Build the React SPA browser UI using Bun
 FROM oven/bun:1.2-alpine AS ui-builder
@@ -45,7 +45,7 @@ WORKDIR /app
 COPY --from=ghcr.io/astral-sh/uv:0.5.21 /uv /uvx /bin/
 
 # Copy compiled Rust binaries from Stage 1
-COPY --from=rust-builder /build/target/release/surrealfs-rs /usr/local/bin/surrealfs-rs
+COPY --from=rust-builder /build/target/release/surrealfs /usr/local/bin/surrealfs
 COPY --from=rust-builder /build/target/release/git-remote-surrealfs /usr/local/bin/git-remote-surrealfs
 
 # Copy packaging metadata
@@ -73,5 +73,5 @@ USER surrealfs
 # 7933 for Browser UI, 8000 default SurrealDB port
 EXPOSE 7933 8000
 
-ENTRYPOINT ["surrealfs"]
+ENTRYPOINT ["surrealfs-py"]
 CMD ["status"]
