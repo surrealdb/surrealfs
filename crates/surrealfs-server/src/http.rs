@@ -461,4 +461,3 @@ pub async fn run_http_server<H: HttpHandler + 'static>(
 pub async fn serve_http<H: HttpHandler + 'static>(addr: &str, handler: H) -> std::io::Result<()> {
     run_http_server(addr, Arc::new(handler)).await
 }
-

@@ -112,14 +112,12 @@ impl Authenticator {
         let trimmed = header.trim();
         if trimmed.starts_with("AWS4-HMAC-SHA256") {
             // Parse Credential=<access_key>/<date>/<region>/<service>/aws4_request and Signature=<hex>
-            let cred_val = trimmed
-                .split(',')
-                .find_map(|part| {
-                    let p = part.trim();
-                    p.strip_prefix("Credential=")
-                        .or_else(|| p.strip_prefix("AWS4-HMAC-SHA256 Credential="))
-                        .map(|v| v.trim())
-                });
+            let cred_val = trimmed.split(',').find_map(|part| {
+                let p = part.trim();
+                p.strip_prefix("Credential=")
+                    .or_else(|| p.strip_prefix("AWS4-HMAC-SHA256 Credential="))
+                    .map(|v| v.trim())
+            });
 
             let sig_val = trimmed
                 .split(',')
@@ -127,7 +125,8 @@ impl Authenticator {
 
             let (Some(cred_str), Some(signature)) = (cred_val, sig_val) else {
                 return Err(SurrealFsError::PermissionDenied(
-                    "Malformed AWS4-HMAC-SHA256 header: missing Credential or Signature".to_string(),
+                    "Malformed AWS4-HMAC-SHA256 header: missing Credential or Signature"
+                        .to_string(),
                 ));
             };
 
@@ -219,7 +218,11 @@ impl Authenticator {
     fn verify_secret(&self, provided: &str, expected_hash_or_secret: Option<&str>) -> bool {
         match expected_hash_or_secret {
             Some(expected) if !expected.is_empty() => {
-                // Support constant-time plaintext match or sha256 hex match
+                if expected.starts_with(PBKDF2_PREFIX) {
+                    return verify_pbkdf2(provided, expected);
+                }
+                // Stored values without a scheme prefix are a plaintext secret
+                // (required for S3 signing keys) or an unsalted SHA-256 hex digest.
                 if constant_time_eq(provided.as_bytes(), expected.as_bytes()) {
                     return true;
                 }
@@ -234,8 +237,85 @@ impl Authenticator {
     }
 }
 
+const PBKDF2_PREFIX: &str = "pbkdf2-sha256$";
+const PBKDF2_ITERATIONS: u32 = 210_000;
+const PBKDF2_MAX_ITERATIONS: u32 = 10_000_000;
+
+fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let prf = |data: &[&[u8]]| -> [u8; 32] {
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(password).expect("HMAC accepts any key length");
+        for d in data {
+            mac.update(d);
+        }
+        mac.finalize().into_bytes().into()
+    };
+    let mut u = prf(&[salt, &1u32.to_be_bytes()]);
+    let mut out = u;
+    for _ in 1..iterations {
+        u = prf(&[&u]);
+        for (o, b) in out.iter_mut().zip(u.iter()) {
+            *o ^= b;
+        }
+    }
+    out
+}
+
+/// Hashes a credential secret as `pbkdf2-sha256$<iterations>$<salt>$<hash>` with a random
+/// salt. Not suitable for S3 credentials, whose signing key must be recoverable.
+pub fn hash_secret(secret: &str) -> Result<String> {
+    use base64::Engine;
+    let mut salt = [0u8; 16];
+    getrandom_fill(&mut salt)?;
+    let hash = pbkdf2_sha256(secret.as_bytes(), &salt, PBKDF2_ITERATIONS);
+    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD;
+    Ok(format!(
+        "{PBKDF2_PREFIX}{PBKDF2_ITERATIONS}${}${}",
+        b64.encode(salt),
+        b64.encode(hash)
+    ))
+}
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn getrandom_fill(buf: &mut [u8]) -> Result<()> {
+    use std::io::Read;
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(buf))
+        .map_err(|e| SurrealFsError::PermissionDenied(format!("no OS randomness available: {e}")))
+}
+
+#[cfg(not(all(unix, not(target_arch = "wasm32"))))]
+fn getrandom_fill(_buf: &mut [u8]) -> Result<()> {
+    Err(SurrealFsError::PermissionDenied(
+        "secret hashing needs an OS randomness source, unavailable on this platform".to_string(),
+    ))
+}
+
+fn verify_pbkdf2(provided: &str, stored: &str) -> bool {
+    use base64::Engine;
+    let b64 = base64::engine::general_purpose::STANDARD_NO_PAD;
+    let mut parts = stored[PBKDF2_PREFIX.len()..].split('$');
+    let (Some(iters), Some(salt), Some(hash), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let Ok(iters) = iters.parse::<u32>() else {
+        return false;
+    };
+    if iters == 0 || iters > PBKDF2_MAX_ITERATIONS {
+        return false;
+    }
+    let (Ok(salt), Ok(hash)) = (b64.decode(salt), b64.decode(hash)) else {
+        return false;
+    };
+    constant_time_eq(&pbkdf2_sha256(provided.as_bytes(), &salt, iters), &hash)
+}
+
 /// Constant-time byte slice equality check to prevent timing side-channels.
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -244,4 +324,36 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         diff |= x ^ y;
     }
     diff == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pbkdf2_matches_rfc_vector() {
+        // RFC 7914 §11: PBKDF2-HMAC-SHA-256, P="passwd", S="salt", c=1, dkLen=32.
+        let out = pbkdf2_sha256(b"passwd", b"salt", 1);
+        assert_eq!(
+            hex::encode(out),
+            "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc"
+        );
+    }
+
+    #[test]
+    fn hashed_secret_round_trips_and_is_salted() {
+        let a = hash_secret("hunter2").unwrap();
+        let b = hash_secret("hunter2").unwrap();
+        assert_ne!(a, b);
+        assert!(verify_pbkdf2("hunter2", &a));
+        assert!(!verify_pbkdf2("hunter3", &a));
+        assert!(!verify_pbkdf2("hunter2", "pbkdf2-sha256$999999999$AA$AA"));
+    }
+
+    #[test]
+    fn constant_time_eq_basics() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+    }
 }

@@ -566,10 +566,8 @@ async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
     fs.create_credential("ssh", "pubkey-only", None, "user:ssh_only", None)
         .await
         .unwrap();
-    let empty_pass_token = base64::Engine::encode(
-        &base64::engine::general_purpose::STANDARD,
-        b"pubkey-only:",
-    );
+    let empty_pass_token =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"pubkey-only:");
     assert!(auth
         .authenticate_basic(&format!("Basic {}", empty_pass_token))
         .await
@@ -757,3 +755,41 @@ async fn test_nfs_rpc_call_and_sftp_pflags() {
     assert_eq!(updated, "Hello SFTP!");
 }
 
+#[tokio::test]
+async fn test_gateway_token_gates_requests_and_ignores_bad_tokens() {
+    let fs = setup_test_fs().await;
+    let gateway = surrealfs_server::SurrealFsGateway::new(fs)
+        .with_server_token(Some("s3cret-token".to_string()));
+    let req = |auth: Option<&str>, user: Option<&str>| {
+        let mut headers = HashMap::new();
+        if let Some(a) = auth {
+            headers.insert("authorization".to_string(), a.to_string());
+        }
+        if let Some(u) = user {
+            headers.insert("x-surrealfs-user".to_string(), u.to_string());
+        }
+        HttpRequest {
+            method: "GET".into(),
+            path: "/api/ls".into(),
+            raw_query: "".into(),
+            query: HashMap::new(),
+            headers,
+            body: Vec::new(),
+        }
+    };
+    assert_eq!(gateway.handle(req(None, Some("root"))).await.status, 401);
+    assert_eq!(
+        gateway
+            .handle(req(Some("Bearer nope"), Some("root")))
+            .await
+            .status,
+        401
+    );
+    assert_ne!(
+        gateway
+            .handle(req(Some("Bearer s3cret-token"), Some("alice")))
+            .await
+            .status,
+        401
+    );
+}

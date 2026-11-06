@@ -203,7 +203,10 @@ fn test_interceptor_ffi_negative_offset_and_virtual_io() {
             -5,
         );
         assert_eq!(r, -1);
-        assert_eq!(surrealfs_shim::interceptor::errno::get_errno(), libc::EINVAL);
+        assert_eq!(
+            surrealfs_shim::interceptor::errno::get_errno(),
+            libc::EINVAL
+        );
 
         let w = surrealfs_shim::interceptor::surrealfs_shim_pwrite(
             fd,
@@ -212,7 +215,10 @@ fn test_interceptor_ffi_negative_offset_and_virtual_io() {
             -1,
         );
         assert_eq!(w, -1);
-        assert_eq!(surrealfs_shim::interceptor::errno::get_errno(), libc::EINVAL);
+        assert_eq!(
+            surrealfs_shim::interceptor::errno::get_errno(),
+            libc::EINVAL
+        );
 
         let msg = b"hello ffi";
         let written = surrealfs_shim::interceptor::surrealfs_shim_pwrite(
@@ -236,4 +242,3 @@ fn test_interceptor_ffi_negative_offset_and_virtual_io() {
         assert_eq!(surrealfs_shim::interceptor::surrealfs_shim_close(fd), 0);
     }
 }
-

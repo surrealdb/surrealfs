@@ -451,9 +451,10 @@ impl NfsServer {
                     reply.extend_from_slice(&0u32.to_be_bytes());
                     return Some(reply);
                 };
-                let (Some(dir_fh), Ok(name)) =
-                    (NfsFileHandle::from_bytes(fh_bytes), std::str::from_utf8(name_bytes))
-                else {
+                let (Some(dir_fh), Ok(name)) = (
+                    NfsFileHandle::from_bytes(fh_bytes),
+                    std::str::from_utf8(name_bytes),
+                ) else {
                     reply.extend_from_slice(&NFS3ERR_BADHANDLE.to_be_bytes());
                     reply.extend_from_slice(&0u32.to_be_bytes());
                     return Some(reply);
@@ -566,4 +567,3 @@ pub async fn serve_nfs(fs: SurrealFs, port: u16) -> std::io::Result<()> {
         });
     }
 }
-

@@ -858,10 +858,7 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
             let fs = cli.connect_fs().await?;
             match action {
                 ServeCommands::Gateway { addr, static_dir } => {
-                    output.push_str(&format!(
-                        "Starting SurrealFS Layer 2 Gateway on {}\n",
-                        addr
-                    ));
+                    output.push_str(&format!("Starting SurrealFS Layer 2 Gateway on {}\n", addr));
                     let s_dir = static_dir
                         .as_ref()
                         .map(std::path::PathBuf::from)
@@ -873,10 +870,13 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                                 None
                             }
                         });
+                    let server_token = std::env::var("SURREALFS_SERVER_TOKEN").ok();
+                    surrealfs_server::gateway::check_exposure(addr, server_token.as_deref())
+                        .map_err(|e| anyhow::anyhow!(e))?;
                     let gateway = surrealfs_server::SurrealFsGateway::new(fs)
                         .with_embedder(surrealfs_server::Embedder::from_env())
                         .with_chat(surrealfs_server::ChatConfig::from_env())
-                        .with_server_token(std::env::var("SURREALFS_SERVER_TOKEN").ok())
+                        .with_server_token(server_token)
                         .with_static_dir(s_dir);
                     surrealfs_server::serve_http(addr, gateway).await?;
                 }
@@ -924,7 +924,13 @@ pub async fn run_cli(cli: Cli) -> Result<String> {
                     secret,
                     user_id,
                 } => {
-                    fs.create_credential(kind, identifier, Some(secret), user_id, None)
+                    // S3 signing keys must stay recoverable; every other kind is stored hashed.
+                    let stored = if kind == "s3" {
+                        secret.to_string()
+                    } else {
+                        surrealfs_server::hash_secret(secret)?
+                    };
+                    fs.create_credential(kind, identifier, Some(&stored), user_id, None)
                         .await?;
                     output.push_str(&format!(
                         "Created credential {} ({}) for {}\n",

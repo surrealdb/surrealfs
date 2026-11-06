@@ -266,8 +266,8 @@ impl SftpSession {
         } else {
             Vec::new()
         };
-        let dirty = (pflags & SSH_FXF_TRUNC) != 0
-            || ((pflags & SSH_FXF_CREAT) != 0 && existing.is_none());
+        let dirty =
+            (pflags & SSH_FXF_TRUNC) != 0 || ((pflags & SSH_FXF_CREAT) != 0 && existing.is_none());
 
         let hid = self.next_handle_id.fetch_add(1, Ordering::SeqCst);
         let handle_str = format!("file-{}", hid);

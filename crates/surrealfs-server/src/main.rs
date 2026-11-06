@@ -136,6 +136,9 @@ async fn main() -> anyhow::Result<()> {
         chat_cfg.is_some()
     );
 
+    surrealfs_server::gateway::check_exposure(&bind_addr, server_token.as_deref())
+        .map_err(anyhow::Error::msg)?;
+
     let gateway = SurrealFsGateway::new(fs)
         .with_embedder(embedder)
         .with_chat(chat_cfg)

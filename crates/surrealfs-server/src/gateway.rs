@@ -3,9 +3,9 @@ use serde_json::json;
 use surrealfs_core::SurrealFs;
 
 use crate::api::{handle_api, handle_raw};
-use crate::auth::Authenticator;
+use crate::auth::{constant_time_eq, Authenticator};
 use crate::chat::ChatConfig;
-use crate::embed::{Embedder, index_file_on_write};
+use crate::embed::{index_file_on_write, Embedder};
 use crate::http::{HttpHandler, HttpRequest, HttpResponse};
 use crate::mcp::handle_mcp;
 use crate::s3::S3Server;
@@ -71,9 +71,8 @@ impl SurrealFsGateway {
                 .strip_prefix("Bearer ")
                 .or_else(|| trimmed.strip_prefix("bearer "))
             {
-                let tok = tok.trim();
                 if let Some(ref expected) = self.server_token {
-                    if tok == expected {
+                    if constant_time_eq(tok.trim().as_bytes(), expected.as_bytes()) {
                         let caller = requested_user.unwrap_or_else(|| "root".to_string());
                         return Ok(self.fs.with_caller(caller));
                     }
@@ -98,11 +97,9 @@ impl SurrealFsGateway {
             ));
         }
 
-        if let Some(caller) = requested_user.or_else(|| self.fs.caller().map(|s| s.to_string())) {
-            Ok(self.fs.with_caller(caller))
-        } else {
-            Ok(self.fs.clone())
-        }
+        // Anonymous request on a server with no token: the identity headers are
+        // unauthenticated and must not select the caller.
+        Ok(self.fs.clone())
     }
 
     fn is_s3_request(&self, req: &HttpRequest) -> bool {
@@ -260,7 +257,9 @@ fn serve_static_file(static_dir: &std::path::Path, clean_path: &str) -> Option<H
     };
 
     let target = if candidate.is_file() {
-        if let (Ok(canon_dir), Ok(canon_file)) = (static_dir.canonicalize(), candidate.canonicalize()) {
+        if let (Ok(canon_dir), Ok(canon_file)) =
+            (static_dir.canonicalize(), candidate.canonicalize())
+        {
             if !canon_file.starts_with(&canon_dir) {
                 return Some(HttpResponse::json(
                     403,
@@ -326,4 +325,49 @@ fn serve_static_file(static_dir: &std::path::Path, clean_path: &str) -> Option<H
         _ => "application/octet-stream",
     };
     Some(HttpResponse::with_bytes(200, bytes, ct))
+}
+
+/// Rejects serving an unauthenticated gateway on a non-loopback address.
+///
+/// Without a server token every request runs as the gateway's own identity,
+/// so only a loopback bind is safe unless the operator opts in with
+/// `SURREALFS_ALLOW_ANONYMOUS=1`.
+pub fn check_exposure(addr: &str, server_token: Option<&str>) -> std::result::Result<(), String> {
+    if server_token.is_some_and(|t| !t.trim().is_empty()) {
+        return Ok(());
+    }
+    let host = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(addr);
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback());
+    let allowed = std::env::var("SURREALFS_ALLOW_ANONYMOUS")
+        .is_ok_and(|v| matches!(v.trim(), "1" | "true" | "yes"));
+    if loopback || allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "refusing to serve {addr} without authentication: set SURREALFS_SERVER_TOKEN, \
+             bind a loopback address, or set SURREALFS_ALLOW_ANONYMOUS=1"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_exposure;
+
+    #[test]
+    fn exposure_guard_requires_token_off_loopback() {
+        assert!(check_exposure("127.0.0.1:8787", None).is_ok());
+        assert!(check_exposure("[::1]:8787", None).is_ok());
+        assert!(check_exposure("localhost:8787", None).is_ok());
+        assert!(check_exposure("0.0.0.0:8787", Some("secret")).is_ok());
+        if std::env::var_os("SURREALFS_ALLOW_ANONYMOUS").is_none() {
+            assert!(check_exposure("0.0.0.0:8787", None).is_err());
+            assert!(check_exposure("0.0.0.0:8787", Some("  ")).is_err());
+            assert!(check_exposure("10.0.0.5:8787", None).is_err());
+        }
+    }
 }

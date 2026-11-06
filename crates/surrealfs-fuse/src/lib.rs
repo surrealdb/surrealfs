@@ -112,7 +112,11 @@ impl FuseAdapter {
         Ok(())
     }
 
-    pub async fn getxattr(&self, path: &str, name: &str) -> Result<Option<Vec<u8>>, SurrealFsError> {
+    pub async fn getxattr(
+        &self,
+        path: &str,
+        name: &str,
+    ) -> Result<Option<Vec<u8>>, SurrealFsError> {
         let entry = self
             .fs
             .stat(path)
@@ -150,4 +154,3 @@ impl FuseAdapter {
         Ok(())
     }
 }
-

@@ -402,7 +402,10 @@ async fn test_posix_negative_paths() {
 
     // 7. InvalidPath when moving a directory into its own subtree
     fs.mkdir("/dir_only/sub", true).await.unwrap();
-    let err = fs.mv("/dir_only", "/dir_only/sub/nested").await.unwrap_err();
+    let err = fs
+        .mv("/dir_only", "/dir_only/sub/nested")
+        .await
+        .unwrap_err();
     assert!(
         matches!(err, SurrealFsError::InvalidPath(_)),
         "expected InvalidPath on moving directory into its own subtree, got {:?}",
@@ -545,7 +548,10 @@ async fn test_full_text_semantic_hybrid_and_section_search() {
     for i in 0..8 {
         fs.write_text(
             &format!("/docs/filler_{}.md", i),
-            &format!("Filler document number {} about routine gardening topics.", i),
+            &format!(
+                "Filler document number {} about routine gardening topics.",
+                i
+            ),
             None,
         )
         .await
@@ -567,10 +573,7 @@ async fn test_full_text_semantic_hybrid_and_section_search() {
     .unwrap();
 
     // 1. Full-text search
-    let fts_hits = fs
-        .search("qubits", 5)
-        .await
-        .expect("FTS search failed");
+    let fts_hits = fs.search("qubits", 5).await.expect("FTS search failed");
     assert!(!fts_hits.is_empty());
     assert_eq!(fts_hits[0].entry.path, "/docs/quantum.md");
     assert!(fts_hits[0].snippet.to_lowercase().contains("qubits"));
@@ -669,4 +672,3 @@ async fn test_http_db_client_transport() {
     assert!(names.contains(&"from_ws.txt".to_string()));
     assert!(names.contains(&"from_http.txt".to_string()));
 }
-

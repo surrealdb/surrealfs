@@ -16,9 +16,9 @@ pub mod sftp;
 #[cfg(target_arch = "wasm32")]
 pub mod worker;
 
-pub use auth::{AuthenticatedUser, Authenticator};
+pub use auth::{hash_secret, AuthenticatedUser, Authenticator};
 pub use chat::ChatConfig;
-pub use embed::{Embedder, index_file_on_write, process_pending_jobs};
+pub use embed::{index_file_on_write, process_pending_jobs, Embedder};
 pub use gateway::SurrealFsGateway;
 pub use http::{HttpHandler, HttpRequest, HttpResponse};
 pub use nfs::{NfsFattr3, NfsFileHandle, NfsServer};

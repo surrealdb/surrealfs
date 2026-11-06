@@ -147,17 +147,15 @@ impl SimulationEngine {
             if tick % 5 == 0 {
                 InvariantChecker::check_tree_hierarchy(fs).await?;
                 InvariantChecker::check_lock_exclusivity(fs).await?;
-                InvariantChecker::check_branch_isolation(
-                    fs,
-                    base_anchor_path,
-                    base_anchor_content,
-                )
-                .await?;
+                InvariantChecker::check_branch_isolation(fs, base_anchor_path, base_anchor_content)
+                    .await?;
             }
         }
 
         // Drain any remaining delayed events
-        let final_tick = self.clock.advance(self.config.fault_config.max_stall_ticks + 2);
+        let final_tick = self
+            .clock
+            .advance(self.config.fault_config.max_stall_ticks + 2);
         while let Some(ready_op) = queue.pop_ready(final_tick) {
             self.execute_op(fs, ready_op).await;
         }

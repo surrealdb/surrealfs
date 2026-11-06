@@ -231,9 +231,10 @@ impl RemoteServerClient {
             req = req.header("X-SurrealFS-Caller", caller);
         }
 
-        let resp = req.send().await.map_err(|e| {
-            SurrealFsError::Database(format!("SurrealFS server RPC failed: {}", e))
-        })?;
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| SurrealFsError::Database(format!("SurrealFS server RPC failed: {}", e)))?;
         let status = resp.status();
         let json: Value = resp.json().await.map_err(|e| {
             SurrealFsError::Database(format!("SurrealFS server invalid JSON: {}", e))
@@ -263,10 +264,7 @@ fn parse_rpc_statements(json: &Value) -> Result<Vec<Result<Value>>> {
 
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
-        let status = item
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("OK");
+        let status = item.get("status").and_then(|v| v.as_str()).unwrap_or("OK");
         let res_val = item.get("result").cloned().unwrap_or(Value::Null);
         if status.eq_ignore_ascii_case("ERR") {
             let msg = res_val
@@ -379,6 +377,14 @@ impl DbResponse {
             DbResponse::Ws(res) => res.num_statements(),
             DbResponse::Json(stmts) => stmts.len(),
         }
+    }
+
+    /// Fails with the first statement error in the response, discarding the results.
+    pub fn check(mut self) -> Result<()> {
+        for index in 0..self.num_statements() {
+            self.take::<Value>(index)?;
+        }
+        Ok(())
     }
 
     pub fn take<T: DeserializeOwned>(&mut self, index: usize) -> Result<T> {
@@ -535,8 +541,8 @@ impl SurrealFs {
     pub async fn apply_schema(&self) -> Result<()> {
         let schema_file = include_str!("../../../surrealfs/schema/file.surql");
         let schema_auth = include_str!("../../../surrealfs/schema/record_auth.surql");
-        self.db.query(schema_file).await?;
-        self.db.query(schema_auth).await?;
+        self.db.query(schema_file).await?.check()?;
+        self.db.query(schema_auth).await?.check()?;
         Ok(())
     }
 
@@ -809,10 +815,9 @@ impl SurrealFs {
     pub async fn ls(&self, path: &str) -> Result<Vec<FileEntry>> {
         let norm = normalize_path(path);
         if norm != "/" {
-            let target = self
-                .stat(&norm)
-                .await?
-                .ok_or_else(|| SurrealFsError::NotFound(format!("Directory not found: {}", norm)))?;
+            let target = self.stat(&norm).await?.ok_or_else(|| {
+                SurrealFsError::NotFound(format!("Directory not found: {}", norm))
+            })?;
             if !target.is_folder {
                 return Err(SurrealFsError::InvalidPath(format!(
                     "sfs:not_a_directory: {}",
@@ -2397,7 +2402,11 @@ impl SurrealFs {
                 let score = hit
                     .get("score")
                     .and_then(|v| v.as_f64())
-                    .or_else(|| hit.get("distance").and_then(|v| v.as_f64()).map(|d| 1.0 - d))
+                    .or_else(|| {
+                        hit.get("distance")
+                            .and_then(|v| v.as_f64())
+                            .map(|d| 1.0 - d)
+                    })
                     .unwrap_or(0.0);
                 let snippet = hit
                     .get("snippet")
@@ -2588,4 +2597,3 @@ fn build_snippet(content: &str, query: &str, window: usize) -> String {
     }
     s
 }
-

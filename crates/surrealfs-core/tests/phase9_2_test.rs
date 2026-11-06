@@ -103,16 +103,15 @@ async fn test_webhook_dispatcher_hmac_and_delivery() {
 
     // Verify SSRF protection blocks localhost by default
     std::env::remove_var("SURREALFS_ALLOW_LOCAL_WEBHOOKS");
-    assert!(
-        fs.create_webhook(
+    assert!(fs
+        .create_webhook(
             "/data/*",
             &["file_created"],
             "http://127.0.0.1:9999/webhook",
             "secret"
         )
         .await
-        .is_err()
-    );
+        .is_err());
 
     // Enable local webhooks for the mock receiver test
     std::env::set_var("SURREALFS_ALLOW_LOCAL_WEBHOOKS", "1");

@@ -45,7 +45,9 @@ pub fn validate_webhook_url(url_str: &str) -> Result<()> {
         ));
     }
 
-    if !allow_local && (host == "localhost" || host.ends_with(".localhost") || host.ends_with(".internal")) {
+    if !allow_local
+        && (host == "localhost" || host.ends_with(".localhost") || host.ends_with(".internal"))
+    {
         return Err(SurrealFsError::PermissionDenied(format!(
             "Webhook URL host '{}' is restricted (loopback/internal)",
             host

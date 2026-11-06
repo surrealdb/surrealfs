@@ -305,12 +305,7 @@ impl WebDavServer {
     }
 
     /// Handles PUT requests with If-Match optimistic concurrency (§1.3, §22.1).
-    async fn handle_put(
-        &self,
-        fs: &SurrealFs,
-        req: &HttpRequest,
-        sfs_path: &str,
-    ) -> HttpResponse {
+    async fn handle_put(&self, fs: &SurrealFs, req: &HttpRequest, sfs_path: &str) -> HttpResponse {
         // Transparently absorb macOS AppleDouble files and .DS_Store (§22.1)
         if is_macos_appledouble(sfs_path) {
             return HttpResponse::created();
@@ -374,12 +369,7 @@ impl WebDavServer {
     }
 
     /// Handles MOVE requests (renaming files or folders).
-    async fn handle_move(
-        &self,
-        fs: &SurrealFs,
-        req: &HttpRequest,
-        src_path: &str,
-    ) -> HttpResponse {
+    async fn handle_move(&self, fs: &SurrealFs, req: &HttpRequest, src_path: &str) -> HttpResponse {
         let dest_header = match req.header("destination") {
             Some(d) => d,
             None => return HttpResponse::bad_request("Missing Destination header"),
@@ -411,12 +401,7 @@ impl WebDavServer {
     }
 
     /// Handles COPY requests.
-    async fn handle_copy(
-        &self,
-        fs: &SurrealFs,
-        req: &HttpRequest,
-        src_path: &str,
-    ) -> HttpResponse {
+    async fn handle_copy(&self, fs: &SurrealFs, req: &HttpRequest, src_path: &str) -> HttpResponse {
         let dest_header = match req.header("destination") {
             Some(d) => d,
             None => return HttpResponse::bad_request("Missing Destination header"),
@@ -466,7 +451,10 @@ impl WebDavServer {
             })
             .unwrap_or(60);
 
-        match fs.acquire_lock(sfs_path, timeout_secs, holder, holder).await {
+        match fs
+            .acquire_lock(sfs_path, timeout_secs, holder, holder)
+            .await
+        {
             Ok(_) => {
                 let token = format!(
                     "urn:uuid:{}",
@@ -506,8 +494,12 @@ impl WebDavServer {
     async fn handle_unlock(&self, fs: &SurrealFs, sfs_path: &str, holder: &str) -> HttpResponse {
         match fs.release_lock(sfs_path, holder).await {
             Ok(_) => HttpResponse::no_content(),
-            Err(SurrealFsError::Lock(_)) => HttpResponse::locked("Resource is locked by another holder"),
-            Err(SurrealFsError::PermissionDenied(_)) => HttpResponse::forbidden("Permission denied"),
+            Err(SurrealFsError::Lock(_)) => {
+                HttpResponse::locked("Resource is locked by another holder")
+            }
+            Err(SurrealFsError::PermissionDenied(_)) => {
+                HttpResponse::forbidden("Permission denied")
+            }
             Err(_) => HttpResponse::no_content(),
         }
     }
@@ -550,16 +542,7 @@ impl HttpHandler for WebDavServer {
         } else if self.require_auth && req.method != "OPTIONS" {
             return HttpResponse::unauthorized("SurrealFS WebDAV");
         } else {
-            let caller = req
-                .header("x-surrealfs-caller")
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "webdav-client".to_string());
-            let scoped_fs = if let Some(c) = req.header("x-surrealfs-caller") {
-                self.fs.with_caller(c)
-            } else {
-                self.fs.clone()
-            };
-            (scoped_fs, caller)
+            (self.fs.clone(), "webdav-client".to_string())
         };
 
         let sfs_path = self.resolve_path(&req.path);

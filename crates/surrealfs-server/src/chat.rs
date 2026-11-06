@@ -1,7 +1,7 @@
 use chrono::Utc;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use surrealfs_core::{Result, SurrealFs};
 
 use crate::embed::Embedder;
@@ -227,27 +227,26 @@ pub async fn handle_chat(
         return HttpResponse::json(400, &json!({ "error": "message required" }));
     }
 
-    let (session_path, mut messages) = if let Some(s_path) =
-        body.session.as_deref().filter(|s| !s.is_empty())
-    {
-        let existing = fs
-            .read_text(s_path)
-            .await
-            .ok()
-            .and_then(|raw| serde_json::from_str::<SessionFile>(&raw).ok())
-            .map(|sf| sf.messages)
-            .unwrap_or_default();
-        (s_path.to_string(), existing)
-    } else {
-        let now = Utc::now();
-        let path = format!(
-            "/_sessions/{}/{}-{}.json",
-            now.format("%Y-%m-%d"),
-            now.format("%H%M%S"),
-            slugify(&user_msg)
-        );
-        (path, Vec::new())
-    };
+    let (session_path, mut messages) =
+        if let Some(s_path) = body.session.as_deref().filter(|s| !s.is_empty()) {
+            let existing = fs
+                .read_text(s_path)
+                .await
+                .ok()
+                .and_then(|raw| serde_json::from_str::<SessionFile>(&raw).ok())
+                .map(|sf| sf.messages)
+                .unwrap_or_default();
+            (s_path.to_string(), existing)
+        } else {
+            let now = Utc::now();
+            let path = format!(
+                "/_sessions/{}/{}-{}.json",
+                now.format("%Y-%m-%d"),
+                now.format("%H%M%S"),
+                slugify(&user_msg)
+            );
+            (path, Vec::new())
+        };
 
     let prompt_content = match body.path.as_deref().filter(|p| !p.is_empty()) {
         Some(open_path) => format!("[Currently viewing {}]\n{}", open_path, user_msg),

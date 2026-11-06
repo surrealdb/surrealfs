@@ -1,9 +1,9 @@
 use serde::Deserialize;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 use surrealfs_core::{FileEntry, SurrealFs, SurrealFsError};
 
-use crate::chat::{ChatConfig, handle_chat, handle_session};
-use crate::embed::{Embedder, index_file_on_write, process_pending_jobs};
+use crate::chat::{handle_chat, handle_session, ChatConfig};
+use crate::embed::{index_file_on_write, process_pending_jobs, Embedder};
 use crate::http::{HttpRequest, HttpResponse};
 
 fn entry_json(e: &FileEntry) -> Value {
@@ -120,7 +120,10 @@ pub async fn handle_raw(fs: &SurrealFs, req: &HttpRequest) -> HttpResponse {
     let info = match fs.stat(path).await {
         Ok(Some(e)) if !e.is_folder => e,
         Ok(Some(_)) => {
-            return HttpResponse::json(400, &json!({ "error": format!("Is a directory: {}", path) }));
+            return HttpResponse::json(
+                400,
+                &json!({ "error": format!("Is a directory: {}", path) }),
+            );
         }
         Ok(None) => return HttpResponse::json(404, &json!({ "error": "Not found" })),
         Err(e) => return err_response(e),
@@ -184,7 +187,9 @@ pub async fn handle_api(
             };
             match fs.stat(p).await {
                 Ok(Some(e)) => HttpResponse::json(200, &entry_json(&e)),
-                Ok(None) => HttpResponse::json(404, &json!({ "error": format!("Not found: {}", p) })),
+                Ok(None) => {
+                    HttpResponse::json(404, &json!({ "error": format!("Not found: {}", p) }))
+                }
                 Err(e) => err_response(e),
             }
         }
@@ -205,7 +210,9 @@ pub async fn handle_api(
                     }
                     HttpResponse::json(200, &obj)
                 }
-                Ok(None) => HttpResponse::json(404, &json!({ "error": format!("Not found: {}", p) })),
+                Ok(None) => {
+                    HttpResponse::json(404, &json!({ "error": format!("Not found: {}", p) }))
+                }
                 Err(e) => err_response(e),
             }
         }
@@ -371,7 +378,10 @@ pub async fn handle_api(
 
         ("POST", "/api/rpc") => handle_rpc(fs, embedder, req).await,
 
-        _ => HttpResponse::json(404, &json!({ "error": format!("Unknown API route: {} {}", req.method, path) })),
+        _ => HttpResponse::json(
+            404,
+            &json!({ "error": format!("Unknown API route: {} {}", req.method, path) }),
+        ),
     }
 }
 
@@ -528,10 +538,7 @@ async fn handle_rpc(
                     Err(err) => json!({ "status": "ERR", "result": err.to_string() }),
                 })
                 .collect();
-            HttpResponse::json(
-                200,
-                &json!({ "result": envelopes, "results": envelopes }),
-            )
+            HttpResponse::json(200, &json!({ "result": envelopes, "results": envelopes }))
         }
         Err(err) => {
             let err_env = json!([

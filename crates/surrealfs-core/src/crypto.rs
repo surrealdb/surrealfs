@@ -29,7 +29,13 @@ pub fn encrypt_bytes_with_aad(
     let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(&nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .map_err(|e| SurrealFsError::Storage(format!("Encryption failed: {}", e)))?;
 
     Ok((ciphertext, nonce_bytes))
@@ -51,7 +57,13 @@ pub fn decrypt_bytes_with_aad(
     let nonce = Nonce::from(*nonce);
 
     let plaintext = cipher
-        .decrypt(&nonce, Payload { msg: ciphertext, aad })
+        .decrypt(
+            &nonce,
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map_err(|e| {
             SurrealFsError::PermissionDenied(format!("Decryption failed or invalid key: {}", e))
         })?;

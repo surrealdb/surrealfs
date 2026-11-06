@@ -1,7 +1,7 @@
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use surrealfs_core::{Result, SurrealFs, SurrealFsError};
 
-use crate::embed::{Embedder, index_file_on_write};
+use crate::embed::{index_file_on_write, Embedder};
 use crate::http::{HttpRequest, HttpResponse};
 
 /// Returns the canonical JSON Schema tool specifications for all SurrealFS tools.
@@ -214,7 +214,10 @@ pub async fn dispatch_tool_call(
                 .and_then(|v| v.as_u64())
                 .unwrap_or(1)
                 .max(1) as usize;
-            let limit = args.get("limit").and_then(|v| v.as_u64()).map(|n| n as usize);
+            let limit = args
+                .get("limit")
+                .and_then(|v| v.as_u64())
+                .map(|n| n as usize);
             let lines: Vec<&str> = text.lines().collect();
             let start = (offset - 1).min(lines.len());
             let end = match limit {
@@ -376,7 +379,8 @@ pub async fn dispatch_tool_call(
                 Ok((serde_json::to_value(hits)?, None))
             } else {
                 Err(SurrealFsError::Other(
-                    "OPENAI_API_KEY is not configured on the server for semantic search".to_string(),
+                    "OPENAI_API_KEY is not configured on the server for semantic search"
+                        .to_string(),
                 ))
             }
         }
