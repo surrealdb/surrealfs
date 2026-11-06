@@ -43,6 +43,7 @@ async def test_upload_and_range_read(fs: SurrealFs) -> None:
                 $stored_bytes,
                 $codec,
                 <bytes>$data,
+                NONE,
                 $caller
             );
             """,
@@ -84,7 +85,7 @@ async def test_upload_and_range_read(fs: SurrealFs) -> None:
 
     # 4. Range read
     range_res = await fs._query(
-        "RETURN fn::sfs_read_bytes_range($path, $offset, $length, $caller);",
+        "RETURN fn::sfs_read_manifest($path, $offset, $length, $caller);",
         {
             "path": path,
             "offset": 100,

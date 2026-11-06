@@ -26,7 +26,12 @@ flate2 = "1.1.10"
 zip = { version = "9.0.1", default-features = false, features = ["deflate"] }
 aes-gcm = "0.11.1"
 
+[features]
+# S3, GCS and Azure blob stores for `blob_store_from_url`.
+cloud-stores = ["object_store/aws", "object_store/gcp", "object_store/azure"]
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+object_store.workspace = true
 surrealdb.workspace = true
 tokio.workspace = true
 chrono.workspace = true
@@ -35,6 +40,7 @@ reqwest = { version = "0.13.5", default-features = false, features = ["json", "r
 getrandom = "0.2"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+ruzstd.workspace = true
 tokio = { version = "1.43", default-features = false, features = ["sync", "macros", "io-util"] }
 chrono = { version = "0.4", features = ["serde", "wasmbind"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["json"] }

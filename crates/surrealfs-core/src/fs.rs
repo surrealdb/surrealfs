@@ -1,5 +1,6 @@
 //! Core async SurrealFs implementation for Rust.
 
+use crate::blob::{blob_key, SharedBlobStore};
 use crate::chunking::{chunk_data, decompress_chunk, FastCdcConfig};
 use crate::crdt::CrdtDoc;
 use crate::errors::{Result, SurrealFsError};
@@ -431,12 +432,20 @@ fn extract_bytes(val: Option<&Value>) -> Option<Vec<u8>> {
 pub struct SurrealFs {
     pub(crate) db: DbClient,
     pub(crate) caller: Option<String>,
+    pub(crate) blobs: Option<SharedBlobStore>,
 }
 
 impl SurrealFs {
     /// Connect to SurrealDB (via WebSocket on native `ws://`/`wss://`, 1-RTT HTTP JSON-RPC on
     /// `http://`/`https://` or `wasm32`, or Layer 2 SurrealFS Server on `sfs://`/`sfs+https://`).
+    ///
+    /// On native targets the environment variable `SURREALFS_BLOB_STORE` (see
+    /// [`blob_store_from_url`](crate::blob_store_from_url)) puts chunk bytes in an object store.
     pub async fn connect(opts: ConnectOptions) -> Result<Self> {
+        Self::connect_inner(opts).await?.blobs_from_env()
+    }
+
+    async fn connect_inner(opts: ConnectOptions) -> Result<Self> {
         let url_trimmed = opts.url.trim();
         if url_trimmed.starts_with("sfs://")
             || url_trimmed.starts_with("sfs+http://")
@@ -478,16 +487,37 @@ impl SurrealFs {
             Ok(Self {
                 db: DbClient::Ws(db),
                 caller: opts.caller.or(opts.user),
+                blobs: None,
             })
         }
     }
 
     /// Connect to SurrealDB 3.x / SurrealDB Cloud Earth using stateless 1-RTT HTTP JSON-RPC (`/rpc`).
     pub fn connect_http(opts: ConnectOptions) -> Result<Self> {
+        Self::connect_http_inner(opts)?.blobs_from_env()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn blobs_from_env(self) -> Result<Self> {
+        match std::env::var("SURREALFS_BLOB_STORE") {
+            Ok(spec) if !spec.trim().is_empty() => {
+                Ok(self.with_blob_store(crate::blob_store_from_url(&spec)?))
+            }
+            _ => Ok(self),
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn blobs_from_env(self) -> Result<Self> {
+        Ok(self)
+    }
+
+    fn connect_http_inner(opts: ConnectOptions) -> Result<Self> {
         let http = HttpDbClient::new(&opts);
         Ok(Self {
             db: DbClient::Http(http),
             caller: opts.caller.or(opts.user),
+            blobs: None,
         })
     }
 
@@ -505,6 +535,7 @@ impl SurrealFs {
         Ok(Self {
             db: DbClient::Remote(remote),
             caller: caller.map(|s| s.to_string()),
+            blobs: None,
         })
     }
 
@@ -534,7 +565,27 @@ impl SurrealFs {
         Self {
             db,
             caller: Some(caller_str),
+            blobs: self.blobs.clone(),
         }
+    }
+
+    /// Keep chunk bytes in `store` instead of in the database. Chunks already stored in rows stay
+    /// readable. Writers and readers of one database must share the same store.
+    pub fn with_blob_store(mut self, store: SharedBlobStore) -> Self {
+        self.blobs = Some(store);
+        self
+    }
+
+    /// A handle on the same database that has no blob store.
+    pub fn without_blob_store(&self) -> Self {
+        let mut fs = self.clone();
+        fs.blobs = None;
+        fs
+    }
+
+    /// The configured blob store, if any.
+    pub fn blob_store(&self) -> Option<&SharedBlobStore> {
+        self.blobs.as_ref()
     }
 
     /// Apply SurrealFS database schema (`file.surql` + `record_auth.surql`).
@@ -616,12 +667,14 @@ impl SurrealFs {
         let val: Option<serde_json::Value> = res.take(0usize)?;
         let v = val.ok_or_else(|| SurrealFsError::NotFound(format!("File not found: {}", path)))?;
         if let Some(text) = v.as_str() {
-            return Ok(text.as_bytes().to_vec());
-        }
-        if let Some(bytes) = extract_bytes(Some(&v)) {
+            if !text.is_empty() {
+                return Ok(text.as_bytes().to_vec());
+            }
+        } else if let Some(bytes) = extract_bytes(Some(&v)) {
             return Ok(bytes);
         }
-        Ok(Vec::new())
+        // An empty answer is either an empty file or a chunked one, whose bytes are not in the row.
+        self.read_range(path, 0, i64::MAX as u64).await
     }
 
     /// Write raw bytes to a file with optional optimistic concurrency.
@@ -1435,27 +1488,52 @@ impl SurrealFs {
             {
                 uploaded.insert(chunk.chunk_id.clone());
                 let chunk_data = chunk.data.as_ref().unwrap();
-                let upload_chunk_sql = r#"
+                let location = match &self.blobs {
+                    Some(store) => {
+                        let key = blob_key(&chunk.chunk_id);
+                        store.put(&key, chunk_data.clone()).await?;
+                        Some(key)
+                    }
+                    None => None,
+                };
+                let data_expr = if location.is_some() {
+                    "NONE"
+                } else {
+                    "<bytes>$data"
+                };
+                let location_expr = if location.is_some() {
+                    "$location"
+                } else {
+                    "NONE"
+                };
+                let upload_chunk_sql = format!(
+                    r#"
                     RETURN fn::sfs_upload_chunk(
                         $upload_id,
                         $chunk_id,
                         $uncompressed_size,
                         $stored_size,
                         $codec,
-                        <bytes>$data,
+                        {data_expr},
+                        {location_expr},
                         $caller
                     );
-                "#;
-                self.db
-                    .query(upload_chunk_sql)
+                "#
+                );
+                let mut q = self
+                    .db
+                    .query(&upload_chunk_sql)
                     .bind(("upload_id", session.upload_id.clone()))
                     .bind(("chunk_id", chunk.chunk_id.clone()))
                     .bind(("uncompressed_size", chunk.uncompressed_size as i64))
                     .bind(("stored_size", chunk.stored_size as i64))
                     .bind(("codec", chunk.codec.clone()))
-                    .bind(("data", chunk_data.clone()))
-                    .bind(("caller", self.caller.clone()))
-                    .await?;
+                    .bind(("caller", self.caller.clone()));
+                q = match location {
+                    Some(key) => q.bind(("location", key)),
+                    None => q.bind(("data", chunk_data.clone())),
+                };
+                q.await?.check()?;
             }
         }
 
@@ -1490,7 +1568,7 @@ impl SurrealFs {
     /// Read an arbitrary byte range from a file, efficiently streaming only covering chunks.
     pub async fn read_range(&self, path: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
         let norm = normalize_path(path);
-        let sql = "RETURN fn::sfs_read_bytes_range($path, $offset, $length, $caller);";
+        let sql = "RETURN fn::sfs_read_manifest($path, $offset, $length, $caller);";
         let mut res = self
             .db
             .query(sql)
@@ -1521,6 +1599,11 @@ impl SurrealFs {
         }
 
         // Chunked file: reassemble requested range from covering chunks
+        let size = json_val
+            .get("size")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(u64::MAX);
+        let length = length.min(size.saturating_sub(offset));
         let mut out = vec![0u8; length as usize];
         let mut max_written: usize = 0;
         let chunks_arr = json_val
@@ -1535,7 +1618,19 @@ impl SurrealFs {
             let c_length = c.get("length").and_then(|v| v.as_u64()).unwrap_or(0);
             let codec = c.get("codec").and_then(|v| v.as_str()).unwrap_or("none");
 
-            let raw_bytes = extract_bytes(c.get("bytes")).unwrap_or_default();
+            let raw_bytes = if c.get("tier").and_then(|v| v.as_str()) == Some("object") {
+                let location = c.get("location").and_then(|v| v.as_str()).ok_or_else(|| {
+                    SurrealFsError::Database("Object chunk without a location".to_string())
+                })?;
+                let store = self.blobs.as_ref().ok_or_else(|| {
+                    SurrealFsError::Storage(
+                        "File content is in an object store, but none is configured".to_string(),
+                    )
+                })?;
+                store.get(location, None).await?
+            } else {
+                extract_bytes(c.get("bytes")).unwrap_or_default()
+            };
             let decompressed = decompress_chunk(&raw_bytes, codec)
                 .map_err(|e| SurrealFsError::Other(format!("Failed to decompress chunk: {}", e)))?;
 
@@ -1578,7 +1673,11 @@ impl SurrealFs {
         value_to_serde(s_val)
     }
 
-    /// Clean up unreferenced blobs older than max_age_secs.
+    /// Delete unreferenced blob rows older than `max_age_secs`, then the objects that no row
+    /// names and that were last written more than `max_age_secs` ago. Returns the rows deleted.
+    ///
+    /// `max_age_secs` must exceed the lifetime of an upload session: an object re-put while the
+    /// sweep runs is young and survives it.
     pub async fn gc_blobs(&self, max_age_secs: u64) -> Result<usize> {
         let sql = "RETURN fn::sfs_gc_blobs($max_age_secs);";
         let mut res = self
@@ -1587,7 +1686,42 @@ impl SurrealFs {
             .bind(("max_age_secs", max_age_secs as i64))
             .await?;
         let count: Option<i64> = res.take(0usize)?;
+        if let Some(store) = &self.blobs {
+            self.sweep_objects(store, max_age_secs).await?;
+        }
         Ok(count.unwrap_or(0) as usize)
+    }
+
+    async fn sweep_objects(&self, store: &SharedBlobStore, max_age_secs: u64) -> Result<usize> {
+        let cutoff = chrono::Utc::now().timestamp() - max_age_secs as i64;
+        let old: Vec<(String, String)> = store
+            .list("blobs/")
+            .await?
+            .into_iter()
+            .filter(|o| o.modified.is_some_and(|m| m <= cutoff))
+            .filter_map(|o| {
+                let hash = o.key.rsplit('/').next()?.to_string();
+                Some((o.key, format!("b3:{hash}")))
+            })
+            .collect();
+        let mut removed = 0;
+        for batch in old.chunks(500) {
+            let ids: Vec<String> = batch.iter().map(|(_, id)| id.clone()).collect();
+            let mut res = self
+                .db
+                .query("RETURN fn::sfs_blobs_present($ids);")
+                .bind(("ids", ids))
+                .await?;
+            let present: Vec<String> = res.take(0usize)?;
+            let present: std::collections::HashSet<String> = present.into_iter().collect();
+            for (key, id) in batch {
+                if !present.contains(id) {
+                    store.delete(key).await?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 
     /// Return symbols for a file or folder subtree.

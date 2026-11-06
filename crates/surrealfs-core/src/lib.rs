@@ -2,6 +2,7 @@
 
 pub mod archive;
 pub mod backup;
+pub mod blob;
 pub mod chunking;
 pub mod connector;
 pub mod crdt;
@@ -17,6 +18,7 @@ pub mod webhooks;
 
 pub use archive::*;
 pub use backup::*;
+pub use blob::*;
 pub use chunking::*;
 pub use connector::*;
 pub use crdt::*;

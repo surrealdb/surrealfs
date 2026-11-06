@@ -714,3 +714,26 @@ async def test_indexer_principal_and_embedding_permissions(db, signed_in):
     )
     assert indexer_check[0]["embedded_hash"] == "test_hash"
     assert indexer_check[0]["indexer_version"] == "test_model"
+
+
+async def test_a_record_user_cannot_commit_a_chunked_upload(tenants, db):
+    alice, _ = tenants
+    path = "/home/alice/notes/big.bin"
+    begin = await rows(
+        alice, f"RETURN fn::sfs_upload_begin('{path}', 4, ['b3:aa'], NONE)"
+    )
+    upload = begin["upload_id"]
+    await rows(
+        alice,
+        "RETURN fn::sfs_upload_chunk("
+        "$u, 'b3:aa', 4, 4, 'none', <bytes>'abcd', NONE, NONE)",
+        {"u": upload},
+    )
+    with pytest.raises(Exception, match="service session"):
+        await rows(
+            alice,
+            "RETURN fn::sfs_upload_commit($u, NONE, [0], [4], NONE)",
+            {"u": upload},
+        )
+    assert await rows(db, "SELECT * FROM file WHERE filename = 'big.bin'") == []
+    assert await rows(db, "SELECT * FROM file_chunk") == []

@@ -126,6 +126,7 @@ Configuration is by environment variable or flag:
 | `SURREALFS_BIND`, `SURREALFS_PORT` | Listen address (default `127.0.0.1:8787`)                       |
 | `SURREALFS_SERVER_TOKEN`  | Shared bearer token for trusted callers                                  |
 | `SURREALFS_ALLOW_ANONYMOUS` | Set to `1` to serve without a token on a non-loopback address          |
+| `SURREALFS_BLOB_STORE`    | Keep chunk bytes of large files in an object store: `memory`, `dir:<path>`, or `s3://`, `gs://`, `az://` (see [docs/blob-storage.md](docs/blob-storage.md)) |
 | `OPENAI_API_KEY`          | Enables server-side embeddings and hybrid search                         |
 | `ANTHROPIC_API_KEY`       | Enables the chat agent behind `/api/chat`                                |
 

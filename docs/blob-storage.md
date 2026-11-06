@@ -22,14 +22,15 @@ An object is stored under `blobs/<hash[0..2]>/<hash>` in the deployment's blob b
 
 ## BlobStore
 
-`BlobStore` is an async trait in `surrealfs-core`, usable on native and `wasm32` targets.
+`BlobStore` is an async trait in `surrealfs-core`, usable on native and `wasm32` targets. A body is at most one chunk, so it is passed whole; a file larger than a chunk is moved chunk by chunk.
 
-- `put(key, body, len)` stores a byte stream. It is idempotent: storing a key that exists with the same content succeeds.
-- `get(key, range)` returns a byte stream for a whole object or a byte range.
-- `head(key)` returns the size or none.
+- `put(key, data)` stores a body at `key`, replacing any object there. Rewriting a key refreshes its modification time.
+- `get(key, range)` returns a whole object or a byte range. A missing key is `NotFound`.
+- `head(key)` returns the size and modification time, or none.
 - `delete(key)` removes an object. Deleting a missing key succeeds.
+- `list(prefix)` returns the objects under a prefix, for the garbage sweep.
 
-Backends: an in-memory store for tests, a local directory for native single-node use, S3-compatible and cloud stores for native servers, and the R2 binding in the Cloudflare Worker. The backend is chosen by deployment configuration. The database never holds object-store credentials.
+Backends: `MemoryBlobStore` for tests and for wasm, `ObjectStoreBlobStore` over any `object_store` backend on native targets (a local directory, or S3, GCS and Azure with the `cloud-stores` feature), and the R2 binding in the Cloudflare Worker. On native targets `SURREALFS_BLOB_STORE` selects one at connect time: `memory`, `dir:<path>` or a bare path, `s3://`, `gs://` or `az://`, with credentials from the environment. With none set, chunk bytes stay in the database (tier `inline`). The database never holds object-store credentials.
 
 ## Write path
 
@@ -51,7 +52,11 @@ A whole-file read of a chunked file uses this path. No surface assembles a chunk
 
 ## Garbage collection
 
-`fn::sfs_gc_blobs` selects `blob` rows with `refs <= 0` older than the grace period and not pinned by a live upload session, deletes each row and then its object. A sweep also lists objects with no `blob` row older than the grace period and deletes them. The grace period exceeds the upload session lifetime.
+A `blob` row is live while a `file_chunk` row names it. Deleting a file deletes its chunk rows, and replacing a file's content deletes the old ones. `fn::sfs_gc_blobs` deletes `blob` rows older than the grace period that no chunk row names and that no live upload session lists. `gc_blobs` then sweeps the object store: it deletes each object last written before the grace period whose chunk id has no `blob` row. The grace period must exceed the upload session lifetime, so an object re-put during a sweep is young and survives it.
+
+## Permissions of the manifest
+
+`file_chunk` is writable only by a service session, so `fn::sfs_upload_commit` refuses a record-user session instead of committing a file whose manifest the permissions would silently drop. Chunked uploads run through a gateway or client session that passes the caller's identity.
 
 ## Compression
 

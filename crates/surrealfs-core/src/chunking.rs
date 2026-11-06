@@ -262,10 +262,14 @@ pub fn decompress_chunk(data: &[u8], codec: &str) -> Result<Vec<u8>, std::io::Er
         #[cfg(not(target_arch = "wasm32"))]
         "zstd" => zstd::decode_all(data),
         #[cfg(target_arch = "wasm32")]
-        "zstd" => Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "zstd decompression is not supported on wasm32",
-        )),
+        "zstd" => {
+            use std::io::Read;
+            let mut decoder = ruzstd::decoding::StreamingDecoder::new(data)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+            let mut out = Vec::new();
+            decoder.read_to_end(&mut out)?;
+            Ok(out)
+        }
         _ => Ok(data.to_vec()),
     }
 }

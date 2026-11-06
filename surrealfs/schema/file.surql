@@ -457,6 +457,14 @@ DEFINE EVENT OVERWRITE evt_file_hash ON file
                                     ELSE '' END
 );
 
+-- A file's chunk rows go with it, whichever path deleted the file. A blob is collected once no
+-- chunk row names it (fn::sfs_gc_blobs).
+DEFINE EVENT OVERWRITE evt_file_release_chunks ON file
+    WHEN $event = 'DELETE'
+    THEN {
+        DELETE file_chunk WHERE file = $before.id;
+    };
+
 -- Enqueue jobs for automatic understanding pipeline (detection, chunking, symbols)
 DEFINE EVENT OVERWRITE evt_file_jobs ON file
     WHEN $event != "DELETE" AND ($before.content != $after.content OR $before.file != $after.file)
@@ -820,6 +828,7 @@ DEFINE FIELD OVERWRITE length       ON file_chunk TYPE option<int>;
 DEFINE FIELD OVERWRITE blob         ON file_chunk TYPE option<record<blob>>;
 DEFINE INDEX OVERWRITE idx_chunk_file_order ON file_chunk FIELDS file, chunk_index;
 DEFINE INDEX OVERWRITE idx_chunk_offset ON file_chunk FIELDS file, offset;
+DEFINE INDEX OVERWRITE idx_chunk_blob ON file_chunk FIELDS blob;
 DEFINE INDEX OVERWRITE idx_hnsw_chunk_embedding ON file_chunk FIELDS embedding
     HNSW DIMENSION 1536 DIST COSINE TYPE F32;
 
@@ -834,6 +843,7 @@ DEFINE FIELD OVERWRITE codec      ON blob TYPE string;
 DEFINE FIELD OVERWRITE tier       ON blob TYPE string;
 DEFINE FIELD OVERWRITE bytes      ON blob TYPE option<bytes>;
 DEFINE FIELD OVERWRITE location   ON blob TYPE option<string>;
+-- Not maintained: a blob is live while a file_chunk row names it.
 DEFINE FIELD OVERWRITE refs       ON blob TYPE int DEFAULT 0;
 DEFINE FIELD OVERWRITE scope      ON blob TYPE string;
 DEFINE FIELD OVERWRITE created_at ON blob TYPE datetime DEFAULT time::now();
@@ -2155,14 +2165,17 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_begin(
     };
 } PERMISSIONS FULL;
 
--- Upload Chunk: Store individual content-addressed chunk
+-- Upload Chunk: Record one content-addressed chunk. With $location the bytes are already in
+-- the object store under that key (tier 'object'); without it they are held in the row
+-- (tier 'inline').
 DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
     $upload_id: string,
     $chunk_id: string,
     $uncompressed_size: int,
     $stored_bytes: int,
     $codec: string,
-    $data: bytes,
+    $data: option<bytes>,
+    $location: option<string>,
     $caller: option<string>
 ) {
     LET $who = fn::sfs_caller($caller);
@@ -2174,6 +2187,9 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
     IF $who != 'root' AND $up.caller != $who {
         THROW 'sfs:denied';
     };
+    IF $data IS NONE AND $location IS NONE {
+        THROW 'sfs:invalid: a chunk needs bytes or a location';
+    };
 
     LET $blob_id = type::record('blob', $chunk_id);
     LET $existing_blob = (SELECT id FROM ONLY $blob_id);
@@ -2182,8 +2198,9 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
             size: $uncompressed_size,
             stored: $stored_bytes,
             codec: $codec,
-            tier: 'inline',
-            bytes: $data,
+            tier: IF $location IS NONE { 'inline' } ELSE { 'object' },
+            bytes: IF $location IS NONE { $data } ELSE { NONE },
+            location: $location,
             refs: 0,
             scope: $up.scope,
             created_at: time::now()
@@ -2203,6 +2220,12 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
     $lengths: array<int>,
     $caller: option<string>
 ) {
+    -- The manifest is written with the permissions of the session, and file_chunk is writable
+    -- by a record session only when it is a service one (a system session bypasses permissions). Refuse up front: a denied CREATE is silent, so a record user
+    -- would otherwise commit a file with a size and no content.
+    IF $auth IS NOT NONE AND !($access = 'indexer' OR fn::sfs_me() = 'root') {
+        THROW 'sfs:denied: chunked uploads need a service session';
+    };
     LET $up_rec = type::record($upload_id);
     LET $up = (SELECT * FROM ONLY $up_rec);
     IF $up IS NONE {
@@ -2270,7 +2293,6 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
             length: $len,
             blob: $b_rec
         };
-        UPDATE $b_rec SET refs += 1;
     };
 
     LET $chunk_blobs = (SELECT blob.stored AS stored FROM file_chunk WHERE file = $file_id AND blob != NONE);
@@ -2297,8 +2319,10 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
     RETURN fn::sfs_stat($path);
 } PERMISSIONS FULL;
 
--- Range Read: Read sub-slice of a chunked or standard file
-DEFINE FUNCTION OVERWRITE fn::sfs_read_bytes_range(
+-- Read Manifest: authorise a read of [$offset, $offset + $length) and return what covers it.
+-- A chunked file returns its covering chunks, without bytes for chunks held in the object
+-- store (the caller fetches those by `location`); an unchunked file returns its content.
+DEFINE FUNCTION OVERWRITE fn::sfs_read_manifest(
     $path: string,
     $offset: int,
     $length: int,
@@ -2309,25 +2333,35 @@ DEFINE FUNCTION OVERWRITE fn::sfs_read_bytes_range(
     IF $id IS NONE {
         THROW 'sfs:not_found';
     };
-    LET $row = (SELECT content, file, gate, owner, group, mode FROM ONLY $id);
+    LET $row = (SELECT content, file, size, generation, content_type, gate, owner, group, mode FROM ONLY $id);
     IF $who != 'root' AND !fn::sfs_can_read_grp($row.gate, $row.owner, $row.mode, $who, $row.group) {
         THROW 'sfs:denied';
     };
 
     LET $manifest = (
-        SELECT offset, length, blob.bytes AS bytes, blob.codec AS codec 
-        FROM file_chunk 
+        SELECT
+            offset,
+            length,
+            blob.size AS size,
+            blob.codec AS codec,
+            blob.tier AS tier,
+            blob.location AS location,
+            IF blob.tier = 'object' { NONE } ELSE { blob.bytes } AS bytes
+        FROM file_chunk
         WHERE file = $id AND blob != NONE
         ORDER BY offset
     );
 
     IF array::len($manifest) > 0 {
         LET $end = $offset + $length;
-        LET $covering = array::filter($manifest, |$c| 
+        LET $covering = array::filter($manifest, |$c|
             $c.offset < $end AND ($c.offset + $c.length) > $offset
         );
         RETURN {
             chunked: true,
+            size: $row.size,
+            generation: $row.generation,
+            content_type: $row.content_type,
             chunks: $covering
         };
     };
@@ -2336,32 +2370,55 @@ DEFINE FUNCTION OVERWRITE fn::sfs_read_bytes_range(
         LET $sub = string::slice($row.content, $offset, $length);
         RETURN {
             chunked: false,
+            size: $row.size,
+            generation: $row.generation,
+            content_type: $row.content_type,
             data: $sub
         };
     };
     IF $row.file IS NOT NONE {
         RETURN {
             chunked: false,
+            size: $row.size,
+            generation: $row.generation,
+            content_type: $row.content_type,
             data: $row.file
         };
     };
     RETURN {
         chunked: false,
+        size: $row.size,
+        generation: $row.generation,
+        content_type: $row.content_type,
         data: ''
     };
 } PERMISSIONS FULL;
 
--- Garbage Collector: Delete unreferenced blobs older than max age
+-- Garbage Collector: Delete blob rows older than max age that no chunk row names. A chunk
+-- named by a live upload session is pinned: the session was told it need not send that chunk.
+-- Objects of deleted rows are removed by the object sweep, not here.
 DEFINE FUNCTION OVERWRITE fn::sfs_gc_blobs($max_age_secs: int) {
     LET $threshold = time::now() - duration::from_secs($max_age_secs);
+    LET $pinned = array::flatten(
+        (SELECT VALUE chunk_ids FROM upload WHERE expires_at > time::now())
+    );
+    LET $used = (SELECT VALUE blob FROM file_chunk WHERE blob != NONE);
     LET $dead = (
-        SELECT VALUE id FROM blob 
-        WHERE refs <= 0 AND created_at < $threshold
+        SELECT VALUE id FROM blob
+        WHERE created_at < $threshold
+            AND record::id(id) NOT IN $pinned
+            AND id NOT IN $used
     );
     FOR $b IN $dead {
         DELETE $b;
     };
     RETURN array::len($dead);
+} PERMISSIONS FULL;
+
+-- Which of the chunk ids still have a blob row.
+DEFINE FUNCTION OVERWRITE fn::sfs_blobs_present($ids: array<string>) {
+    LET $recs = array::map($ids, |$i| type::record('blob', $i));
+    RETURN (SELECT VALUE record::id(id) FROM blob WHERE id IN $recs);
 } PERMISSIONS FULL;
 
 -- Disk Usage (du): Instant usage query
