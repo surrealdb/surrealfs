@@ -44,31 +44,111 @@
 > between releases, and it is not yet recommended for production use. Bug
 > reports and feedback are very welcome.
 
-Give an agent somewhere durable to keep its work. SurrealFS is a `file` table
-plus the tools to hand it to a model: files and folders, full-text and semantic
-search, all queryable with SurrealQL because it is just a table.
+Give an agent somewhere durable to keep its work. SurrealFS is a `file` table plus everything needed to hand it to a model, a person or a program: files and folders, versions, full-text and semantic search, unix-style permissions, and live collaboration, all queryable with SurrealQL because it is just a table.
 
 ![The file browser](assets/surrealfs-browser.png)
 
-*The file browser is a standalone tool that can be used to browse and edit files in a SurrealDB database.*
+*The file browser is served by the SurrealFS server and edits the same table the agents write to.*
+
+## What is in the box
+
+One schema, several ways to reach it.
+
+|                                  |                                                                                  |
+| -------------------------------- | -------------------------------------------------------------------------------- |
+| `surrealfs/schema/`              | The data model: the `file` table, permissions, search and every `fn::sfs_*` function |
+| `crates/surrealfs-core`          | The Rust client: files, search, history, workspaces, CRDTs, storage, trust       |
+| `crates/surrealfs-server`        | The gateway: REST and RPC, MCP, chat, embeddings, WebDAV, S3, NFS, SFTP, browser UI |
+| `crates/surrealfs-cli`           | The `surrealfs-rs` command line and the `git-remote-surrealfs` helper           |
+| `crates/surrealfs-fuse`          | Mount a SurrealFS as a local directory                                           |
+| `crates/surrealfs-shim`          | A zero-privilege `LD_PRELOAD` interceptor and a WASI adapter                    |
+| `crates/surrealfs-sim`           | A deterministic simulator that checks tree, lock and branch invariants          |
+| `surrealfs/` (Python)            | The async `SurrealFs` library, agent tool surfaces and the MCP server            |
+| `packages/sdk-ts`                | The TypeScript SDK `@surrealdb/fs`                                               |
+| `apps/macos-menu`                | A macOS menu bar app with a live activity feed and global search                |
+| `worker/`                        | A Cloudflare Worker that runs the gateway as WebAssembly                         |
 
 ## Requirements
 
-- Python 3.12+
-- A SurrealDB 3.x server.
+- A SurrealDB 4.x server. The Rust crates use the `surrealdb` 4.0 SDK.
+- Rust (stable) for the server, CLI, FUSE and shim.
+- Python 3.11+ for the Python library and MCP server.
+- [bun](https://bun.sh) to build the browser UI and run the TypeScript tests.
 
-## Install
-
-```bash
-pip install surrealfs                    # core, and the Hermes plugin
-pip install "surrealfs[pydantic-ai]"     # + the pydantic-ai toolset
-pip install "surrealfs[mcp]"             # + the MCP server
-pip install "surrealfs[browser]"         # + the file browser
-```
+The TypeScript SDK depends on `surrealdb.js` 2.x, whose version check rejects 4.x servers. Connect with `{ versionCheck: false }` until a release supports 4.0. Live queries (`fs.watch`) are not available from the TypeScript SDK on a 4.x server for the same reason.
 
 ## Quickstart
 
-Start a database (`just db`), then:
+Start a database, initialise the schema once, then start the gateway.
+
+```bash
+surreal start --allow-all -u root -p root --bind 127.0.0.1:8000 memory   # or: just db
+
+cargo run -p surrealfs-cli -- init
+cargo run -p surrealfs-cli -- write /notes/today.md "# Today"
+cargo run -p surrealfs-cli -- cat /notes/today.md
+cargo run -p surrealfs-cli -- grep today
+
+just server        # builds the UI, then serves everything on http://127.0.0.1:7933
+```
+
+The CLI reads `SURREALDB_URL` (default `ws://127.0.0.1:8000/rpc`), `SURREALDB_NS`, `SURREALDB_DB`, `SURREALDB_USER` and `SURREALDB_PASS`, and `SURREALFS_CALLER` to act as a given user.
+
+## The gateway server
+
+`surrealfs-server` (or `surrealfs-rs serve gateway`) is the single process that exposes a database to everything else.
+
+| Surface          | Path or port                       | Notes                                                       |
+| ---------------- | ---------------------------------- | ----------------------------------------------------------- |
+| Browser UI       | `/`                                | The React app, served from `SURREALFS_STATIC_DIR`           |
+| REST             | `/api/*`, `/raw`                   | Files, tree, search, history, graph, activity, chat, RPC    |
+| MCP              | `/mcp`                             | JSON-RPC tools for any MCP client                           |
+| WebDAV           | `/dav/*`                           | Mountable from Finder or Explorer; supports locking         |
+| S3               | `/s3/*`                            | SigV4 with credentials created by `surrealfs-rs credential` |
+| NFS and SFTP     | `serve nfs`, `serve sftp`          | Separate listeners                                          |
+
+Configuration is by environment variable or flag:
+
+| Variable                  | Purpose                                                                  |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `SURREALDB_URL`           | The database, for example `http://127.0.0.1:8000`                        |
+| `SURREALDB_NS`, `SURREALDB_DB` | Namespace and database (defaults `surrealfs` and `main`)            |
+| `SURREALDB_USER`, `SURREALDB_PASS`, `SURREALDB_TOKEN` | Credentials the gateway uses                    |
+| `SURREALFS_BIND`, `SURREALFS_PORT` | Listen address (default `127.0.0.1:8787`)                       |
+| `SURREALFS_SERVER_TOKEN`  | Shared bearer token for trusted callers                                  |
+| `SURREALFS_ALLOW_ANONYMOUS` | Set to `1` to serve without a token on a non-loopback address          |
+| `OPENAI_API_KEY`          | Enables server-side embeddings and hybrid search                         |
+| `ANTHROPIC_API_KEY`       | Enables the chat agent behind `/api/chat`                                |
+
+### Authentication
+
+With `SURREALFS_SERVER_TOKEN` set, a caller sends `Authorization: Bearer <token>` and acts as the user named in `X-SurrealFS-User` (default `root`). Without a token the identity headers are ignored and every request runs as the gateway's own identity, so the server refuses a non-loopback bind unless `SURREALFS_ALLOW_ANONYMOUS=1`.
+
+Credentials for WebDAV, S3, NFS and SFTP are created with `surrealfs-rs credential create`. Secrets are stored as salted PBKDF2-HMAC-SHA256 hashes, except for `s3`, whose signing key has to stay recoverable.
+
+## The command line
+
+`surrealfs-rs` covers the whole surface. A selection:
+
+```bash
+surrealfs-rs ls /notes                     # list
+surrealfs-rs write /a.md "text"            # write
+surrealfs-rs grep "pattern"                # full-text search
+surrealfs-rs history /a.md                 # versions
+surrealfs-rs restore /a.md 2               # roll back to generation 2
+surrealfs-rs fork <src> <dst>              # zero-copy workspace branch
+surrealfs-rs diff <branch>                 # what the branch changed
+surrealfs-rs merge <src> <dst>             # merge it back
+surrealfs-rs mount ~/brain                 # FUSE mount
+surrealfs-rs import-git ./repo /code       # import a repository with history
+surrealfs-rs pack "how do refunds work"    # context packed to a token budget
+surrealfs-rs backup / ./snapshots          # content-addressed backup
+surrealfs-rs --help                        # everything else
+```
+
+Content is stored in FastCDC chunks addressed by BLAKE3, so large files are deduplicated, range reads are cheap and `du` is instant. Files can be encrypted with AES-256-GCM, shared by link, placed under legal hold, or exported as tar and zip.
+
+## The Python library
 
 ```python
 from surrealdb import AsyncSurreal
@@ -86,17 +166,15 @@ await fs.ls("/notes")
 await fs.search_text("refactor")
 ```
 
-You create and own the connection. SurrealFS never connects, signs in, or
-selects a namespace.
+```bash
+pip install surrealfs                    # core, and the Hermes plugin
+pip install "surrealfs[pydantic-ai]"     # + the pydantic-ai toolset
+pip install "surrealfs[mcp]"             # + the MCP server
+```
 
-`user` is required and has no default. Files carry a unix owner and mode, and
-the database cannot tell SurrealFS who is asking (every credential is a system
-credential), so the identity comes from you. See [Permissions](#permissions).
+You create and own the connection. SurrealFS never connects, signs in, or selects a namespace. `user` is required and has no default: files carry a unix owner and mode, and the database cannot tell SurrealFS who is asking when every credential is a system credential, so the identity comes from you. See [Permissions](#permissions).
 
-## The plain async API
-
-`SurrealFs` returns structured `FileEntry` and `SearchHit` objects, not
-pre-formatted strings. Build whatever integration you like on top.
+`SurrealFs` returns structured `FileEntry` and `SearchHit` objects, not pre-formatted strings.
 
 |          |                                                               |
 | -------- | ------------------------------------------------------------- |
@@ -105,7 +183,7 @@ pre-formatted strings. Build whatever integration you like on top.
 | Organise | `mv` `cp` `rm` `chmod`                                        |
 | Search   | `search` `search_text` `search_semantic` `reindex_embeddings` |
 
-## Integrations
+### Agent integrations
 
 Six ways to hand it to an agent, each with its own README:
 
@@ -115,133 +193,72 @@ Six ways to hand it to an agent, each with its own README:
 | **[Raw JSON tool schemas](surrealfs/integrations/json_tools/README.md)** | plain dicts in Anthropic or OpenAI shape, no framework                | core                     |
 | **[Hermes](surrealfs/integrations/hermes/README.md)**                    | the 14 `surrealfs_*` tools plus a bundled notes skill                 | core                     |
 | **[Hermes memory](surrealfs/integrations/hermes_memory/README.md)**      | files every completed turn, and recalls context before each one       | core                     |
-| **[MCP](surrealfs/integrations/mcp/README.md)**                          | the 16 tools over stdio, for Claude, Cursor, Zed, Codex or your own    | `surrealfs[mcp]`         |
+| **[MCP](surrealfs/integrations/mcp/README.md)**                          | the 16 tools over stdio, for Claude, Cursor, Zed, Codex or your own   | `surrealfs[mcp]`         |
 | **[Claude](surrealfs/integrations/claude/README.md)**                    | that server as a plugin, bundled with the `/brain` skill              | `surrealfs[mcp,agent-memory]` |
 
-The four tool surfaces are generated from one registry in
-`surrealfs/tools/`, so they cannot drift apart. Tool descriptions are markdown in
-`surrealfs/tools/docs/`. Edit them as prose; they are prompt text. The memory
-provider is the odd one out: it exposes no tools of its own, because the Hermes
-plugin's already cover explicit reads and writes.
+The tool surfaces are generated from one registry in `surrealfs/tools/`, so they cannot drift apart. Tool descriptions are markdown in `surrealfs/tools/docs/`. Edit them as prose; they are prompt text. The gateway also exposes the same tools over HTTP at `/mcp`.
 
-## The file browser
+## The TypeScript SDK
 
-Point the agents at a shared SurrealDB (a Cloud instance, say)
-and every person on the team can run the browser on their
-own machine to see and edit the same filesystem the agents are writing to:
+`packages/sdk-ts` is `@surrealdb/fs`: the same operations over a `surrealdb` connection, plus an AI tool adapter (`@surrealdb/fs/ai`) and the schema as a string for `applySchema`.
 
 ```bash
-pip install "surrealfs[browser]"
-surrealfs-browser                # http://127.0.0.1:7933
+cd packages/sdk-ts && bun install && bun test
 ```
 
-Tree on the left, file on the right, chat with the note-taking agent on the far
-right. Text is editable and saves back to the table, markdown renders with a
-source toggle, agent-authored HTML renders in a sandboxed iframe, images display,
-and the search box is the same hybrid `fs.search` the agent's own tool calls.
-Conversations are files too, under `/_sessions/`: open one from the tree and it
-replays.
+## Mounting and intercepting
 
-Credentials come from a `.env` in the working directory, or the environment
-directly, which wins over the file:
+- **FUSE.** `surrealfs-rs mount <dir>` mounts a filesystem, including a synthetic `/proc`-style tree and extended attributes for metadata.
+- **Shim.** `surrealfs-shim` redirects `/surrealfs/...` paths to SurrealFS for any program, without privileges, using `LD_PRELOAD`. A WASI adapter does the same for WebAssembly guests.
+- **macOS menu bar.** `apps/macos-menu` shows connection state, mounts a profile, streams agent activity with one-click undo and offers a global search window (`swift build` and `swift test` in that directory).
+
+## Deploying on Cloudflare
+
+The gateway compiles to WebAssembly and runs in a Worker, talking to SurrealDB over HTTP. The static UI is served from Workers Assets.
 
 ```bash
-SURREALDB_URL=wss://….surreal.cloud/rpc
-SURREALDB_USER=…
-SURREALDB_PASS=…
-SURREALDB_NAMESPACE=…
-SURREALDB_DATABASE=…
-SURREALDB_AUTH_LEVEL=database    # root (default) | namespace | database
-OPENAI_API_KEY=…                 # optional: makes search hybrid
-ANTHROPIC_API_KEY=…              # optional: enables the chat panel
+rustup target add wasm32-unknown-unknown
+cargo install wasm-bindgen-cli          # the version must match the wasm-bindgen crate
+just ui                                  # build the browser UI
+npx wrangler secret put SURREALDB_URL    # for example https://your-instance.surreal.cloud
+npx wrangler secret put SURREALDB_USER
+npx wrangler secret put SURREALDB_PASS
+npx wrangler secret put SURREALFS_SERVER_TOKEN
+just deploy                              # wrangler runs the cargo and wasm-bindgen build
 ```
 
-`SURREALDB_AUTH_LEVEL` picks which kind of user the credentials are, since the
-server infers that from the signin payload: a database-scoped Cloud credential
-needs `database`. All three are system users, which is why SurrealFS enforces
-permissions itself rather than leaning on the database; `SURREALFS_USER` (or
-`--user`) picks who the browser acts as, defaulting to root, which sees every
-private home. Every variable has a command-line form too
-(`surrealfs-browser --help`).
-
-The server binds loopback. `--host 0.0.0.0` exposes it, and then anyone who can
-reach the port has whatever access those credentials do. The page has no login
-of its own.
-
-The page is a React app built on the [SurrealDB UI Kit][ui-kit]. Its source is
-in `surrealfs/browser/ui/`, and the build output it serves is gitignored, so
-working on this repo needs [bun][bun]:
-
-```bash
-just ui        # build the page into surrealfs/browser/static
-just ui-dev    # vite dev server, proxying the API to `just browser`
-```
-
-`just browser` builds it for you. Nothing else in the project needs bun --
-`just check` stays Python-only.
-
-[ui-kit]: https://github.com/surrealdb/ui-kit
-[bun]: https://bun.sh
+Apply the schema to the target database once with `surrealfs-rs init` (or `python -m surrealfs.schema`). `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are optional secrets that enable embeddings and chat. To try the Worker without deploying, run `npx wrangler dev --local --var SURREALDB_URL:http://127.0.0.1:8000 --var SURREALDB_USER:root --var SURREALDB_PASS:root`.
 
 ## Semantic search
 
-`fs.search` runs a full-text arm and a vector arm and fuses them by rank.
-SurrealFS never calls an embedding model: you pass the embedder, so you pick
-the provider, and without one search stays full-text only. An OpenAI embedder
-and a daemon that keeps the vectors current ship in `surrealfs.embed`:
+`fs.search` runs a full-text arm and a vector arm and fuses them by rank. SurrealFS never calls an embedding model: you pass the embedder, so you pick the provider, and without one search stays full-text only. The gateway embeds files on write through the OpenAI embeddings API when `OPENAI_API_KEY` is set (`OPENAI_BASE_URL` and `SURREALFS_EMBED_MODEL` point it elsewhere), and from Python you pass your own embedder to `reindex_embeddings`.
 
-```bash
-just embed              # poll every 5s; --once for a single pass
-```
-
-The queries are custom SurrealQL functions in the schema, not Python, so any
-client gets the same ranked, permission-filtered retrieval:
+The queries are custom SurrealQL functions in the schema, so any client gets the same ranked, permission-filtered retrieval:
 
 ```surql
 SELECT path, rrf_score FROM fn::sfs_hybrid_search("how do I get paid", $qvec, 5, NONE, 'alice');
 ```
 
-`fn::sfs_search_text` and `fn::sfs_search_semantic` are the single arms. The last
-argument is who is asking: a system credential passes it, a record credential
-overrides it. `SurrealFs` calls these too, so there is only one definition.
-
-See [Semantic search](docs/semantic-search.md) for the ranking, `match="all"`,
-the SurrealQL surface, and wiring it into the agent toolset.
+`fn::sfs_search_text`, `fn::sfs_search_semantic` and `fn::sfs_search_sections` are the single arms. The last argument is who is asking: a system credential passes it, a record credential overrides it. See [Semantic search](docs/semantic-search.md) for the ranking, `match="all"` and the SurrealQL surface.
 
 ## Permissions
 
-Files carry a unix `owner` and `mode`, `/home/<user>` is private, everything
-else is shared, and `chmod` moves things between the two. `SurrealFs` enforces
-it. See [Permissions](docs/permissions.md) for the rules and the reasoning.
+Files carry a unix `owner` and `mode`, `/home/<user>` is private, everything else is shared, and `chmod` moves things between the two. Groups, share links and legal holds build on that. The client enforces it, and the schema can enforce it too. See [Permissions](docs/permissions.md) for the rules and the reasoning.
 
 ### Letting the database enforce it too (optional)
 
-The above is a real boundary for an agent, since no tool exposes raw SurrealQL,
-but not one against anyone holding the database credential. If several agents share
-a database, opt in:
+Client-side enforcement is a real boundary for an agent, since no tool exposes raw SurrealQL, but not against anyone holding a database credential. If several agents share a database, opt in:
 
 ```bash
 python -m surrealfs.schema --record-auth   # adds the `user` table + record access
 python -m surrealfs.users add alice        # creates alice and /home/alice (0700)
 ```
 
-```bash
-SURREALDB_AUTH_LEVEL=record SURREALDB_USER=alice SURREALDB_PASS=…
-```
-
-Now SurrealDB itself refuses to return or modify anything in another user's
-home, whatever query it is asked. Nothing else changes: the tools, the modes
-and `chmod` behave the same, and `SurrealFs` picks its identity up from the
-credential instead of the environment. Deployments that do not opt in are
-unaffected: the permissions clause is inert for system credentials.
+Then connect as that record user (`SURREALDB_AUTH_LEVEL=record SURREALDB_USER=alice SURREALDB_PASS=…`). SurrealDB itself refuses to return or modify anything in another user's home, whatever query it is asked. A parent folder the caller cannot read is treated as closed, so a hidden folder never opens its children. Deployments that do not opt in are unaffected: the permissions clause is inert for system credentials.
 
 ## The schema
 
-`surrealfs/schema/file.surql` is the whole data model, and it is worth reading.
-The key idea: a file's `parent` is a record link and `path` is a **computed**
-field derived from the parent chain. Nothing stores a path, so renaming or
-moving a folder is a single `UPDATE` and every descendant's path follows for
-free.
+`surrealfs/schema/file.surql` is the whole data model, and it is worth reading. The key idea: a file's `parent` is a record link and `path` is a **computed** field derived from the parent chain. Nothing stores a path, so renaming or moving a folder is a single `UPDATE` and every descendant's path follows for free.
 
 ```surql
 DEFINE FIELD path ON file COMPUTED (
@@ -249,32 +266,37 @@ DEFINE FIELD path ON file COMPUTED (
 ) TYPE string;
 ```
 
-A folder is just a row with no `content`, no `file` bytes, and no `symlink`,
-also computed, as `is_folder`. `hash` is maintained by an event, and there are
-HNSW and BM25 indexes for the two search modes.
+A folder is a row with no `content`, no `file` bytes and no `symlink`, also computed, as `is_folder`. `hash` is maintained by an event, and there are HNSW and BM25 indexes for the two search modes. `owner`, `mode` and the computed `gate` are the permission model.
 
-`owner`, `mode` and the computed `gate` are the permission model. See
-[Permissions](#permissions) below and `docs/permissions.md`.
-
-You can apply it without writing any code:
+Apply it without writing code:
 
 ```bash
+surrealfs-rs init                              # from Rust
 python -m surrealfs.schema                     # uses SURREALDB_* env vars
 python -m surrealfs.schema --print             # dump the DDL, connect to nothing
 ```
+
+Two engine behaviours shape how the schema is written. Function parameters must not be named `$parent` or `$token`, which SurrealDB 4 shadows or reserves. A KNN operator cannot share a `WHERE` clause with a predicate on a variable derived from a function call, so section search scans first and filters its candidates in a second query.
 
 ## Development
 
 ```bash
 just db        # start SurrealDB in one terminal
 just schema    # apply the file table to it
-just test      # run the suite (starts its own server if needed)
-just check     # lint + test
-just browser   # the file browser on :7933
-just agent     # the note-taking chat agent on :7932
-just loop "…"  # the framework-free Anthropic tool-use loop
-just mcp       # the MCP server over stdio, as Claude Desktop launches it
+just server    # the gateway and browser UI on :7933
+just ui-dev    # vite dev server, proxying the API to `just server`
+just test      # the Python suite (starts its own server)
+just lint      # ruff and `surreal validate`
 ```
 
-Tests start a throwaway `surreal` server; set `SURREALFS_TEST_URL` to reuse one
-you already have.
+Every suite starts a throwaway `surreal` server from your `PATH`, which must be 4.x. Set `SURREALFS_TEST_URL` to reuse one you already have.
+
+```bash
+cargo test --workspace                  # Rust
+uv run pytest                           # Python
+(cd packages/sdk-ts && bun test)        # TypeScript SDK
+(cd surrealfs/browser/ui && bun test)   # browser UI
+cargo check -p surrealfs-core -p surrealfs-server --target wasm32-unknown-unknown   # Worker build
+```
+
+CI runs all of these on every pull request.
