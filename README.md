@@ -1,10 +1,3 @@
-<a href="https://surrealdb.com#gh-dark-mode-only" target="_blank">
-    <img width="100%" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/white/hero.png" alt="SurrealDB Hero">
-</a>
-<a href="https://surrealdb.com#gh-light-mode-only" target="_blank">
-    <img width="100%" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/black/hero.png" alt="SurrealDB Hero">
-</a>
-
 <h1 align="center">SurrealFS</h1>
 <p align="center">A filesystem-based memory layer for agents, with hybrid search, backed by SurrealDB.</p>
 
@@ -57,11 +50,6 @@
 </p>
 
 <br>
-
-> [!WARNING]
-> **SurrealFS is in beta.** The API, schema, and CLI may change in breaking ways
-> between releases, and it is not yet recommended for production use. Bug
-> reports and feedback are very welcome.
 
 <h2><img height="20" src="https://raw.githubusercontent.com/surrealdb/surrealdb/main/img/whatissurreal.svg">&nbsp;&nbsp;What is SurrealFS?</h2>
 
