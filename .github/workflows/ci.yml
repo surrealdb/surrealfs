@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main, next]
+  pull_request:
+
+env:
+  SURREAL_VERSION: v4.0.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install SurrealDB
+        run: |
+          curl -sSf https://install.surrealdb.com | sh -s -- --version "$SURREAL_VERSION"
+          surreal version
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --workspace --all-targets
+      - run: cargo test --locked --workspace
+      - run: cargo check --locked -p surrealfs-core -p surrealfs-server --target wasm32-unknown-unknown
+
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Install SurrealDB
+        run: |
+          curl -sSf https://install.surrealdb.com | sh -s -- --version "$SURREAL_VERSION"
+          surreal version
+      - run: uv run --locked ruff check .
+      - run: surreal validate surrealfs/schema/*.surql
+      - run: uv run --locked pytest --quiet --no-summary
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install SurrealDB
+        run: |
+          curl -sSf https://install.surrealdb.com | sh -s -- --version "$SURREAL_VERSION"
+          surreal version
+      - run: bun install --frozen-lockfile
+        working-directory: packages/sdk-ts
+      - run: bun test
+        working-directory: packages/sdk-ts
+      - run: bun install --frozen-lockfile
+        working-directory: surrealfs/browser/ui
+      - run: bun test
+        working-directory: surrealfs/browser/ui
