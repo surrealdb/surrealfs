@@ -3,7 +3,7 @@ main = "worker/index.mjs"
 compatibility_date = "2025-03-01"
 
 [build]
-command = "cargo build -p surrealfs-server --target wasm32-unknown-unknown --release"
+command = "cargo build --locked -p surrealfs-server --target wasm32-unknown-unknown --release && wasm-bindgen target/wasm32-unknown-unknown/release/surrealfs_server.wasm --target web --out-dir pkg"
 
 [assets]
 directory = "./surrealfs/browser/static"

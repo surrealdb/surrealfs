@@ -34,3 +34,7 @@ node_modules/
 # Rust / Cargo
 target/
 
+
+# Wrangler / wasm-bindgen output
+/pkg
+/.wrangler
