@@ -211,7 +211,7 @@ impl FastCdcConfig {
 /// Hashes and compresses one chunk of a file that starts at `offset`.
 pub fn encode_chunk(chunk_bytes: &[u8], offset: u64) -> BlobChunk {
     let hash = blake3::hash(chunk_bytes).to_hex().to_string();
-    let chunk_id = format!("b3:{}", hash);
+    let chunk_id = format!("b3-{}", hash);
 
     // Attempt transparent compression with zstd on native targets
     #[cfg(not(target_arch = "wasm32"))]
@@ -322,7 +322,7 @@ pub fn compute_merkle_root(chunk_ids: &[String]) -> String {
     for id in chunk_ids {
         hasher.update(id.as_bytes());
     }
-    format!("b3:{}", hasher.finalize().to_hex())
+    format!("b3-{}", hasher.finalize().to_hex())
 }
 
 /// Decompresses chunk bytes according to the blob codec.
@@ -431,7 +431,7 @@ Final thoughts.
 
         let mut reassembled = Vec::new();
         for chunk in &chunks {
-            assert!(chunk.chunk_id.starts_with("b3:"));
+            assert!(chunk.chunk_id.starts_with("b3-"));
             let decompressed =
                 decompress_chunk(chunk.data.as_ref().unwrap(), &chunk.codec).unwrap();
             assert_eq!(decompressed.len(), chunk.length as usize);
@@ -441,6 +441,6 @@ Final thoughts.
 
         let chunk_ids: Vec<String> = chunks.iter().map(|c| c.chunk_id.clone()).collect();
         let merkle = compute_merkle_root(&chunk_ids);
-        assert!(merkle.starts_with("b3:"));
+        assert!(merkle.starts_with("b3-"));
     }
 }

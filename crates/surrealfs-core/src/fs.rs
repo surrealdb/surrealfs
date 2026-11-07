@@ -1609,7 +1609,7 @@ impl SurrealFs {
             .filter(|o| o.modified.is_some_and(|m| m <= cutoff))
             .filter_map(|o| {
                 let hash = o.key.rsplit('/').next()?.to_string();
-                Some((o.key, format!("b3:{hash}")))
+                Some((o.key, format!("b3-{hash}")))
             })
             .collect();
         let mut removed = 0;

@@ -720,13 +720,13 @@ async def test_a_record_user_cannot_commit_a_chunked_upload(tenants, db):
     alice, _ = tenants
     path = "/home/alice/notes/big.bin"
     begin = await rows(
-        alice, f"RETURN fn::sfs_upload_begin('{path}', 4, ['b3:aa'], NONE)"
+        alice, f"RETURN fn::sfs_upload_begin('{path}', 4, ['b3-aa'], NONE)"
     )
     upload = begin["upload_id"]
     await rows(
         alice,
         "RETURN fn::sfs_upload_chunk("
-        "$u, 'b3:aa', 4, 4, 'none', <bytes>'abcd', NONE, NONE)",
+        "$u, 'b3-aa', 4, 4, 'none', <bytes>'abcd', NONE, NONE)",
         {"u": upload},
     )
     with pytest.raises(Exception, match="service session"):

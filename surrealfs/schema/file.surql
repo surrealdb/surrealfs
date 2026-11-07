@@ -2166,7 +2166,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_begin(
     });
 
     RETURN {
-        upload_id: type::string($up.id),
+        upload_id: record::id($up.id),
         missing_chunks: $missing,
         received_chunks: $received
     };
@@ -2186,7 +2186,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
     $caller: option<string>
 ) {
     LET $who = fn::sfs_caller($caller);
-    LET $up_rec = type::record($upload_id);
+    LET $up_rec = type::record('upload', $upload_id);
     LET $up = (SELECT * FROM ONLY $up_rec);
     IF $up IS NONE {
         THROW 'sfs:not_found: upload expired or not found';
@@ -2237,7 +2237,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_part(
     $caller: option<string>
 ) {
     LET $who = fn::sfs_caller($caller);
-    LET $up_rec = type::record($upload_id);
+    LET $up_rec = type::record('upload', $upload_id);
     LET $up = (SELECT * FROM ONLY $up_rec);
     IF $up IS NONE {
         THROW 'sfs:not_found: upload expired or not found';
@@ -2285,7 +2285,7 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_commit(
     IF $auth IS NOT NONE AND !($access = 'indexer' OR fn::sfs_me() = 'root') {
         THROW 'sfs:denied: chunked uploads need a service session';
     };
-    LET $up_rec = type::record($upload_id);
+    LET $up_rec = type::record('upload', $upload_id);
     LET $up = (SELECT * FROM ONLY $up_rec);
     IF $up IS NONE {
         THROW 'sfs:not_found: upload expired or not found';

@@ -379,6 +379,22 @@ pub async fn handle_api(
 
         ("POST", "/api/rpc") => handle_rpc(fs, embedder, req).await,
 
+        // Delete blob rows no file names, then the objects no row names, once they are older
+        // than `max_age_secs` (default two days, past the lifetime of an upload session).
+        ("POST", "/api/gc") => {
+            if !matches!(fs.caller(), None | Some("root")) {
+                return HttpResponse::json(403, &json!({ "error": "gc needs the root caller" }));
+            }
+            let max_age = params
+                .get("max_age_secs")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(2 * 24 * 3600);
+            match fs.gc_blobs(max_age).await {
+                Ok(rows) => HttpResponse::json(200, &json!({ "blob_rows_deleted": rows })),
+                Err(e) => err_response(e),
+            }
+        }
+
         _ => HttpResponse::json(
             404,
             &json!({ "error": format!("Unknown API route: {} {}", req.method, path) }),

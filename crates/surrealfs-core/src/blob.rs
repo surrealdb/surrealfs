@@ -27,9 +27,9 @@ pub struct BlobInfo {
     pub modified: Option<i64>,
 }
 
-/// The key of the object holding the chunk named `chunk_id` (`b3:<hex>`).
+/// The key of the object holding the chunk named `chunk_id` (`b3-<hex>`).
 pub fn blob_key(chunk_id: &str) -> String {
-    let hash = chunk_id.strip_prefix("b3:").unwrap_or(chunk_id);
+    let hash = chunk_id.strip_prefix("b3-").unwrap_or(chunk_id);
     let shard = hash.get(..2).unwrap_or("00");
     format!("blobs/{shard}/{hash}")
 }
@@ -307,7 +307,7 @@ mod tests {
     use super::*;
 
     async fn exercise(store: &dyn BlobStore) {
-        let key = blob_key("b3:abcdef");
+        let key = blob_key("b3-abcdef");
         assert_eq!(key, "blobs/ab/abcdef");
         assert!(store.head(&key).await.unwrap().is_none());
         assert!(matches!(

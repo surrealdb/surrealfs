@@ -1,12 +1,15 @@
-use serde::{Deserialize, Serialize};
+use js_sys::{Object, Reflect, Uint8Array};
+use serde::Deserialize;
 use std::collections::HashMap;
-use surrealfs_core::{ConnectOptions, SurrealFs};
+use std::sync::Arc;
+use surrealfs_core::{ByteStream, ConnectOptions, SurrealFs};
 use wasm_bindgen::prelude::*;
 
 use crate::chat::ChatConfig;
 use crate::embed::Embedder;
 use crate::gateway::SurrealFsGateway;
-use crate::http::{HttpHandler, HttpRequest};
+use crate::http::{BodyStream, HttpHandler, HttpRequest};
+use crate::r2::{call, R2BlobStore};
 
 #[derive(Deserialize, Default)]
 pub struct WorkerEnv {
@@ -36,11 +39,50 @@ pub struct WorkerEnv {
     pub server_token: Option<String>,
 }
 
-#[derive(Serialize)]
-struct WorkerResponseEnvelope {
-    status: u16,
-    headers: HashMap<String, String>,
-    body: Vec<u8>,
+/// The body of a response that is too large to hold: the Worker pulls it a piece at a time.
+#[wasm_bindgen]
+pub struct WorkerBody {
+    stream: ByteStream,
+}
+
+#[wasm_bindgen]
+impl WorkerBody {
+    /// The next piece as a `Uint8Array`, or `undefined` at the end of the body.
+    pub async fn next(&mut self) -> Result<JsValue, JsValue> {
+        use futures::StreamExt;
+        match self.stream.next().await {
+            Some(Ok(piece)) => Ok(Uint8Array::from(piece.as_slice()).into()),
+            Some(Err(e)) => Err(JsValue::from_str(&e.to_string())),
+            None => Ok(JsValue::UNDEFINED),
+        }
+    }
+}
+
+/// A JavaScript `ReadableStream` of bytes as a [`ByteStream`].
+fn readable_to_stream(readable: JsValue) -> Result<ByteStream, JsValue> {
+    let reader = js_sys::Reflect::get(&readable, &"getReader".into())?
+        .dyn_into::<js_sys::Function>()?
+        .call0(&readable)?;
+    Ok(Box::pin(futures::stream::unfold(
+        Some(reader),
+        |state| async move {
+            let reader = state?;
+            let step = call(&reader, "read", &[]).await;
+            let result = match step {
+                Ok(r) => r,
+                Err(e) => return Some((Err(e), None)),
+            };
+            if Reflect::get(&result, &"done".into())
+                .ok()
+                .and_then(|d| d.as_bool())
+                .unwrap_or(true)
+            {
+                return None;
+            }
+            let value = Reflect::get(&result, &"value".into()).unwrap_or(JsValue::UNDEFINED);
+            Some((Ok(Uint8Array::new(&value).to_vec()), Some(reader)))
+        },
+    )))
 }
 
 /// Stateless Cloudflare Worker entrypoint compiled to `wasm32-unknown-unknown`.
@@ -52,7 +94,9 @@ pub async fn handle_worker_request(
     path_and_query: String,
     headers_json: String,
     body: Vec<u8>,
+    body_stream: JsValue,
     env_json: String,
+    blobs: JsValue,
 ) -> Result<JsValue, JsValue> {
     let env: WorkerEnv = serde_json::from_str(&env_json)
         .map_err(|e| JsValue::from_str(&format!("Invalid worker env JSON: {}", e)))?;
@@ -87,6 +131,11 @@ pub async fn handle_worker_request(
         caller: Some("root".to_string()),
     })
     .map_err(|e| JsValue::from_str(&format!("SurrealFs connect_http failed: {}", e)))?;
+    let fs = if blobs.is_null() || blobs.is_undefined() {
+        fs
+    } else {
+        fs.with_blob_store(Arc::new(R2BlobStore::new(blobs)))
+    };
 
     let embedder = env
         .openai_api_key
@@ -104,16 +153,26 @@ pub async fn handle_worker_request(
         .with_server_token(env.server_token);
 
     let headers: HashMap<String, String> = serde_json::from_str(&headers_json).unwrap_or_default();
-    let req = HttpRequest::from_parts(&method, &path_and_query, headers, body);
+    let mut req = HttpRequest::from_parts(&method, &path_and_query, headers, body);
+    if !body_stream.is_null() && !body_stream.is_undefined() {
+        req.body_stream = Some(BodyStream::new(readable_to_stream(body_stream)?));
+    }
     let resp = gateway.handle(req).await;
 
-    let envelope = WorkerResponseEnvelope {
-        status: resp.status,
-        headers: resp.headers,
-        body: resp.body,
-    };
-
-    let serialized = serde_json::to_string(&envelope)
-        .map_err(|e| JsValue::from_str(&format!("Failed to serialize response: {}", e)))?;
-    Ok(JsValue::from_str(&serialized))
+    let headers = Object::new();
+    for (k, v) in &resp.headers {
+        Reflect::set(&headers, &k.as_str().into(), &v.as_str().into())?;
+    }
+    let out = Object::new();
+    Reflect::set(&out, &"status".into(), &resp.status.into())?;
+    Reflect::set(&out, &"headers".into(), &headers)?;
+    Reflect::set(
+        &out,
+        &"body".into(),
+        &Uint8Array::from(resp.body.as_slice()).into(),
+    )?;
+    if let Some(stream) = resp.stream.as_ref().and_then(|s| s.take()) {
+        Reflect::set(&out, &"stream".into(), &WorkerBody { stream }.into())?;
+    }
+    Ok(out.into())
 }

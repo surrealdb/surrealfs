@@ -7,7 +7,7 @@ File content larger than the inline threshold lives in an object store, not in t
 | Concern | Owner |
 | --- | --- |
 | Path resolution, ownership, modes, groups, gates | SurrealDB (`fn::sfs_*`) |
-| Chunk boundaries (FastCDC), manifests, dedup bookkeeping, reference counts | SurrealDB |
+| Chunk boundaries (FastCDC), manifests, dedup bookkeeping | SurrealDB |
 | Full-text and vector indexes, versions, CRDT state | SurrealDB |
 | Blob bytes | Object store (`BlobStore`) |
 | Hashing, compression, streaming | The gateway or client |
@@ -16,7 +16,7 @@ File content larger than the inline threshold lives in an object store, not in t
 
 A file is inline or chunked. An inline file keeps its bytes in the `file` row (`content` or `file`), as today, and is used for files up to `inline_max_bytes` (default 1 MiB). A chunked file has no inline bytes and one `file_chunk` row per chunk, ordered by `offset`, each pointing at a `blob` row.
 
-A `blob` row is keyed by the BLAKE3 hash of the uncompressed chunk. It records `size`, `stored`, `codec`, `scope`, `refs` and `tier`. Tier `inline` keeps `bytes` in the row. Tier `object` keeps no bytes and names the object in `location`. A reader handles both tiers.
+A `blob` row is keyed by the BLAKE3 hash of the uncompressed chunk. It records `size`, `stored`, `codec`, `scope` and `tier`. Tier `inline` keeps `bytes` in the row. Tier `object` keeps no bytes and names the object in `location`. A reader handles both tiers.
 
 An object is stored under `blobs/<hash[0..2]>/<hash>` in the deployment's blob bucket, optionally beneath an instance prefix. It is written once and never modified.
 
@@ -37,18 +37,26 @@ Backends: `MemoryBlobStore` for tests and for wasm, `ObjectStoreBlobStore` over 
 1. `fn::sfs_upload_begin` checks that the caller may write the path, creates an upload session and returns the chunk ids the scope does not yet hold. Every chunk id it reports as already held is pinned to the session.
 2. The gateway chunks the body as it arrives, hashes each chunk, compresses it and puts the missing ones to the object store. Memory use is bounded by the largest chunk. The gateway accepts a chunk only if the bytes hash to the chunk id, so a client proves it holds the bytes by sending them.
 3. `fn::sfs_upload_chunk` records a `blob` row of tier `object` for each stored chunk.
-4. `fn::sfs_upload_commit` checks the generation, writes the manifest, increments `refs` and updates usage in one transaction.
+4. `fn::sfs_upload_commit` checks the generation, writes the manifest and updates usage.
 
 An object is written before its `blob` row, so a row never names a missing object. A crash between the steps leaves an unreferenced object or an expired session, both reclaimed by garbage collection.
 
 ## Read path
 
-1. `fn::sfs_read_manifest(path, offset, length, caller)` checks read permission and returns the covering chunks (`offset`, `length`, `codec`, `size`, tier, key or bytes) with the file's generation and content type. It returns no object bytes.
-2. The gateway streams the covering chunks from the object store in order, decompresses each, and trims the first and last to the requested range.
+1. `read_stream(path, range)` calls `fn::sfs_read_manifest(path, offset, length, caller)`, which checks read permission and returns the file's size, generation and type and the covering chunks (`offset`, `length`, `codec`, tier, key or bytes). It returns no object bytes.
+2. The body pulls the manifest a page at a time (64 MiB of file per request) and fetches the covering chunks from the object store one by one, decompressing each and trimming the first and last to the range. Memory use is bounded by a chunk. If the generation changes between pages the body ends with a conflict error, so two versions are never mixed.
 
-The object keys the gateway reads come only from the manifest SurrealDB returned for that request, so a caller can reach only blobs of a file it was allowed to read. Permission is checked once per request, before any byte moves. The ETag is derived from the generation. HTTP `Range`, `If-None-Match` and `HEAD` are answered from the manifest and need no object reads.
+The object keys the gateway reads come only from the manifest SurrealDB returned for that request, so a caller can reach only blobs of a file it was allowed to read. Permission is checked before any byte moves, and again for each page. The ETag is derived from the generation. HTTP `Range` (a single `bytes=` range), `If-None-Match` and `HEAD` are answered from the manifest and need no object reads; a range that selects no byte is `416` with the size.
 
 A whole-file read of a chunked file uses this path. No surface assembles a chunked file from an inline column.
+
+## Streamed upload
+
+`upload_stream` reads the body until it exceeds `inline_max_bytes`; a body that ends sooner is written inline. Otherwise it opens an upload session with no chunk list and cuts the body with `StreamChunker`, which produces the chunks one-shot chunking would, holding at most twice the largest chunk. For each chunk it asks `fn::sfs_upload_have`, puts the object when the chunk is new, and appends it with `fn::sfs_upload_part`, which records the blob row and the chunk's place in the session. `fn::sfs_upload_commit` then writes the manifest. A body that stops short ends the stream with an error and nothing is committed.
+
+The HTTP engine hands a `PUT` body longer than `inline_max_bytes` to its handler as a stream, and a response body as a stream, so neither the server nor the Worker holds a file in memory.
+
+Over the JSON RPC transport the Worker uses, SurrealDB reads a string that looks like a record id as one. Chunk ids (`b3-<hex>`) and upload ids therefore contain no colon.
 
 ## Garbage collection
 
@@ -60,7 +68,7 @@ A `blob` row is live while a `file_chunk` row names it. Deleting a file deletes 
 
 ## Compression
 
-A chunk's `codec` names how it is stored: `none` or `zstd`. A reader supports every codec a writer in the same deployment produces, so a Worker deployment writes only codecs the Worker can decode.
+A chunk's `codec` names how it is stored: `none` or `zstd`. A reader supports every codec a writer in the same deployment produces. The Worker decodes `zstd` with `ruzstd` and writes `none`, since it has no encoder.
 
 ## Content type
 

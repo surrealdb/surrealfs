@@ -15,6 +15,9 @@ pub mod nfs;
 pub mod sftp;
 
 #[cfg(target_arch = "wasm32")]
+pub mod r2;
+
+#[cfg(target_arch = "wasm32")]
 pub mod worker;
 
 pub use auth::{hash_secret, AuthenticatedUser, Authenticator};

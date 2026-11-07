@@ -226,10 +226,11 @@ cd packages/sdk-ts && bun install && bun test
 
 ## Deploying on Cloudflare
 
-The gateway compiles to WebAssembly and runs in a Worker, talking to SurrealDB over HTTP. The static UI is served from Workers Assets.
+The gateway compiles to WebAssembly and runs in a Worker, talking to SurrealDB over HTTP. The static UI is served from Workers Assets. File content above 1 MiB is stored in an R2 bucket and streamed between the client and R2 by the Worker, with SurrealDB deciding only who may read or write it (see [docs/blob-storage.md](docs/blob-storage.md)).
 
 ```bash
 rustup target add wasm32-unknown-unknown
+npx wrangler r2 bucket create surrealfs-blobs   # the BLOBS binding in wrangler.toml
 cargo install wasm-bindgen-cli          # the version must match the wasm-bindgen crate
 just ui                                  # build the browser UI
 npx wrangler secret put SURREALDB_URL    # for example https://your-instance.surreal.cloud
@@ -239,7 +240,7 @@ npx wrangler secret put SURREALFS_SERVER_TOKEN
 just deploy                              # wrangler runs the cargo and wasm-bindgen build
 ```
 
-Apply the schema to the target database once with `surrealfs init` (or `python -m surrealfs.schema`). `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are optional secrets that enable embeddings and chat. To try the Worker without deploying, run `npx wrangler dev --local --var SURREALDB_URL:http://127.0.0.1:8000 --var SURREALDB_USER:root --var SURREALDB_PASS:root`.
+Apply the schema to the target database once with `surrealfs init` (or `python -m surrealfs.schema`). A cron trigger runs `POST /api/gc` daily, deleting chunks no file names once they are older than `SURREALFS_GC_GRACE_SECS` (default two days). `OPENAI_API_KEY` and `ANTHROPIC_API_KEY` are optional secrets that enable embeddings and chat. To try the Worker without deploying, run `npx wrangler dev --local --var SURREALDB_URL:http://127.0.0.1:8000 --var SURREALDB_USER:root --var SURREALDB_PASS:root`.
 
 ## Semantic search
 

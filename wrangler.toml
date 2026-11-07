@@ -10,6 +10,15 @@ directory = "./surrealfs/browser/static"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
 
+# File content larger than the inline threshold lives in this bucket, written and read directly by
+# the Worker. Create it once with `wrangler r2 bucket create surrealfs-blobs`.
+[[r2_buckets]]
+binding = "BLOBS"
+bucket_name = "surrealfs-blobs"
+
+[triggers]
+crons = ["17 3 * * *"]
+
 [vars]
 SURREALDB_NS = "surrealfs"
 SURREALDB_DB = "main"

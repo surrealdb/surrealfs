@@ -16,7 +16,7 @@ async def test_upload_and_range_read(fs: SurrealFs) -> None:
     chunks = [f"CHUNK_{i:02d}_".encode() * (4096 // 9) for i in range(4)]
     data = b"".join(chunks)
     chunk_size = 4096
-    chunk_ids = [f"b3:{hashlib.sha256(c).hexdigest()}" for c in chunks]
+    chunk_ids = [f"b3-{hashlib.sha256(c).hexdigest()}" for c in chunks]
 
     # 1. Begin upload
     begin_res = await fs._query(
