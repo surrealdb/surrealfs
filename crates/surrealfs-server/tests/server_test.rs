@@ -98,6 +98,7 @@ async fn test_webdav_options_and_crud() {
 
     // 1. OPTIONS
     let req = HttpRequest {
+        body_stream: None,
         method: "OPTIONS".into(),
         path: "/".into(),
         raw_query: "".into(),
@@ -111,6 +112,7 @@ async fn test_webdav_options_and_crud() {
 
     // 2. MKCOL /docs
     let req = HttpRequest {
+        body_stream: None,
         method: "MKCOL".into(),
         path: "/docs".into(),
         raw_query: "".into(),
@@ -123,6 +125,7 @@ async fn test_webdav_options_and_crud() {
 
     // 3. PUT /docs/hello.txt
     let req = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/docs/hello.txt".into(),
         raw_query: "".into(),
@@ -139,6 +142,7 @@ async fn test_webdav_options_and_crud() {
     let mut headers = HashMap::new();
     headers.insert("depth".into(), "1".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "PROPFIND".into(),
         path: "/docs".into(),
         raw_query: "".into(),
@@ -156,6 +160,7 @@ async fn test_webdav_options_and_crud() {
     let mut headers = HashMap::new();
     headers.insert("range".into(), "bytes=0-4".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "GET".into(),
         path: "/docs/hello.txt".into(),
         raw_query: "".into(),
@@ -165,12 +170,13 @@ async fn test_webdav_options_and_crud() {
     };
     let res = server.handle(req).await;
     assert_eq!(res.status, 206);
-    assert_eq!(res.body, b"Hello");
+    assert_eq!(res.into_bytes().await, b"Hello");
 
     // 6. Concurrency control: PUT with If-Match
     let mut headers = HashMap::new();
     headers.insert("if-match".into(), "\"gen-9999\"".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/docs/hello.txt".into(),
         raw_query: "".into(),
@@ -183,6 +189,7 @@ async fn test_webdav_options_and_crud() {
 
     // 7. LOCK & UNLOCK (§22.1)
     let req = HttpRequest {
+        body_stream: None,
         method: "LOCK".into(),
         path: "/docs/hello.txt".into(),
         raw_query: "".into(),
@@ -195,6 +202,7 @@ async fn test_webdav_options_and_crud() {
     assert!(res.headers.contains_key("lock-token"));
 
     let req = HttpRequest {
+        body_stream: None,
         method: "UNLOCK".into(),
         path: "/docs/hello.txt".into(),
         raw_query: "".into(),
@@ -207,6 +215,7 @@ async fn test_webdav_options_and_crud() {
 
     // 8. AppleDouble absorption (§22.1)
     let req = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/docs/._hello.txt".into(),
         raw_query: "".into(),
@@ -225,6 +234,7 @@ async fn test_s3_rest_api_and_multipart() {
 
     // 1. CreateBucket PUT /mybucket
     let req = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/mybucket".into(),
         raw_query: "".into(),
@@ -237,6 +247,7 @@ async fn test_s3_rest_api_and_multipart() {
 
     // 2. PutObject PUT /mybucket/data/file1.csv
     let req = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/mybucket/data/file1.csv".into(),
         raw_query: "".into(),
@@ -252,6 +263,7 @@ async fn test_s3_rest_api_and_multipart() {
     let mut query = HashMap::new();
     query.insert("prefix".into(), "data/".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "GET".into(),
         path: "/mybucket".into(),
         raw_query: "prefix=data/".into(),
@@ -267,6 +279,7 @@ async fn test_s3_rest_api_and_multipart() {
 
     // 4. GetObject GET /mybucket/data/file1.csv
     let req = HttpRequest {
+        body_stream: None,
         method: "GET".into(),
         path: "/mybucket/data/file1.csv".into(),
         raw_query: "".into(),
@@ -276,13 +289,14 @@ async fn test_s3_rest_api_and_multipart() {
     };
     let res = server.handle(req).await;
     assert_eq!(res.status, 200);
-    assert_eq!(res.body, b"col1,col2\nval1,val2\n");
+    assert_eq!(res.into_bytes().await, b"col1,col2\nval1,val2\n");
 
     // 5. Multipart Upload Flow (§22.3)
     // 5a. InitiateMultipartUpload: POST /mybucket/large.bin?uploads
     let mut query = HashMap::new();
     query.insert("uploads".into(), "".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "POST".into(),
         path: "/mybucket/large.bin".into(),
         raw_query: "uploads".into(),
@@ -306,6 +320,7 @@ async fn test_s3_rest_api_and_multipart() {
     query.insert("uploadId".into(), upload_id.to_string());
     query.insert("partNumber".into(), "1".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/mybucket/large.bin".into(),
         raw_query: format!("uploadId={}&partNumber=1", upload_id),
@@ -321,6 +336,7 @@ async fn test_s3_rest_api_and_multipart() {
     query.insert("uploadId".into(), upload_id.to_string());
     query.insert("partNumber".into(), "2".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/mybucket/large.bin".into(),
         raw_query: format!("uploadId={}&partNumber=2", upload_id),
@@ -335,6 +351,7 @@ async fn test_s3_rest_api_and_multipart() {
     let mut query = HashMap::new();
     query.insert("uploadId".into(), upload_id.to_string());
     let req = HttpRequest {
+        body_stream: None,
         method: "POST".into(),
         path: "/mybucket/large.bin".into(),
         raw_query: format!("uploadId={}", upload_id),
@@ -502,6 +519,7 @@ async fn test_unified_gateway_api_mcp_and_rpc() {
 
     // 1. Write file via REST API (/api/file)
     let req = HttpRequest {
+        body_stream: None,
         method: "POST".into(),
         path: "/api/file".into(),
         raw_query: "".into(),
@@ -521,6 +539,7 @@ async fn test_unified_gateway_api_mcp_and_rpc() {
     let mut query = HashMap::new();
     query.insert("path".into(), "/notes/hello.md".into());
     let req = HttpRequest {
+        body_stream: None,
         method: "GET".into(),
         path: "/api/file".into(),
         raw_query: "path=/notes/hello.md".into(),
@@ -538,6 +557,7 @@ async fn test_unified_gateway_api_mcp_and_rpc() {
 
     // 3. Streamable HTTP MCP (/mcp): tools/list + tools/call (cat)
     let mcp_list_req = HttpRequest {
+        body_stream: None,
         method: "POST".into(),
         path: "/mcp".into(),
         raw_query: "".into(),
@@ -558,6 +578,7 @@ async fn test_unified_gateway_api_mcp_and_rpc() {
     assert!(tools.len() >= 15);
 
     let mcp_call_req = HttpRequest {
+        body_stream: None,
         method: "POST".into(),
         path: "/mcp".into(),
         raw_query: "".into(),
@@ -582,6 +603,7 @@ async fn test_unified_gateway_api_mcp_and_rpc() {
 
     // 4. Client RPC proxy (/api/rpc)
     let rpc_req = HttpRequest {
+        body_stream: None,
         method: "POST".into(),
         path: "/api/rpc".into(),
         raw_query: "".into(),
@@ -653,6 +675,7 @@ async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
 
     // Unauthenticated PUT rejected when require_auth = true
     let unauth_put = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/empty.txt".into(),
         raw_query: "".into(),
@@ -681,6 +704,7 @@ async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
     let mut headers = HashMap::new();
     headers.insert("authorization".into(), alice_auth.clone());
     let put_empty = HttpRequest {
+        body_stream: None,
         method: "PUT".into(),
         path: "/empty.txt".into(),
         raw_query: "".into(),
@@ -694,6 +718,7 @@ async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
     let mut range_headers = headers.clone();
     range_headers.insert("range".into(), "bytes=0-10".into());
     let get_empty = HttpRequest {
+        body_stream: None,
         method: "GET".into(),
         path: "/empty.txt".into(),
         raw_query: "".into(),
@@ -713,6 +738,7 @@ async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
 
     // Alice locks /empty.txt; Bob cannot acquire or release lock while Alice holds it
     let lock_alice = HttpRequest {
+        body_stream: None,
         method: "LOCK".into(),
         path: "/empty.txt".into(),
         raw_query: "".into(),
@@ -725,6 +751,7 @@ async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
     let mut bob_headers = HashMap::new();
     bob_headers.insert("authorization".into(), bob_auth);
     let lock_bob = HttpRequest {
+        body_stream: None,
         method: "LOCK".into(),
         path: "/empty.txt".into(),
         raw_query: "".into(),
@@ -735,6 +762,7 @@ async fn test_s3_sigv4_hmac_and_webdav_lock_isolation() {
     assert_eq!(webdav.handle(lock_bob).await.status, 423);
 
     let unlock_bob = HttpRequest {
+        body_stream: None,
         method: "UNLOCK".into(),
         path: "/empty.txt".into(),
         raw_query: "".into(),
@@ -814,6 +842,7 @@ async fn test_gateway_token_gates_requests_and_ignores_bad_tokens() {
             headers.insert("x-surrealfs-user".to_string(), u.to_string());
         }
         HttpRequest {
+            body_stream: None,
             method: "GET".into(),
             path: "/api/ls".into(),
             raw_query: "".into(),
@@ -837,4 +866,131 @@ async fn test_gateway_token_gates_requests_and_ignores_bad_tokens() {
             .status,
         401
     );
+}
+
+async fn http_exchange(addr: &str, head: &str, body: &[u8]) -> (String, Vec<u8>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(body).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.unwrap();
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+    (
+        String::from_utf8_lossy(&raw[..split]).to_string(),
+        raw[split + 4..].to_vec(),
+    )
+}
+
+#[tokio::test]
+async fn test_large_bodies_stream_in_and_out_over_tcp() {
+    use surrealfs_core::MemoryBlobStore;
+    let store = std::sync::Arc::new(MemoryBlobStore::new());
+    let fs = setup_test_fs().await.with_blob_store(store.clone());
+    let webdav = WebDavServer::new(fs.clone(), "/");
+
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let addr = format!("127.0.0.1:{port}");
+    let serve_addr = addr.clone();
+    tokio::spawn(async move {
+        let _ = surrealfs_server::serve_http(&serve_addr, webdav).await;
+    });
+    for _ in 0..50 {
+        if tokio::net::TcpStream::connect(&addr).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let mut data = Vec::new();
+    for i in 0..400_000u32 {
+        data.extend_from_slice(format!("{i} {}\n", i.wrapping_mul(2654435761)).as_bytes());
+    }
+    assert!(data.len() > 4 * 1024 * 1024);
+
+    let (head, _) = http_exchange(
+        &addr,
+        &format!(
+            "PUT /big/data.bin HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            data.len()
+        ),
+        &data,
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 201"), "{head}");
+    assert!(
+        !store.is_empty(),
+        "the body was chunked into the blob store"
+    );
+    assert_eq!(
+        fs.stat("/big/data.bin").await.unwrap().unwrap().size as usize,
+        data.len()
+    );
+
+    let (head, body) =
+        http_exchange(&addr, "GET /big/data.bin HTTP/1.1\r\nHost: x\r\n\r\n", b"").await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head
+        .to_lowercase()
+        .contains(&format!("content-length: {}", data.len())));
+    assert_eq!(body, data);
+
+    let n = data.len();
+    let (head, body) = http_exchange(
+        &addr,
+        "GET /big/data.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=1000000-1999999\r\n\r\n",
+        b"",
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert!(head
+        .to_lowercase()
+        .contains(&format!("content-range: bytes 1000000-1999999/{n}")));
+    assert_eq!(body, &data[1_000_000..2_000_000]);
+
+    let (head, body) = http_exchange(
+        &addr,
+        "GET /big/data.bin HTTP/1.1\r\nHost: x\r\nRange: bytes=-100\r\n\r\n",
+        b"",
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 206"), "{head}");
+    assert_eq!(body, &data[n - 100..]);
+
+    let (head, _) = http_exchange(
+        &addr,
+        &format!("GET /big/data.bin HTTP/1.1\r\nHost: x\r\nRange: bytes={n}-\r\n\r\n"),
+        b"",
+    )
+    .await;
+    assert!(head.starts_with("HTTP/1.1 416"), "{head}");
+    assert!(head
+        .to_lowercase()
+        .contains(&format!("content-range: bytes */{n}")));
+
+    let (head, body) =
+        http_exchange(&addr, "HEAD /big/data.bin HTTP/1.1\r\nHost: x\r\n\r\n", b"").await;
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(head
+        .to_lowercase()
+        .contains(&format!("content-length: {n}")));
+    assert!(body.is_empty());
+
+    // A body that stops short is not committed.
+    let (head, _) = http_exchange(
+        &addr,
+        &format!(
+            "PUT /big/short.bin HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            data.len()
+        ),
+        &data[..2_000_000],
+    )
+    .await;
+    assert!(!head.starts_with("HTTP/1.1 201"), "{head}");
+    assert!(fs.stat("/big/short.bin").await.unwrap().is_none());
 }

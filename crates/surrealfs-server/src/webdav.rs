@@ -5,6 +5,7 @@
 
 use crate::auth::Authenticator;
 use crate::http::{HttpHandler, HttpRequest, HttpResponse};
+use crate::serve::{range_not_satisfiable, serve_file, ServeError};
 use async_trait::async_trait;
 use chrono::Utc;
 use surrealfs_core::errors::SurrealFsError;
@@ -237,71 +238,11 @@ impl WebDavServer {
                 .body_str(&html);
         }
 
-        let etag = format!("\"gen-{}\"", stat.generation);
-
-        // Check If-None-Match for cache revalidation
-        if let Some(if_none_match) = req.header("if-none-match") {
-            if if_none_match == "*" || if_none_match == etag {
-                return HttpResponse::not_modified().header("ETag", &etag);
-            }
+        match serve_file(fs, req, sfs_path, None).await {
+            Ok(res) => res,
+            Err(ServeError::NotSatisfiable(size)) => range_not_satisfiable(size),
+            Err(ServeError::Fs(e)) => HttpResponse::internal_error(&e.to_string()),
         }
-
-        // Handle Range requests (§19.4)
-        if let Some(range_header) = req.header("range") {
-            if let Some(range) = parse_byte_range(range_header, stat.size) {
-                let (start, end) = range;
-                let len = end - start + 1;
-                let data = match fs.read_range(sfs_path, start, len).await {
-                    Ok(d) => d,
-                    Err(_) => {
-                        // Fallback to full read and slice
-                        match fs.read_bytes(sfs_path).await {
-                            Ok(all) => {
-                                let s = (start as usize).min(all.len());
-                                let e = ((end + 1) as usize).min(all.len());
-                                all[s..e].to_vec()
-                            }
-                            Err(e) => return HttpResponse::internal_error(&e.to_string()),
-                        }
-                    }
-                };
-
-                let mut res = HttpResponse::partial_content()
-                    .header("Content-Type", &stat.content_type)
-                    .header("ETag", &etag)
-                    .header("Accept-Ranges", "bytes")
-                    .header(
-                        "Content-Range",
-                        &format!("bytes {}-{}/{}", start, end, stat.size),
-                    );
-
-                if !is_head {
-                    res = res.body(data);
-                }
-                return res;
-            }
-        }
-
-        // Full content GET
-        let data = if is_head {
-            Vec::new()
-        } else {
-            match fs.read_bytes(sfs_path).await {
-                Ok(d) => d,
-                Err(e) => return HttpResponse::internal_error(&e.to_string()),
-            }
-        };
-
-        let mut res = HttpResponse::ok()
-            .header("Content-Type", &stat.content_type)
-            .header("ETag", &etag)
-            .header("Accept-Ranges", "bytes")
-            .header("Content-Length", &stat.size.to_string());
-
-        if !is_head {
-            res = res.body(data);
-        }
-        res
     }
 
     /// Handles PUT requests with If-Match optimistic concurrency (§1.3, §22.1).
@@ -320,7 +261,13 @@ impl WebDavServer {
             }
         });
 
-        match fs.write_bytes(sfs_path, &req.body, if_generation).await {
+        let written = if req.body_stream.is_some() {
+            fs.upload_stream(sfs_path, req.into_body_stream(), if_generation, None)
+                .await
+        } else {
+            fs.write_bytes(sfs_path, &req.body, if_generation).await
+        };
+        match written {
             Ok(entry) => {
                 let etag = format!("\"gen-{}\"", entry.generation);
                 HttpResponse::created()
@@ -569,43 +516,6 @@ impl HttpHandler for WebDavServer {
 fn is_macos_appledouble(path: &str) -> bool {
     let filename = path.split('/').next_back().unwrap_or(path);
     filename == ".DS_Store" || filename.starts_with("._")
-}
-
-/// Parses an HTTP Range header `bytes=start-end`.
-fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
-    if file_size == 0 {
-        return None;
-    }
-    let clean = header.trim();
-    let spec = clean.strip_prefix("bytes=")?;
-    let (start_str, end_str) = spec.split_once('-')?;
-
-    if start_str.is_empty() {
-        // Suffix bytes: -500
-        let len: u64 = end_str.parse().ok()?;
-        if len == 0 {
-            return None;
-        }
-        let start = file_size.saturating_sub(len);
-        let end = file_size - 1;
-        Some((start, end))
-    } else {
-        let start: u64 = start_str.parse().ok()?;
-        if start >= file_size {
-            return None;
-        }
-        let end = if end_str.is_empty() {
-            file_size - 1
-        } else {
-            let parsed_end: u64 = end_str.parse().ok()?;
-            parsed_end.min(file_size - 1)
-        };
-        if start <= end {
-            Some((start, end))
-        } else {
-            None
-        }
-    }
 }
 
 fn escape_xml(s: &str) -> String {

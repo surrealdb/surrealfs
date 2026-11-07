@@ -13,6 +13,7 @@ pub mod git;
 pub mod models;
 pub mod paths;
 pub mod stats;
+pub mod stream;
 pub mod understanding;
 pub mod webhooks;
 
@@ -29,5 +30,6 @@ pub use git::*;
 pub use models::*;
 pub use paths::*;
 pub use stats::*;
+pub use stream::*;
 pub use understanding::*;
 pub use webhooks::*;

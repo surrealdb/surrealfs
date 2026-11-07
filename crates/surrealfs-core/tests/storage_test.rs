@@ -273,3 +273,159 @@ async fn test_gc_removes_rows_and_unreferenced_objects() {
         "every object has a row, every row an object"
     );
 }
+
+fn pieces(data: &[u8], size: usize) -> surrealfs_core::ByteStream {
+    let parts: Vec<surrealfs_core::Result<Vec<u8>>> =
+        data.chunks(size).map(|c| Ok(c.to_vec())).collect();
+    Box::pin(futures::stream::iter(parts))
+}
+
+async fn collect(mut body: surrealfs_core::ByteStream) -> Vec<u8> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    while let Some(piece) = body.next().await {
+        out.extend_from_slice(&piece.unwrap());
+    }
+    out
+}
+
+fn big_payload() -> Vec<u8> {
+    let mut data = Vec::new();
+    for i in 0..120_000u32 {
+        data.extend_from_slice(format!("{i} {}\n", i.wrapping_mul(2654435761)).as_bytes());
+    }
+    assert!(data.len() > surrealfs_core::INLINE_MAX_BYTES);
+    data
+}
+
+#[tokio::test]
+async fn test_streamed_upload_stores_the_same_chunks_as_a_one_shot_upload() {
+    let store = Arc::new(MemoryBlobStore::new());
+    let fs = create_test_fs().await.with_blob_store(store.clone());
+    let data = big_payload();
+
+    fs.upload_file("/s/one-shot.bin", &data, None, Some(FastCdcConfig::small()))
+        .await
+        .unwrap();
+    let stored = store.len();
+    let entry = fs
+        .upload_stream(
+            "/s/streamed.bin",
+            pieces(&data, 9_001),
+            None,
+            Some(FastCdcConfig::small()),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(entry.size as usize, data.len());
+    assert_eq!(store.len(), stored, "identical content adds no objects");
+    assert_eq!(fs.read_bytes("/s/streamed.bin").await.unwrap(), data);
+}
+
+#[tokio::test]
+async fn test_small_streamed_upload_is_inline() {
+    let store = Arc::new(MemoryBlobStore::new());
+    let fs = create_test_fs().await.with_blob_store(store.clone());
+
+    fs.upload_stream("/s/small.txt", pieces(b"hello stream", 4), None, None)
+        .await
+        .unwrap();
+
+    assert!(store.is_empty());
+    assert_eq!(
+        fs.read_bytes("/s/small.txt").await.unwrap(),
+        b"hello stream"
+    );
+    fs.upload_stream("/s/empty.txt", pieces(b"", 4), None, None)
+        .await
+        .unwrap();
+    assert!(fs.read_bytes("/s/empty.txt").await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn test_read_stream_ranges() {
+    use surrealfs_core::ByteRange;
+    let store = Arc::new(MemoryBlobStore::new());
+    let fs = create_test_fs().await.with_blob_store(store);
+    let data = big_payload();
+    let n = data.len() as u64;
+    fs.upload_stream(
+        "/r/f.bin",
+        pieces(&data, 50_000),
+        None,
+        Some(FastCdcConfig::small()),
+    )
+    .await
+    .unwrap();
+
+    let whole = fs.read_stream("/r/f.bin", ByteRange::Full).await.unwrap();
+    assert_eq!(whole.size, n);
+    assert_eq!(whole.range, 0..n);
+    assert_eq!(collect(whole.body).await, data);
+
+    let cases = [
+        (ByteRange::Bounded(0, 0), 0..1),
+        (ByteRange::Bounded(100, 70_000), 100..70_001),
+        (ByteRange::Bounded(n - 5, n + 1_000), n - 5..n),
+        (ByteRange::From(n - 10), n - 10..n),
+        (ByteRange::Suffix(1_234), n - 1_234..n),
+        (ByteRange::Suffix(n + 99), 0..n),
+    ];
+    for (range, want) in cases {
+        let file = fs.read_stream("/r/f.bin", range).await.unwrap();
+        assert_eq!(file.range, want, "{range:?}");
+        assert_eq!(
+            collect(file.body).await,
+            &data[want.start as usize..want.end as usize]
+        );
+    }
+
+    for bad in [
+        ByteRange::From(n),
+        ByteRange::Bounded(n, n + 5),
+        ByteRange::Suffix(0),
+    ] {
+        let err = fs.read_stream("/r/f.bin", bad).await.err().unwrap();
+        assert!(matches!(
+            err,
+            surrealfs_core::SurrealFsError::InvalidArguments(_)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn test_read_stream_of_an_inline_file_and_a_missing_one() {
+    use surrealfs_core::ByteRange;
+    let fs = create_test_fs().await;
+    fs.write_bytes("/r/small.bin", b"0123456789", None)
+        .await
+        .unwrap();
+
+    let file = fs
+        .read_stream("/r/small.bin", ByteRange::Bounded(2, 4))
+        .await
+        .unwrap();
+    assert_eq!(file.size, 10);
+    assert_eq!(collect(file.body).await, b"234");
+    assert!(fs
+        .read_stream("/r/none.bin", ByteRange::Full)
+        .await
+        .is_err());
+}
+
+#[tokio::test]
+async fn test_overwriting_a_chunked_file_with_inline_content_drops_its_chunks() {
+    let store = Arc::new(MemoryBlobStore::new());
+    let fs = create_test_fs().await.with_blob_store(store);
+    fs.upload_stream("/w/f.bin", pieces(&big_payload(), 50_000), None, None)
+        .await
+        .unwrap();
+
+    fs.write_bytes("/w/f.bin", b"now small", None)
+        .await
+        .unwrap();
+
+    assert_eq!(fs.read_bytes("/w/f.bin").await.unwrap(), b"now small");
+    assert_eq!(fs.read_range("/w/f.bin", 0, 3).await.unwrap(), b"now");
+}

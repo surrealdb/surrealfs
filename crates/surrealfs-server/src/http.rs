@@ -2,18 +2,44 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(not(target_arch = "wasm32"))]
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-#[cfg(not(target_arch = "wasm32"))]
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 #[cfg(not(target_arch = "wasm32"))]
 use tracing::debug;
 
+/// A body that is read once, as it arrives or as it is sent, so that it never has to be held
+/// whole in memory.
+///
+/// Clones share the stream; the first [`take`](Self::take) gets it.
+#[derive(Clone)]
+pub struct BodyStream(Arc<Mutex<Option<surrealfs_core::ByteStream>>>);
+
+impl BodyStream {
+    pub fn new(stream: surrealfs_core::ByteStream) -> Self {
+        Self(Arc::new(Mutex::new(Some(stream))))
+    }
+
+    pub fn take(&self) -> Option<surrealfs_core::ByteStream> {
+        self.0.lock().unwrap().take()
+    }
+}
+
+impl std::fmt::Debug for BodyStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("BodyStream")
+    }
+}
+
 /// Incoming HTTP request (§22).
+///
+/// A request body larger than [`STREAM_BODY_THRESHOLD`] is not held in `body`: `body_stream`
+/// carries it, and `body` is empty.
 #[derive(Debug, Clone)]
 pub struct HttpRequest {
+    pub body_stream: Option<BodyStream>,
     pub method: String,
     pub path: String,
     pub raw_query: String,
@@ -55,7 +81,17 @@ impl HttpRequest {
             query,
             headers: lower_headers,
             body,
+            body_stream: None,
         }
+    }
+
+    /// The body as a stream: the streamed body, or `body` as one piece.
+    pub fn into_body_stream(&self) -> surrealfs_core::ByteStream {
+        if let Some(stream) = self.body_stream.as_ref().and_then(|b| b.take()) {
+            return stream;
+        }
+        let body = self.body.clone();
+        Box::pin(futures::stream::once(async move { Ok(body) }))
     }
 
     pub fn header(&self, name: &str) -> Option<&str> {
@@ -78,12 +114,16 @@ impl HttpRequest {
 }
 
 /// Outgoing HTTP response (§22).
+///
+/// With `stream` set, the body is the stream and `body` is empty; the `content-length` header
+/// names its length.
 #[derive(Debug, Clone)]
 pub struct HttpResponse {
     pub status: u16,
     pub status_text: String,
     pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
+    pub stream: Option<BodyStream>,
 }
 
 impl HttpResponse {
@@ -93,7 +133,32 @@ impl HttpResponse {
             status_text: status_text.to_string(),
             headers: HashMap::new(),
             body: Vec::new(),
+            stream: None,
         }
+    }
+
+    /// Send `stream` as the body, `len` bytes long.
+    pub fn streaming(mut self, stream: surrealfs_core::ByteStream, len: u64) -> Self {
+        self.stream = Some(BodyStream::new(stream));
+        self.headers
+            .insert("content-length".to_string(), len.to_string());
+        self
+    }
+
+    /// The whole body: `body`, or the streamed body read to its end.
+    pub async fn into_bytes(self) -> Vec<u8> {
+        use futures::StreamExt;
+        let Some(mut stream) = self.stream.as_ref().and_then(|s| s.take()) else {
+            return self.body;
+        };
+        let mut out = Vec::new();
+        while let Some(piece) = stream.next().await {
+            match piece {
+                Ok(p) => out.extend_from_slice(&p),
+                Err(_) => break,
+            }
+        }
+        out
     }
 
     pub fn empty(status: u16) -> Self {
@@ -240,12 +305,21 @@ pub trait HttpHandler: Send + Sync {
     async fn handle(&self, req: HttpRequest) -> HttpResponse;
 }
 
-/// Maximum allowed HTTP request body size (100 MiB).
+/// Maximum allowed size of an HTTP request body that is held in memory (100 MiB).
 pub const MAX_HTTP_BODY_BYTES: usize = 100 * 1024 * 1024;
+
+/// A `PUT` body longer than this is streamed to its handler instead of being read first.
+pub const STREAM_BODY_THRESHOLD: usize = surrealfs_core::INLINE_MAX_BYTES;
+
+/// Maximum size of a streamed `PUT` body (5 TiB, the largest S3 object).
+pub const MAX_STREAMED_BODY_BYTES: u64 = 5 * 1024 * 1024 * 1024 * 1024;
 
 /// Parses an incoming raw HTTP request from a TCP stream.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<HttpRequest>> {
+pub async fn parse_request<R>(mut stream: R) -> std::io::Result<Option<HttpRequest>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
     let mut buf = Vec::new();
     let mut temp = [0u8; 4096];
     let mut header_end = None;
@@ -332,7 +406,14 @@ pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
         .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
-    if content_length > MAX_HTTP_BODY_BYTES {
+    let streamed = method == "PUT" && content_length > STREAM_BODY_THRESHOLD;
+    if streamed && content_length as u64 > MAX_STREAMED_BODY_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "HTTP request body exceeds maximum size limit",
+        ));
+    }
+    if !streamed && content_length > MAX_HTTP_BODY_BYTES {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "HTTP request body exceeds maximum size limit",
@@ -343,6 +424,22 @@ pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
     if body.len() > content_length {
         body.truncate(content_length);
     }
+
+    if streamed {
+        let remaining = content_length - body.len();
+        let first = std::mem::take(&mut body);
+        let body_stream = stream_from_reader(first, stream, remaining, read_timeout);
+        return Ok(Some(HttpRequest {
+            method,
+            path,
+            raw_query: raw_query.to_string(),
+            query,
+            headers,
+            body,
+            body_stream: Some(BodyStream::new(body_stream)),
+        }));
+    }
+
     while body.len() < content_length {
         let needed = content_length - body.len();
         let to_read = needed.min(temp.len());
@@ -364,12 +461,56 @@ pub async fn parse_request(stream: &mut TcpStream) -> std::io::Result<Option<Htt
         query,
         headers,
         body,
+        body_stream: None,
     }))
+}
+
+/// The remaining `remaining` bytes of a request body, after the `first` bytes already read,
+/// as a stream of pieces of at most 256 KiB. A connection that ends early ends the stream with
+/// an error, so a truncated upload is never committed.
+#[cfg(not(target_arch = "wasm32"))]
+fn stream_from_reader<R>(
+    first: Vec<u8>,
+    reader: R,
+    remaining: usize,
+    timeout: std::time::Duration,
+) -> surrealfs_core::ByteStream
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    use surrealfs_core::SurrealFsError;
+    let head = futures::stream::iter(if first.is_empty() {
+        None
+    } else {
+        Some(Ok(first))
+    });
+    let tail =
+        futures::stream::try_unfold((reader, remaining), move |(mut reader, left)| async move {
+            if left == 0 {
+                return Ok(None);
+            }
+            let mut piece = vec![0u8; left.min(256 * 1024)];
+            let n = tokio::time::timeout(timeout, reader.read(&mut piece))
+                .await
+                .map_err(|_| SurrealFsError::Io("HTTP body read timed out".to_string()))?
+                .map_err(|e| SurrealFsError::Io(e.to_string()))?;
+            if n == 0 {
+                return Err(SurrealFsError::Io(
+                    "connection closed before the whole body arrived".to_string(),
+                ));
+            }
+            piece.truncate(n);
+            Ok(Some((piece, (reader, left - n))))
+        });
+    Box::pin(futures::StreamExt::chain(head, tail))
 }
 
 /// Serializes and sends an HTTP response to a TCP stream.
 #[cfg(not(target_arch = "wasm32"))]
-pub async fn send_response(stream: &mut TcpStream, res: HttpResponse) -> std::io::Result<()> {
+pub async fn send_response<W>(stream: &mut W, res: HttpResponse) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
     let mut head = format!("HTTP/1.1 {} {}\r\n", res.status, res.status_text);
 
     let mut headers = res.headers;
@@ -386,7 +527,14 @@ pub async fn send_response(stream: &mut TcpStream, res: HttpResponse) -> std::io
     head.push_str("\r\n");
 
     stream.write_all(head.as_bytes()).await?;
-    if !res.body.is_empty() {
+    if let Some(body) = res.stream.as_ref().and_then(|s| s.take()) {
+        use futures::StreamExt;
+        let mut body = body;
+        while let Some(piece) = body.next().await {
+            let piece = piece.map_err(|e| std::io::Error::other(e.to_string()))?;
+            stream.write_all(&piece).await?;
+        }
+    } else if !res.body.is_empty() {
         stream.write_all(&res.body).await?;
     }
     stream.flush().await?;
@@ -428,14 +576,15 @@ pub async fn run_http_server<H: HttpHandler + 'static>(
     tracing::info!("SurrealFS HTTP server listening on {}", addr);
 
     loop {
-        let (mut stream, peer_addr) = listener.accept().await?;
+        let (stream, peer_addr) = listener.accept().await?;
         let handler = Arc::clone(&handler);
 
         tokio::spawn(async move {
-            match parse_request(&mut stream).await {
+            let (reader, mut writer) = stream.into_split();
+            match parse_request(reader).await {
                 Ok(Some(req)) => {
                     let res = handler.handle(req).await;
-                    if let Err(e) = send_response(&mut stream, res).await {
+                    if let Err(e) = send_response(&mut writer, res).await {
                         debug!("Failed to send HTTP response to {}: {}", peer_addr, e);
                     }
                 }
@@ -449,7 +598,7 @@ pub async fn run_http_server<H: HttpHandler + 'static>(
                     } else {
                         HttpResponse::bad_request("Malformed request")
                     };
-                    let _ = send_response(&mut stream, resp).await;
+                    let _ = send_response(&mut writer, resp).await;
                 }
             }
         });

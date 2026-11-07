@@ -6,6 +6,7 @@ pub mod gateway;
 pub mod http;
 pub mod mcp;
 pub mod s3;
+pub mod serve;
 pub mod webdav;
 
 pub mod nfs;

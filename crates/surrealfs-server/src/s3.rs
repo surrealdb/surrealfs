@@ -5,6 +5,7 @@
 
 use crate::auth::Authenticator;
 use crate::http::{HttpHandler, HttpRequest, HttpResponse};
+use crate::serve::{range_not_satisfiable, serve_file, ServeError};
 use async_trait::async_trait;
 use chrono::Utc;
 use std::collections::HashMap;
@@ -236,36 +237,10 @@ impl S3Server {
             return s3_error("NoSuchKey", "Object is a folder", 404);
         }
 
-        let etag = format!("\"gen-{}\"", stat.generation);
-
-        // Check Range header
-        if let Some(range_hdr) = req.header("range") {
-            if let Some((start, end)) = parse_byte_range(range_hdr, stat.size) {
-                let len = end - start + 1;
-                let data = fs
-                    .read_range(sfs_path, start, len)
-                    .await
-                    .unwrap_or_default();
-                return HttpResponse::partial_content()
-                    .header("Content-Type", &stat.content_type)
-                    .header("ETag", &etag)
-                    .header("Accept-Ranges", "bytes")
-                    .header(
-                        "Content-Range",
-                        &format!("bytes {}-{}/{}", start, end, stat.size),
-                    )
-                    .body(data);
-            }
-        }
-
-        match fs.read_bytes(sfs_path).await {
-            Ok(bytes) => HttpResponse::ok()
-                .header("Content-Type", &stat.content_type)
-                .header("ETag", &etag)
-                .header("Content-Length", &stat.size.to_string())
-                .header("Accept-Ranges", "bytes")
-                .body(bytes),
-            Err(e) => s3_error("InternalError", &e.to_string(), 500),
+        match serve_file(fs, req, sfs_path, None).await {
+            Ok(res) => res,
+            Err(ServeError::NotSatisfiable(size)) => range_not_satisfiable(size),
+            Err(ServeError::Fs(e)) => s3_error("InternalError", &e.to_string(), 500),
         }
     }
 
@@ -302,7 +277,13 @@ impl S3Server {
             }
         }
 
-        match fs.write_bytes(sfs_path, &req.body, None).await {
+        let written = if req.body_stream.is_some() {
+            fs.upload_stream(sfs_path, req.into_body_stream(), None, None)
+                .await
+        } else {
+            fs.write_bytes(sfs_path, &req.body, None).await
+        };
+        match written {
             Ok(entry) => {
                 let etag = format!("\"gen-{}\"", entry.generation);
                 HttpResponse::ok()
@@ -539,38 +520,6 @@ fn s3_error(code: &str, message: &str, status: u16) -> HttpResponse {
     HttpResponse::new(status, code)
         .header("Content-Type", "application/xml")
         .body_str(&xml)
-}
-
-fn parse_byte_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
-    if file_size == 0 {
-        return None;
-    }
-    let clean = header.trim();
-    let spec = clean.strip_prefix("bytes=")?;
-    let (start_str, end_str) = spec.split_once('-')?;
-
-    if start_str.is_empty() {
-        let len: u64 = end_str.parse().ok()?;
-        if len == 0 {
-            return None;
-        }
-        let start = file_size.saturating_sub(len);
-        let end = file_size.saturating_sub(1);
-        Some((start, end))
-    } else {
-        let start: u64 = start_str.parse().ok()?;
-        let end = if end_str.is_empty() {
-            file_size.saturating_sub(1)
-        } else {
-            let parsed_end: u64 = end_str.parse().ok()?;
-            parsed_end.min(file_size.saturating_sub(1))
-        };
-        if start <= end && start < file_size {
-            Some((start, end))
-        } else {
-            None
-        }
-    }
 }
 
 fn escape_xml(s: &str) -> String {

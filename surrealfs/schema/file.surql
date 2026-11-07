@@ -465,6 +465,15 @@ DEFINE EVENT OVERWRITE evt_file_release_chunks ON file
         DELETE file_chunk WHERE file = $before.id;
     };
 
+-- Writing inline content to a chunked file replaces its manifest: a manifest outranks inline
+-- content when the file is read.
+DEFINE EVENT OVERWRITE evt_file_drop_chunks ON file
+    WHEN $event = 'UPDATE' AND ($after.content IS NOT NONE OR $after.file IS NOT NONE)
+        AND ($before.content != $after.content OR $before.file != $after.file)
+    THEN {
+        DELETE file_chunk WHERE file = $after.id;
+    };
+
 -- Enqueue jobs for automatic understanding pipeline (detection, chunking, symbols)
 DEFINE EVENT OVERWRITE evt_file_jobs ON file
     WHEN $event != "DELETE" AND ($before.content != $after.content OR $before.file != $after.file)
@@ -843,8 +852,6 @@ DEFINE FIELD OVERWRITE codec      ON blob TYPE string;
 DEFINE FIELD OVERWRITE tier       ON blob TYPE string;
 DEFINE FIELD OVERWRITE bytes      ON blob TYPE option<bytes>;
 DEFINE FIELD OVERWRITE location   ON blob TYPE option<string>;
--- Not maintained: a blob is live while a file_chunk row names it.
-DEFINE FIELD OVERWRITE refs       ON blob TYPE int DEFAULT 0;
 DEFINE FIELD OVERWRITE scope      ON blob TYPE string;
 DEFINE FIELD OVERWRITE created_at ON blob TYPE datetime DEFAULT time::now();
 DEFINE INDEX OVERWRITE idx_blob_scope ON blob FIELDS scope;
@@ -2201,7 +2208,6 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
             tier: IF $location IS NONE { 'inline' } ELSE { 'object' },
             bytes: IF $location IS NONE { $data } ELSE { NONE },
             location: $location,
-            refs: 0,
             scope: $up.scope,
             created_at: time::now()
         };
@@ -2209,6 +2215,59 @@ DEFINE FUNCTION OVERWRITE fn::sfs_upload_chunk(
 
     LET $updated_received = array::distinct(array::concat($up.received_chunks, [$chunk_id]));
     UPDATE $up_rec SET received_chunks = $updated_received;
+    RETURN true;
+} PERMISSIONS FULL;
+
+-- Whether a blob row exists for the chunk, so a streaming writer can skip sending its bytes.
+DEFINE FUNCTION OVERWRITE fn::sfs_upload_have($chunk_id: string) {
+    RETURN (SELECT VALUE id FROM ONLY type::record('blob', $chunk_id)) IS NOT NONE;
+} PERMISSIONS FULL;
+
+-- Upload Part: append the next chunk of a streamed upload, whose chunk list is not known in
+-- advance. Like fn::sfs_upload_chunk, and the chunk also joins the session's ordered list and
+-- size. A chunk with no blob row needs $data or $location.
+DEFINE FUNCTION OVERWRITE fn::sfs_upload_part(
+    $upload_id: string,
+    $chunk_id: string,
+    $uncompressed_size: int,
+    $stored_bytes: int,
+    $codec: string,
+    $data: option<bytes>,
+    $location: option<string>,
+    $caller: option<string>
+) {
+    LET $who = fn::sfs_caller($caller);
+    LET $up_rec = type::record($upload_id);
+    LET $up = (SELECT * FROM ONLY $up_rec);
+    IF $up IS NONE {
+        THROW 'sfs:not_found: upload expired or not found';
+    };
+    IF $who != 'root' AND $up.caller != $who {
+        THROW 'sfs:denied';
+    };
+
+    LET $blob_id = type::record('blob', $chunk_id);
+    LET $existing_blob = (SELECT id FROM ONLY $blob_id);
+    IF $existing_blob IS NONE {
+        IF $data IS NONE AND $location IS NONE {
+            THROW 'sfs:missing_chunk: the chunk is not stored and no bytes were sent';
+        };
+        CREATE $blob_id CONTENT {
+            size: $uncompressed_size,
+            stored: $stored_bytes,
+            codec: $codec,
+            tier: IF $location IS NONE { 'inline' } ELSE { 'object' },
+            bytes: IF $location IS NONE { $data } ELSE { NONE },
+            location: $location,
+            scope: $up.scope,
+            created_at: time::now()
+        };
+    };
+
+    UPDATE $up_rec SET
+        chunk_ids = array::append($up.chunk_ids, $chunk_id),
+        received_chunks = array::distinct(array::append($up.received_chunks, $chunk_id)),
+        size = $up.size + $uncompressed_size;
     RETURN true;
 } PERMISSIONS FULL;
 

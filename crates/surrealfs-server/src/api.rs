@@ -5,6 +5,7 @@ use surrealfs_core::{FileEntry, SurrealFs, SurrealFsError};
 use crate::chat::{handle_chat, handle_session, ChatConfig};
 use crate::embed::{index_file_on_write, process_pending_jobs, Embedder};
 use crate::http::{HttpRequest, HttpResponse};
+use crate::serve::{range_not_satisfiable, serve_file, ServeError};
 
 fn entry_json(e: &FileEntry) -> Value {
     json!({
@@ -129,22 +130,22 @@ pub async fn handle_raw(fs: &SurrealFs, req: &HttpRequest) -> HttpResponse {
         Err(e) => return err_response(e),
     };
 
-    match fs.read_bytes(path).await {
-        Ok(bytes) => {
-            let ct_opt = if info.content_type.is_empty() {
-                None
-            } else {
-                Some(info.content_type.as_str())
-            };
-            let ct = guess_content_type(path, ct_opt);
-            let mut resp = HttpResponse::with_bytes(200, bytes, &ct);
+    let ct_opt = if info.content_type.is_empty() {
+        None
+    } else {
+        Some(info.content_type.as_str())
+    };
+    let ct = guess_content_type(path, ct_opt);
+    match serve_file(fs, req, path, Some(&ct)).await {
+        Ok(mut resp) => {
             resp.headers
-                .insert("X-Content-Type-Options".to_string(), "nosniff".to_string());
+                .insert("x-content-type-options".to_string(), "nosniff".to_string());
             resp.headers
-                .insert("Content-Security-Policy".to_string(), "sandbox".to_string());
+                .insert("content-security-policy".to_string(), "sandbox".to_string());
             resp
         }
-        Err(e) => err_response(e),
+        Err(ServeError::NotSatisfiable(size)) => range_not_satisfiable(size),
+        Err(ServeError::Fs(e)) => err_response(e),
     }
 }
 

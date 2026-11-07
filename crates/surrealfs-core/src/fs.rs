@@ -1,7 +1,7 @@
 //! Core async SurrealFs implementation for Rust.
 
 use crate::blob::{blob_key, SharedBlobStore};
-use crate::chunking::{chunk_data, decompress_chunk, FastCdcConfig};
+use crate::chunking::{chunk_data, FastCdcConfig};
 use crate::crdt::CrdtDoc;
 use crate::errors::{Result, SurrealFsError};
 use crate::models::{
@@ -409,7 +409,7 @@ impl DbResponse {
     }
 }
 
-fn extract_bytes(val: Option<&Value>) -> Option<Vec<u8>> {
+pub(crate) fn extract_bytes(val: Option<&Value>) -> Option<Vec<u8>> {
     let v = val?;
     if let Some(arr) = v.as_array() {
         return Some(
@@ -1563,98 +1563,6 @@ impl SurrealFs {
             SurrealFsError::Database("Empty response from fn::sfs_upload_commit".to_string())
         })?;
         value_to_serde(v)
-    }
-
-    /// Read an arbitrary byte range from a file, efficiently streaming only covering chunks.
-    pub async fn read_range(&self, path: &str, offset: u64, length: u64) -> Result<Vec<u8>> {
-        let norm = normalize_path(path);
-        let sql = "RETURN fn::sfs_read_manifest($path, $offset, $length, $caller);";
-        let mut res = self
-            .db
-            .query(sql)
-            .bind(("path", norm))
-            .bind(("offset", offset as i64))
-            .bind(("length", length as i64))
-            .bind(("caller", self.caller.clone()))
-            .await?;
-        let val: Option<SValue> = res.take(0usize)?;
-        let s_val = val.ok_or_else(|| {
-            SurrealFsError::NotFound(format!("File not found for read_range: {}", path))
-        })?;
-
-        let json_val: Value = value_to_serde(s_val)?;
-        let chunked = json_val
-            .get("chunked")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-
-        if !chunked {
-            if let Some(s) = json_val.get("data").and_then(|v| v.as_str()) {
-                return Ok(s.as_bytes().to_vec());
-            }
-            let data_bytes = extract_bytes(json_val.get("data")).unwrap_or_default();
-            let start = (offset as usize).min(data_bytes.len());
-            let end = start.saturating_add(length as usize).min(data_bytes.len());
-            return Ok(data_bytes[start..end].to_vec());
-        }
-
-        // Chunked file: reassemble requested range from covering chunks
-        let size = json_val
-            .get("size")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(u64::MAX);
-        let length = length.min(size.saturating_sub(offset));
-        let mut out = vec![0u8; length as usize];
-        let mut max_written: usize = 0;
-        let chunks_arr = json_val
-            .get("chunks")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| {
-                SurrealFsError::Database("Missing chunks in range read response".to_string())
-            })?;
-
-        for c in chunks_arr {
-            let c_offset = c.get("offset").and_then(|v| v.as_u64()).unwrap_or(0);
-            let c_length = c.get("length").and_then(|v| v.as_u64()).unwrap_or(0);
-            let codec = c.get("codec").and_then(|v| v.as_str()).unwrap_or("none");
-
-            let raw_bytes = if c.get("tier").and_then(|v| v.as_str()) == Some("object") {
-                let location = c.get("location").and_then(|v| v.as_str()).ok_or_else(|| {
-                    SurrealFsError::Database("Object chunk without a location".to_string())
-                })?;
-                let store = self.blobs.as_ref().ok_or_else(|| {
-                    SurrealFsError::Storage(
-                        "File content is in an object store, but none is configured".to_string(),
-                    )
-                })?;
-                store.get(location, None).await?
-            } else {
-                extract_bytes(c.get("bytes")).unwrap_or_default()
-            };
-            let decompressed = decompress_chunk(&raw_bytes, codec)
-                .map_err(|e| SurrealFsError::Other(format!("Failed to decompress chunk: {}", e)))?;
-
-            let start = std::cmp::max(offset, c_offset);
-            let end = std::cmp::min(offset + length, c_offset + c_length);
-            if start < end {
-                let chunk_slice_start = (start - c_offset) as usize;
-                let chunk_slice_len = (end - start) as usize;
-                let target_start = (start - offset) as usize;
-
-                if chunk_slice_start + chunk_slice_len <= decompressed.len() {
-                    let target_end = target_start + chunk_slice_len;
-                    out[target_start..target_end].copy_from_slice(
-                        &decompressed[chunk_slice_start..chunk_slice_start + chunk_slice_len],
-                    );
-                    if target_end > max_written {
-                        max_written = target_end;
-                    }
-                }
-            }
-        }
-
-        out.truncate(max_written);
-        Ok(out)
     }
 
     /// Return instant disk usage statistics for a path.
