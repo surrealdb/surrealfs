@@ -393,6 +393,38 @@ the combination that fails. `fn::sfs_search_text` therefore implements
 `match="all"` by comparing analyzed token sets with `array::intersect`. Verified on
 3.2.4.
 
+**A file is chunked iff `blob` is set, and then `file` and `content` are NONE.**
+`is_folder` is computed from "no content, no bytes, no symlink, no blob" — leave
+`blob IS NONE` out of it and every chunked file lists as a directory. The three
+`blob*` fields change together, in one transaction with the deletion of the blob they
+replace (`SurrealFs._replace`): the old blob is read *inside* that transaction, because
+a Python-side read orphans a blob when two writers race, and it is deleted before the
+row is updated because the chunk rules judge a chunk by the file naming it. A swap
+that the table's PERMISSIONS refuse returns an empty result, not an error, so the
+transaction `THROW`s `_DENIED` to roll the deletion back. `write_text` and
+`write_bytes` go through the same path, which is what clears a chunked file's blob.
+
+**`file.blob` is UNIQUE, and `fn::sfs_chunk_allows` is unsound without it.** It
+resolves a chunk's permissions by looking up the one file that names its blob. See
+`docs/permissions.md`. The same function lets a chunk's *owner* read it while no file
+names it, because a `CREATE` returns the row through the select clause and a writer who
+cannot read what it staged sees every write refused.
+
+**Existing databases need `apply_schema` re-run.** The write paths set `blob = NONE`
+on the row and the swap runs `DELETE file_chunk`, neither of which exists before the
+schema that defines them. `evt_file_hash` must not hash NONE — `crypto::md5` rejects
+it — so a write that leaves no text behind clears `hash` and the embedding instead,
+and the file stops matching a vector search for content it no longer holds.
+
+**`query_raw` of a transaction has an entry for `BEGIN` and for `COMMIT`**, so the
+body's last result is `results[-2]` (`_transact`). A failing transaction reports
+`NotExecuted` on every statement before the culprit, and `raise_for_status` skips those
+to name the real error.
+
+**`FileEntry.size` counts text in characters, and a byte range needs bytes.** Anything
+that has to be exact — `Content-Length`, `next_offset` — takes its total from the bytes
+themselves (`read_slice`, the browser's `/raw`), never from `stat().size`.
+
 **`touch` must write `content = ""`, not NONE.** `is_folder` is computed as "no
 content, no bytes, no symlink", so a NONE-content row comes back as a directory.
 

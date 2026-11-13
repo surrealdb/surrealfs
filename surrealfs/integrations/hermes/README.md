@@ -23,6 +23,15 @@ ln -s "$PWD/surrealfs/integrations/hermes" ~/.hermes/plugins/surrealfs
 Nothing here imports Hermes: the plugin contract is a `register` function and a
 manifest, so there is no dependency to install.
 
+## Reading large files
+
+`surrealfs_read_bytes` replies with JSON rather than bare base64: `data_base64`, the file's
+`size`, the `offset` it started at, and `next_offset` (`null` at the end of the
+file). It returns at most 64 KiB per call, so a large or chunked file is read by
+passing `next_offset` back as `offset`. There is no streaming write tool:
+`surrealfs_write_bytes` carries its whole file as base64 in one call, and a large file is
+written from Python with `SurrealFs.write_stream`.
+
 ## The prefix
 
 The tools arrive prefixed — `surrealfs_ls`, `surrealfs_cat`,

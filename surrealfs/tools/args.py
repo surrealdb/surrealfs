@@ -50,6 +50,15 @@ class CatArgs(_Args):
 
 class ReadBytesArgs(_Args):
     path: str = Field(..., description="Binary file to read", min_length=1)
+    offset: int = Field(0, description="Byte to start reading at", ge=0)
+    length: int | None = Field(
+        None,
+        description=(
+            "Bytes to read. At most 64 KiB (65536) come back per call, which is "
+            "also the default; use `next_offset` to read on"
+        ),
+        ge=0,
+    )
 
 
 class TailArgs(_Args):

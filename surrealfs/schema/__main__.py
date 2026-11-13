@@ -4,6 +4,7 @@
     python -m surrealfs.schema --record-auth
     python -m surrealfs.schema --url ws://localhost:8000/rpc --namespace notes
     python -m surrealfs.schema --print          # dump the DDL, connect to nothing
+    python -m surrealfs.schema --gc-chunks      # delete chunks no file points at
 
 Connection details come from flags, falling back to the same ``SURREALDB_*``
 environment variables the examples use. This is the one place in the package
@@ -17,7 +18,7 @@ import asyncio
 import os
 import sys
 
-from . import apply_schema, schema_sql
+from . import apply_schema, gc_chunks, schema_sql
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -58,6 +59,20 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "enforces the file permissions itself (see docs/permissions.md)",
     )
     parser.add_argument(
+        "--gc-chunks",
+        action="store_true",
+        dest="gc_chunks",
+        help="delete chunks of interrupted chunked writes, instead of applying "
+        "the schema",
+    )
+    parser.add_argument(
+        "--gc-grace",
+        type=int,
+        default=3600,
+        metavar="SECONDS",
+        help="with --gc-chunks, leave chunks younger than this (default: 3600)",
+    )
+    parser.add_argument(
         "--print",
         action="store_true",
         dest="print_only",
@@ -73,7 +88,11 @@ async def _apply(args: argparse.Namespace) -> None:
     try:
         await db.signin({"username": args.username, "password": args.password})
         await db.use(args.namespace, args.database)
-        await apply_schema(db, record_auth=args.record_auth)
+        if args.gc_chunks:
+            removed = await gc_chunks(db, grace=args.gc_grace)
+            print(f"Deleted {removed} orphaned chunk(s)")
+        else:
+            await apply_schema(db, record_auth=args.record_auth)
     finally:
         await db.close()
 
@@ -88,9 +107,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         asyncio.run(_apply(args))
     except Exception as exc:  # noqa: BLE001 - a CLI should not show a traceback
-        print(f"Failed to apply schema to {args.url}: {exc}", file=sys.stderr)
+        what = "collect chunks in" if args.gc_chunks else "apply schema to"
+        print(f"Failed to {what} {args.url}: {exc}", file=sys.stderr)
         return 1
 
+    if args.gc_chunks:
+        return 0
     target = f"{args.namespace}/{args.database} on {args.url}"
     tables = "file + user" if args.record_auth else "file"
     print(f"Applied schema ({tables}) to {target}")

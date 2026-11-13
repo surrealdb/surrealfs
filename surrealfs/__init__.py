@@ -42,13 +42,14 @@ from .errors import (
     QueryError,
     SurrealFsError,
 )
-from .fs import ROOT, SurrealFs, default_mode
+from .fs import DEFAULT_CHUNK_SIZE, ROOT, SurrealFs, default_mode
 from .models import FOLDER_CONTENT_TYPE, FileEntry, SearchHit, format_mode
 from .schema import apply_schema, schema_sql
 
 __version__ = "0.2.0"
 
 __all__ = [
+    "DEFAULT_CHUNK_SIZE",
     "FOLDER_CONTENT_TYPE",
     "AlreadyExists",
     "DirectoryNotEmpty",

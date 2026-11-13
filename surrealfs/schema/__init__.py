@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-__all__ = ["FILE_SCHEMA", "RECORD_AUTH_SCHEMA", "apply_schema", "schema_sql"]
+__all__ = [
+    "FILE_SCHEMA",
+    "RECORD_AUTH_SCHEMA",
+    "apply_schema",
+    "gc_chunks",
+    "schema_sql",
+]
 
 _DIR = Path(__file__).resolve().parent
 
@@ -34,3 +40,26 @@ async def apply_schema(db: Any, *, record_auth: bool = False) -> None:
     from ..fs import raise_for_status
 
     raise_for_status(await db.query_raw(schema_sql(record_auth=record_auth)))
+
+
+async def gc_chunks(db: Any, *, grace: int = 3600) -> int:
+    """Delete chunks that no file points at, and return how many went.
+
+    A chunked write stages its chunks before the one transaction that attaches
+    them, so a process killed in between leaves chunks no ``file.blob`` names.
+    ``grace`` is the age in seconds below which a chunk is left alone: a
+    chunk newer than that may belong to an upload still running, and deleting
+    it would make that upload commit a file with its content missing. Needs a
+    system credential, which the table's permissions do not constrain.
+    """
+    from ..fs import raise_for_status
+
+    raw = await db.query_raw(
+        "LET $live = (SELECT VALUE blob FROM file WHERE blob IS NOT NONE);"
+        "LET $dead = (SELECT VALUE id FROM file_chunk WHERE blob NOT IN $live "
+        "AND created_at < time::now() - duration::from_secs($grace));"
+        "DELETE $dead RETURN NONE;"
+        "RETURN array::len($dead);",
+        {"grace": grace},
+    )
+    return int(raise_for_status(raw)[-1])

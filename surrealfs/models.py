@@ -34,7 +34,9 @@ class FileEntry:
 
     ``content`` and ``data`` are only populated by the methods that fetch them
     (``read_text``/``read_bytes``); listing methods leave them ``None`` and set
-    ``size`` instead.
+    ``size`` instead. A chunked file holds neither: its bytes live in
+    ``file_chunk`` rows under ``blob``, ``chunk_size`` bytes each, and ``size`` is
+    their total.
 
     ``gate`` is the schema's computed ancestry check: who may traverse down to
     this row -- ``None`` when every directory above it is world-traversable,
@@ -54,6 +56,8 @@ class FileEntry:
     hash: str = ""
     content: str | None = None
     data: bytes | None = None
+    blob: str | None = None
+    chunk_size: int | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
@@ -63,8 +67,16 @@ class FileEntry:
         return format_mode(self.mode, is_folder=self.is_folder)
 
     @property
+    def is_chunked(self) -> bool:
+        return self.blob is not None
+
+    @property
     def is_binary(self) -> bool:
-        return not self.is_folder and self.content is None and self.data is not None
+        return (
+            not self.is_folder
+            and self.content is None
+            and (self.data is not None or self.is_chunked)
+        )
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> FileEntry:
@@ -91,6 +103,8 @@ class FileEntry:
             hash=row.get("hash") or "",
             content=content,
             data=data,
+            blob=row.get("blob"),
+            chunk_size=row.get("blob_chunk_size"),
             created_at=row.get("created_at"),
             updated_at=row.get("updated_at"),
         )

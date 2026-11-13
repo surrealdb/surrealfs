@@ -172,7 +172,12 @@ async def test_binary_tools_use_base64(ctx):
         "write_bytes",
         {"path": "/x.png", "data_base64": payload, "content_type": "image/png"},
     )
-    assert await call_tool(ctx, "read_bytes", {"path": "/x.png"}) == payload
+    assert json.loads(await call_tool(ctx, "read_bytes", {"path": "/x.png"})) == {
+        "data_base64": payload,
+        "size": 6,
+        "offset": 0,
+        "next_offset": None,
+    }
 
 
 async def test_invalid_base64_is_reported_not_raised(ctx):
